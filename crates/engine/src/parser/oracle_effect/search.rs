@@ -1991,7 +1991,7 @@ pub(super) fn parse_search_destination(lower: &str) -> Zone {
 mod tests {
     use super::*;
     use crate::types::ability::{Comparator, QuantityRef, SharedQuality, SharedQualityRelation};
-    use crate::types::keywords::Keyword;
+    use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost};
 
     #[test]
@@ -2422,6 +2422,49 @@ mod tests {
                 value: Keyword::Enchant(TargetFilter::Typed(target))
             } if target.type_filters.contains(&TypeFilter::Creature)
         )));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_keyword_kind_suffix() {
+        let mut ctx = ParseContext::default();
+        let filter = parse_search_filter("card with augment, reveal it", &mut ctx);
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::HasKeywordKind {
+                value: KeywordKind::Augment
+            }
+        )));
+        assert!(ctx.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parse_search_filter_keeps_unimplemented_combine_after_augment_visible() {
+        use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+
+        let mut ctx = ParseContext::default();
+        let filter = parse_search_filter(
+            "card with augment and combine it with target host you control",
+            &mut ctx,
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::HasKeywordKind {
+                value: KeywordKind::Augment
+            }
+        )));
+        assert!(
+            ctx.diagnostics
+                .iter()
+                .any(|d| matches!(d, OracleDiagnostic::TargetFallback { text, .. } if text == "combine it with target host you control")),
+            "combine continuation should remain visible until runtime combine is implemented: {:?}",
+            ctx.diagnostics
+        );
     }
 
     #[test]

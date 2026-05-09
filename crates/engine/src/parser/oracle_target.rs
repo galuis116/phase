@@ -2874,6 +2874,17 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
         }
     }
 
+    if let Ok((rest, kind)) = value(
+        KeywordKind::Augment,
+        tag::<_, _, OracleError<'_>>("augment"),
+    )
+    .parse(text)
+    {
+        if rest.is_empty() {
+            return Some(KeywordMatch::Kind(kind));
+        }
+    }
+
     if matches!(
         text,
         "flashback" | "cycling" | "escape" | "embalm" | "eternalize" | "harmonize" | "unearth"
@@ -4814,6 +4825,19 @@ mod tests {
             TargetFilter::Typed(
                 TypedFilter::card().properties(vec![FilterProp::HasKeywordKind {
                     value: KeywordKind::Flashback,
+                },])
+            )
+        );
+    }
+
+    #[test]
+    fn card_with_augment_uses_keyword_kind_filter() {
+        let (f, _) = parse_type_phrase("card with augment");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::HasKeywordKind {
+                    value: KeywordKind::Augment,
                 },])
             )
         );
