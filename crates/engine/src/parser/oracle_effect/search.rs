@@ -1,7 +1,9 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
-use nom::combinator::{peek, value};
+use nom::combinator::{map, opt, peek, value};
+use nom::multi::separated_list1;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
@@ -133,15 +135,13 @@ pub(super) fn parse_search_library_details(
         )
     };
 
-    // CR 608.2c + CR 701.23: "with different names" is a printed-text restriction
-    // on the chosen set, not a filter on individual library cards. Detected via a
-    // word-boundary nom scan so it composes with arbitrary preceding filter text
-    // ("for four cards with different names", "for any number of cards with
-    // different names", etc.) without enumerating per-prefix permutations.
+    // CR 608.2c + CR 701.23: "with different names" / "with different powers"
+    // and "don't share ..." are printed-text restrictions on the chosen set,
+    // not filters on individual library cards.
     let selection_constraint = if let Some(constraint) = scan_total_mana_value_constraint(lower) {
         constraint
-    } else if scan_distinct_names_clause(lower) {
-        SearchSelectionConstraint::DistinctNames
+    } else if let Some(constraint) = scan_distinct_qualities_constraint(lower) {
+        constraint
     } else {
         SearchSelectionConstraint::None
     };
@@ -158,17 +158,6 @@ pub(super) fn parse_search_library_details(
         multi_destination,
         multi_enter_tapped,
     }
-}
-
-fn parse_distinct_names_marker(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
-    value(
-        (),
-        nom::sequence::pair(
-            tag::<_, _, OracleError<'_>>("different name"),
-            nom::combinator::opt(tag::<_, _, OracleError<'_>>("s")),
-        ),
-    )
-    .parse(input)
 }
 
 fn scan_total_mana_value_constraint(lower: &str) -> Option<SearchSelectionConstraint> {
@@ -198,14 +187,153 @@ fn parse_total_mana_value_constraint(
     ))
 }
 
-/// CR 608.2c + CR 701.23: Detect the distinct-names printed-text restriction
-/// at any word boundary in the clause. Composable nom scan that matches both
-/// canonical search phrasings ("with different names", "that have different
-/// names") without committing to a fixed count/filter prefix.
-fn scan_distinct_names_clause(lower: &str) -> bool {
-    scan_preceded(lower, "with ", parse_distinct_names_marker).is_some()
-        || scan_preceded(lower, "that have ", parse_distinct_names_marker).is_some()
-        || scan_preceded(lower, "that each have ", parse_distinct_names_marker).is_some()
+/// CR 608.2c + CR 701.23: Detect selected-set distinct-quality restrictions
+/// at any word boundary in the clause. This covers both "with different names"
+/// and "that don't share a mana value, power, toughness, or card type with
+/// each other" without treating either as an individual-card filter suffix.
+fn scan_distinct_qualities_constraint(lower: &str) -> Option<SearchSelectionConstraint> {
+    scan_preceded(lower, "with different ", parse_quality_list_constraint)
+        .or_else(|| scan_preceded(lower, "that have different ", parse_quality_list_constraint))
+        .or_else(|| {
+            scan_preceded(
+                lower,
+                "that each have different ",
+                parse_quality_list_constraint,
+            )
+        })
+        .or_else(|| {
+            scan_preceded(
+                lower,
+                "that don't share ",
+                parse_each_other_quality_constraint,
+            )
+        })
+        .or_else(|| {
+            scan_preceded(
+                lower,
+                "that do not share ",
+                parse_each_other_quality_constraint,
+            )
+        })
+        .map(|(constraint, _)| constraint)
+}
+
+fn parse_quality_list_constraint(
+    input: &str,
+) -> Result<(&str, SearchSelectionConstraint), nom::Err<OracleError<'_>>> {
+    map(parse_search_selection_quality_list, |qualities| {
+        SearchSelectionConstraint::DistinctQualities { qualities }
+    })
+    .parse(input)
+}
+
+fn parse_each_other_quality_constraint(
+    input: &str,
+) -> Result<(&str, SearchSelectionConstraint), nom::Err<OracleError<'_>>> {
+    let (rest, qualities) = terminated(
+        parse_search_selection_quality_list,
+        tag::<_, _, OracleError<'_>>(" with each other"),
+    )
+    .parse(input)?;
+    Ok((
+        rest,
+        SearchSelectionConstraint::DistinctQualities { qualities },
+    ))
+}
+
+fn parse_distinct_quality_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    alt((
+        value(
+            (),
+            preceded(
+                tag::<_, _, OracleError<'_>>("with different "),
+                parse_search_selection_quality_list,
+            ),
+        ),
+        value(
+            (),
+            preceded(
+                tag("that have different "),
+                parse_search_selection_quality_list,
+            ),
+        ),
+        value(
+            (),
+            preceded(
+                tag("that each have different "),
+                parse_search_selection_quality_list,
+            ),
+        ),
+        value(
+            (),
+            preceded(
+                tag("that don't share "),
+                parse_each_other_quality_constraint,
+            ),
+        ),
+        value(
+            (),
+            preceded(
+                tag("that do not share "),
+                parse_each_other_quality_constraint,
+            ),
+        ),
+    ))
+    .parse(input)
+}
+
+fn parse_search_selection_quality_list(
+    input: &str,
+) -> Result<(&str, Vec<SharedQuality>), nom::Err<OracleError<'_>>> {
+    separated_list1(
+        parse_search_selection_quality_separator,
+        parse_search_selection_quality,
+    )
+    .parse(input)
+}
+
+fn parse_search_selection_quality_separator(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>(", or "),
+            tag(", and "),
+            tag(", "),
+            tag(" or "),
+            tag(" and "),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_search_selection_quality(
+    input: &str,
+) -> Result<(&str, SharedQuality), nom::Err<OracleError<'_>>> {
+    preceded(
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("a "),
+            tag::<_, _, OracleError<'_>>("an "),
+        ))),
+        alt((
+            value(
+                SharedQuality::ManaValue,
+                alt((tag("mana values"), tag("mana value"))),
+            ),
+            value(SharedQuality::Power, alt((tag("powers"), tag("power")))),
+            value(
+                SharedQuality::Toughness,
+                alt((tag("toughnesses"), tag("toughness"))),
+            ),
+            value(
+                SharedQuality::CardType,
+                alt((tag("card types"), tag("card type"))),
+            ),
+            value(SharedQuality::Name, alt((tag("names"), tag("name")))),
+        )),
+    )
+    .parse(input)
 }
 
 /// CR 701.23a + CR 107.1: Split a search filter tail on conjunction boundaries
@@ -282,6 +410,13 @@ fn parse_filter_region_terminator(input: &str) -> Option<&str> {
         ", then ",
         ", shuffle ",
         ", exile ",
+        " and reveal ",
+        " with different names",
+        " with different powers",
+        " that have different ",
+        " that each have different ",
+        " that don't share ",
+        " that do not share ",
     ]
     .into_iter()
     .filter_map(|delimiter| parse_filter_region_delimiter(input, delimiter))
@@ -1513,6 +1648,14 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
+        // CR 608.2c: distinct-quality suffixes constrain the chosen set, not
+        // individual cards. The constraint is already encoded upstream via
+        // `scan_distinct_qualities_constraint`; this arm only consumes the marker.
+        if let Ok((rest, _)) = parse_distinct_quality_suffix(remaining) {
+            remaining = rest.trim_start();
+            continue;
+        }
+
         if let Ok((rest, prop)) = parse_shared_quality_clause(remaining) {
             last_shared_quality_reference = match &prop {
                 FilterProp::SharesQuality {
@@ -1522,29 +1665,6 @@ fn parse_search_filter_suffixes(
                 _ => None,
             };
             suffix.properties.push(prop);
-            remaining = rest.trim_start();
-            continue;
-        }
-
-        // CR 608.2c: distinct-names suffixes constrain the chosen set, not
-        // individual cards. The constraint is already encoded upstream via
-        // `scan_distinct_names_clause`; this arm only consumes the marker.
-        if let Ok((rest, _)) = alt((
-            nom::sequence::preceded(
-                tag::<_, _, OracleError<'_>>("with "),
-                parse_distinct_names_marker,
-            ),
-            nom::sequence::preceded(
-                tag::<_, _, OracleError<'_>>("that have "),
-                parse_distinct_names_marker,
-            ),
-            nom::sequence::preceded(
-                tag::<_, _, OracleError<'_>>("that each have "),
-                parse_distinct_names_marker,
-            ),
-        ))
-        .parse(remaining)
-        {
             remaining = rest.trim_start();
             continue;
         }
@@ -2975,7 +3095,7 @@ mod tests {
 
     /// CR 608.2c + CR 701.23: Gifts Ungiven — "search your library for up to
     /// four cards with different names". The "with different names" clause
-    /// must surface as `SearchSelectionConstraint::DistinctNames` rather than
+    /// must surface as `SearchSelectionConstraint::DistinctQualities` rather than
     /// silently degrading the per-card filter.
     #[test]
     fn search_with_different_names_emits_distinct_names_constraint() {
@@ -2985,7 +3105,9 @@ mod tests {
         );
         assert_eq!(
             details.selection_constraint,
-            SearchSelectionConstraint::DistinctNames
+            SearchSelectionConstraint::DistinctQualities {
+                qualities: vec![SharedQuality::Name],
+            }
         );
         assert!(details.up_to);
         assert_eq!(details.count, QuantityExpr::Fixed { value: 4 });
@@ -2999,7 +3121,9 @@ mod tests {
         );
         assert_eq!(
             details.selection_constraint,
-            SearchSelectionConstraint::DistinctNames
+            SearchSelectionConstraint::DistinctQualities {
+                qualities: vec![SharedQuality::Name],
+            }
         );
         assert!(details.up_to);
         assert_eq!(details.count, QuantityExpr::Fixed { value: 5 });
@@ -3013,10 +3137,58 @@ mod tests {
         );
         assert_eq!(
             details.selection_constraint,
-            SearchSelectionConstraint::DistinctNames
+            SearchSelectionConstraint::DistinctQualities {
+                qualities: vec![SharedQuality::Name],
+            }
         );
         assert!(details.up_to);
         assert_eq!(details.count, QuantityExpr::Fixed { value: 5 });
+    }
+
+    #[test]
+    fn search_with_different_powers_emits_distinct_quality_constraint() {
+        let mut ctx = ParseContext::default();
+        let details = parse_search_library_details(
+            "search your library for up to four creature cards with different powers and reveal them",
+            &mut ctx,
+        );
+        assert_eq!(
+            details.selection_constraint,
+            SearchSelectionConstraint::DistinctQualities {
+                qualities: vec![SharedQuality::Power],
+            }
+        );
+        assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic,
+            OracleDiagnostic::TargetFallback { context, .. }
+                if context == "search-filter-suffix unmatched"
+        )));
+    }
+
+    #[test]
+    fn search_that_dont_share_quality_list_emits_distinct_quality_constraint() {
+        let mut ctx = ParseContext::default();
+        let details = parse_search_library_details(
+            "search your library for up to four cards that don't share a mana value, power, toughness, or card type with each other",
+            &mut ctx,
+        );
+        assert_eq!(
+            details.selection_constraint,
+            SearchSelectionConstraint::DistinctQualities {
+                qualities: vec![
+                    SharedQuality::ManaValue,
+                    SharedQuality::Power,
+                    SharedQuality::Toughness,
+                    SharedQuality::CardType,
+                ],
+            }
+        );
+        assert_eq!(details.filter, TargetFilter::Typed(TypedFilter::card()));
+        assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic,
+            OracleDiagnostic::TargetFallback { context, .. }
+                if context == "search-filter-suffix unmatched"
+        )));
     }
 
     #[test]

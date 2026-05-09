@@ -8574,25 +8574,55 @@ pub(crate) fn parse_effect_chain_ir(
         //    ChangeZone) that become `defs.last()`. We must simulate this to match followup
         //    patterns that absorb paraphrase chunks (e.g., "put it onto the battlefield"
         //    after SearchLibrary).
-        let effective_prev = clauses.iter().rev().find(|c| !c.absorbed_by_followup);
-        let effective_prev_effect = effective_prev.map(|previous| {
-            if let Some(ref ic) = previous.intrinsic_continuation {
-                // Build a temporary defs list, apply the continuation, and use the last effect.
-                let mut temp_defs =
-                    vec![AbilityDefinition::new(kind, previous.parsed.effect.clone())];
-                apply_clause_continuation(&mut temp_defs, ic.clone(), kind);
-                (*temp_defs.last().unwrap().effect).clone()
-            } else if let Some(ref _fc) = previous.followup_continuation {
-                // A non-absorbed clause with a followup continuation means the continuation
-                // was applied to the clause BEFORE it. Simulate to get patched effect.
-                // Find the clause before `previous` (skip absorbed), apply the followup.
-                // However, the simple case: the continuation patches the previous in place
-                // (e.g., DigFromAmong patches the Dig), so the effective last is still the
-                // previous effect type. For now, just return the raw effect.
-                previous.parsed.effect.clone()
+        let absorbed_choice_prev = clauses.last().and_then(|previous| {
+            if previous.absorbed_by_followup {
+                match previous.followup_continuation.as_ref() {
+                    Some(ContinuationAst::ChooseFromExile { count, chooser }) => {
+                        Some(Effect::ChooseFromZone {
+                            count: *count,
+                            zone: Zone::Exile,
+                            chooser: *chooser,
+                            up_to: false,
+                            constraint: None,
+                        })
+                    }
+                    _ => None,
+                }
             } else {
-                previous.parsed.effect.clone()
+                None
             }
+        });
+        let effective_prev = clauses.iter().rev().find(|c| !c.absorbed_by_followup);
+        let effective_prev_effect = absorbed_choice_prev.or_else(|| {
+            effective_prev.map(|previous| {
+                if let Some(ref ic) = previous.intrinsic_continuation {
+                    // Build a temporary defs list, apply the continuation, and use the last effect.
+                    let mut temp_defs =
+                        vec![AbilityDefinition::new(kind, previous.parsed.effect.clone())];
+                    apply_clause_continuation(&mut temp_defs, ic.clone(), kind);
+                    (*temp_defs.last().unwrap().effect).clone()
+                } else if let Some(ref _fc) = previous.followup_continuation {
+                    // A non-absorbed clause with a followup continuation means the continuation
+                    // was applied to the clause BEFORE it. Simulate to get patched effect.
+                    // Find the clause before `previous` (skip absorbed), apply the followup.
+                    match previous.followup_continuation.as_ref() {
+                        Some(ContinuationAst::ChooseFromExile { count, chooser }) => {
+                            Effect::ChooseFromZone {
+                                count: *count,
+                                zone: Zone::Exile,
+                                chooser: *chooser,
+                                up_to: false,
+                                constraint: None,
+                            }
+                        }
+                        // Simple patch-in-place continuations leave the previous
+                        // effect type as the effective lookback target.
+                        _ => previous.parsed.effect.clone(),
+                    }
+                } else {
+                    previous.parsed.effect.clone()
+                }
+            })
         });
         let followup_continuation = effective_prev_effect
             .as_ref()

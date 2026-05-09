@@ -457,6 +457,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             } => {
                 let name = match quality {
                     SharedQuality::Name => "name",
+                    SharedQuality::ManaValue => "mana value",
+                    SharedQuality::Power => "power",
+                    SharedQuality::Toughness => "toughness",
                     SharedQuality::CreatureType => "creature type",
                     SharedQuality::Color => "color",
                     SharedQuality::CardType => "card type",

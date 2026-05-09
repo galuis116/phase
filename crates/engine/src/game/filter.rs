@@ -2425,25 +2425,40 @@ fn is_land_type(subtype: &str) -> bool {
         .any(|land_type| subtype.eq_ignore_ascii_case(land_type))
 }
 
+struct SharedQualitySource<'a> {
+    name: &'a str,
+    power: Option<i32>,
+    toughness: Option<i32>,
+    mana_value: u32,
+    core_types: &'a [CoreType],
+    subtypes: &'a [String],
+    colors: &'a [ManaColor],
+    keywords: &'a [Keyword],
+}
+
 fn shared_quality_values(
-    name: &str,
-    core_types: &[CoreType],
-    subtypes: &[String],
-    colors: &[ManaColor],
-    keywords: &[Keyword],
+    source: SharedQualitySource<'_>,
     quality: &SharedQuality,
     all_creature_types: &[String],
 ) -> HashSet<String> {
     match quality {
         SharedQuality::Name => {
-            if name.is_empty() {
+            if source.name.is_empty() {
                 HashSet::new()
             } else {
-                HashSet::from([name.to_ascii_lowercase()])
+                HashSet::from([source.name.to_ascii_lowercase()])
             }
         }
+        SharedQuality::ManaValue => HashSet::from([source.mana_value.to_string()]),
+        SharedQuality::Power => source
+            .power
+            .map_or_else(HashSet::new, |value| HashSet::from([value.to_string()])),
+        SharedQuality::Toughness => source
+            .toughness
+            .map_or_else(HashSet::new, |value| HashSet::from([value.to_string()])),
         SharedQuality::CreatureType => {
-            if keywords
+            if source
+                .keywords
                 .iter()
                 .any(|keyword| matches!(keyword, Keyword::Changeling))
             {
@@ -2453,7 +2468,8 @@ fn shared_quality_values(
                     .collect();
             }
 
-            subtypes
+            source
+                .subtypes
                 .iter()
                 .filter(|subtype| {
                     all_creature_types
@@ -2463,15 +2479,18 @@ fn shared_quality_values(
                 .map(|subtype| subtype.to_ascii_lowercase())
                 .collect()
         }
-        SharedQuality::Color => colors
+        SharedQuality::Color => source
+            .colors
             .iter()
             .map(|color| format!("{color:?}").to_ascii_lowercase())
             .collect(),
-        SharedQuality::CardType => core_types
+        SharedQuality::CardType => source
+            .core_types
             .iter()
             .map(|card_type| format!("{card_type:?}").to_ascii_lowercase())
             .collect(),
-        SharedQuality::LandType => subtypes
+        SharedQuality::LandType => source
+            .subtypes
             .iter()
             .filter(|subtype| is_land_type(subtype))
             .map(|subtype| subtype.to_ascii_lowercase())
@@ -2485,11 +2504,16 @@ fn object_shared_quality_values(
     all_creature_types: &[String],
 ) -> HashSet<String> {
     shared_quality_values(
-        &obj.name,
-        &obj.card_types.core_types,
-        &obj.card_types.subtypes,
-        &obj.color,
-        &obj.keywords,
+        SharedQualitySource {
+            name: &obj.name,
+            power: obj.power,
+            toughness: obj.toughness,
+            mana_value: obj.mana_cost.mana_value(),
+            core_types: &obj.card_types.core_types,
+            subtypes: &obj.card_types.subtypes,
+            colors: &obj.color,
+            keywords: &obj.keywords,
+        },
         quality,
         all_creature_types,
     )
@@ -2501,11 +2525,16 @@ fn lki_shared_quality_values(
     all_creature_types: &[String],
 ) -> HashSet<String> {
     shared_quality_values(
-        &lki.name,
-        &lki.card_types,
-        &lki.subtypes,
-        &lki.colors,
-        &lki.keywords,
+        SharedQualitySource {
+            name: &lki.name,
+            power: lki.power,
+            toughness: lki.toughness,
+            mana_value: lki.mana_value,
+            core_types: &lki.card_types,
+            subtypes: &lki.subtypes,
+            colors: &lki.colors,
+            keywords: &lki.keywords,
+        },
         quality,
         all_creature_types,
     )

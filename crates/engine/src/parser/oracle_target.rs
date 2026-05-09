@@ -2862,6 +2862,12 @@ fn parse_shared_quality(input: &str) -> nom::IResult<&str, SharedQuality, Oracle
     alt((
         value(SharedQuality::Name, tag("names")),
         value(SharedQuality::Name, tag("name")),
+        value(SharedQuality::ManaValue, tag("mana values")),
+        value(SharedQuality::ManaValue, tag("mana value")),
+        value(SharedQuality::Power, tag("powers")),
+        value(SharedQuality::Power, tag("power")),
+        value(SharedQuality::Toughness, tag("toughnesses")),
+        value(SharedQuality::Toughness, tag("toughness")),
         value(SharedQuality::CreatureType, tag("creature types")),
         value(SharedQuality::CreatureType, tag("creature type")),
         value(SharedQuality::CardType, tag("card types")),

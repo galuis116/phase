@@ -64,10 +64,11 @@ pub enum SearchSelectionConstraint {
     /// CR 107.1c: No restriction beyond `count` (and `up_to`).
     #[default]
     None,
-    /// CR 608.2c: The spell's printed text dictates "with different names" —
-    /// no two chosen cards may share a name. Used by Gifts Ungiven and the
-    /// "for X cards with different names" tutor class.
-    DistinctNames,
+    /// CR 608.2c: The spell's printed text constrains the selected set by
+    /// object qualities — e.g. "with different names", "with different
+    /// powers", or "that don't share a mana value, power, toughness, or card
+    /// type with each other".
+    DistinctQualities { qualities: Vec<SharedQuality> },
     /// CR 608.2c + CR 202.3: The chosen set's combined mana value must satisfy
     /// the printed comparator. Used by "cards with total mana value N or less"
     /// tutor text, where the constraint applies across the selected set rather
@@ -1323,6 +1324,12 @@ pub enum AttachmentKind {
 pub enum SharedQuality {
     /// CR 201.2: object names compared by shared name.
     Name,
+    /// CR 202.3: mana value.
+    ManaValue,
+    /// CR 208.1: power.
+    Power,
+    /// CR 208.1: toughness.
+    Toughness,
     CreatureType,
     Color,
     CardType,

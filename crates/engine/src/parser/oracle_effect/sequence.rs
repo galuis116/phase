@@ -72,6 +72,116 @@ fn parse_choose_count_from_text(lower: &str) -> u32 {
         .unwrap_or(1)
 }
 
+fn parse_choice_partition_destinations(lower: &str) -> Option<(Zone, Zone)> {
+    parse_put_choice_partition_destinations(lower)
+        .or_else(|| parse_shuffle_choice_partition_destinations(lower))
+}
+
+fn parse_put_choice_partition_destinations(lower: &str) -> Option<(Zone, Zone)> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("put ").parse(lower).ok()?;
+    let (rest, _) = parse_chosen_cards_reference(rest).ok()?;
+    let (rest, chosen_destination) = parse_choice_partition_destination(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" and ").parse(rest).ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("put ")).parse(rest).ok()?;
+    let (rest, _) = parse_rest_cards_reference(rest).ok()?;
+    let (_, rest_destination) = parse_choice_partition_destination(rest).ok()?;
+    Some((chosen_destination, rest_destination))
+}
+
+fn parse_shuffle_choice_partition_destinations(lower: &str) -> Option<(Zone, Zone)> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("shuffle ").parse(lower).ok()?;
+    let (rest, _) = parse_chosen_cards_reference(rest).ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>(" into your library"),
+        tag(" into their library"),
+        tag(" into its owner's library"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" and put ").parse(rest).ok()?;
+    let (rest, _) = parse_rest_cards_reference(rest).ok()?;
+    let (_, rest_destination) = parse_choice_partition_destination(rest).ok()?;
+    Some((Zone::Library, rest_destination))
+}
+
+fn parse_chosen_cards_reference(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("the chosen cards"),
+            tag("the chosen card"),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_rest_cards_reference(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("the rest"),
+            tag("the other cards"),
+            tag("the other card"),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_choice_partition_destination(
+    input: &str,
+) -> Result<(&str, Zone), nom::Err<OracleError<'_>>> {
+    alt((
+        value(
+            Zone::Graveyard,
+            alt((
+                tag::<_, _, OracleError<'_>>(" into your graveyard"),
+                tag(" into their graveyard"),
+                tag(" into its owner's graveyard"),
+            )),
+        ),
+        value(
+            Zone::Hand,
+            alt((
+                tag::<_, _, OracleError<'_>>(" into your hand"),
+                tag(" into their hand"),
+            )),
+        ),
+        value(
+            Zone::Library,
+            alt((
+                tag::<_, _, OracleError<'_>>(" into your library"),
+                tag(" into their library"),
+                tag(" into its owner's library"),
+                tag(" on the bottom of your library"),
+                tag(" on the bottom of their library"),
+            )),
+        ),
+        value(
+            Zone::Exile,
+            alt((
+                tag::<_, _, OracleError<'_>>(" into exile"),
+                tag(" in exile"),
+            )),
+        ),
+    ))
+    .parse(input)
+}
+
+fn append_definition_to_sub_chain(ability: &mut AbilityDefinition, next: AbilityDefinition) {
+    let mut cursor = ability;
+    loop {
+        if cursor.sub_ability.is_none() {
+            cursor.sub_ability = Some(Box::new(next));
+            break;
+        }
+        cursor = cursor
+            .sub_ability
+            .as_mut()
+            .expect("sub_ability checked above")
+            .as_mut();
+    }
+}
+
 fn parse_put_all_back_in_any_order(lower: &str) -> bool {
     (
         tag::<_, _, OracleError<'_>>("put "),
@@ -225,11 +335,17 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     // never sits at a word start.
                     let inside_except_clause =
                         nom_primitives::scan_contains(&before_lower, "except ");
+                    let choice_partition_remainder =
+                        nom_primitives::scan_contains(&before_lower, "the chosen card")
+                            && (opt(tag::<_, _, OracleError<'_>>("put ")), tag("the rest"))
+                                .parse(remainder_trimmed)
+                                .is_ok();
                     let suppress = nom_primitives::scan_contains(&before_lower, "from among")
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation
                         || search_with_that_name
-                        || inside_except_clause;
+                        || inside_except_clause
+                        || choice_partition_remainder;
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();
@@ -912,6 +1028,62 @@ pub(super) fn apply_clause_continuation(
                 }
             }
         }
+        ContinuationAst::ChoicePartitionDestinations {
+            chosen_destination,
+            rest_destination,
+        } => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if matches!(&*previous.effect, Effect::ChooseFromZone { .. }) {
+                let existing_tail = previous.sub_ability.take();
+                let mut chosen_def = AbilityDefinition::new(
+                    kind,
+                    Effect::ChangeZone {
+                        origin: None,
+                        destination: chosen_destination,
+                        target: TargetFilter::Any,
+                        owner_library: false,
+                        enter_transformed: false,
+                        under_your_control: false,
+                        enter_tapped: false,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                    },
+                );
+                let mut rest_def = AbilityDefinition::new(
+                    kind,
+                    Effect::ChangeZone {
+                        origin: None,
+                        destination: rest_destination,
+                        target: TargetFilter::Any,
+                        owner_library: false,
+                        enter_transformed: false,
+                        under_your_control: false,
+                        enter_tapped: false,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                    },
+                );
+                if (chosen_destination == Zone::Library || rest_destination == Zone::Library)
+                    && existing_tail.is_none()
+                {
+                    rest_def.sub_ability = Some(Box::new(AbilityDefinition::new(
+                        kind,
+                        Effect::Shuffle {
+                            target: TargetFilter::Controller,
+                        },
+                    )));
+                }
+                if let Some(tail) = existing_tail {
+                    append_definition_to_sub_chain(&mut rest_def, *tail);
+                }
+                chosen_def.sub_ability = Some(Box::new(rest_def));
+                previous.sub_ability = Some(Box::new(chosen_def));
+            }
+        }
         ContinuationAst::EntersTappedAttacking => {
             let Some(previous) = defs.last_mut() else {
                 return;
@@ -1089,6 +1261,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::ChooseFromExile { .. } => true,
         ContinuationAst::SearchResultClauseHandled => true,
         ContinuationAst::PutChoiceRemainderOnBottom => true,
+        ContinuationAst::ChoicePartitionDestinations { .. } => true,
         ContinuationAst::EntersTappedAttacking => true,
         ContinuationAst::TokenEntersWithCounters { .. } => true,
         ContinuationAst::DigFromAmong { .. } => true,
@@ -1603,6 +1776,12 @@ pub(super) fn parse_followup_continuation_ast(
         {
             Some(ContinuationAst::PutChoiceRemainderOnBottom)
         }
+        Effect::ChooseFromZone { .. } => parse_choice_partition_destinations(&lower).map(
+            |(chosen_destination, rest_destination)| ContinuationAst::ChoicePartitionDestinations {
+                chosen_destination,
+                rest_destination,
+            },
+        ),
         // CR 700.2: "Choose/You choose/An opponent chooses/Target opponent chooses one/two/N
         // of them/those" after ChangeZone, ExileTop, RevealTop, or RevealHand →
         // ChooseFromZone building block
@@ -2017,6 +2196,27 @@ mod tests {
     }
 
     // --- Bare " and " splitting: negative cases (must NOT split) ---
+
+    #[test]
+    fn bare_and_preserves_chosen_rest_choice_partition() {
+        let chunks =
+            clause_texts("Put the chosen cards into your graveyard and the rest into your hand.");
+        assert_eq!(
+            chunks,
+            vec!["Put the chosen cards into your graveyard and the rest into your hand"]
+        );
+    }
+
+    #[test]
+    fn bare_and_preserves_shuffle_chosen_rest_choice_partition() {
+        let chunks = clause_texts(
+            "Shuffle the chosen cards into your library and put the rest into your hand.",
+        );
+        assert_eq!(
+            chunks,
+            vec!["Shuffle the chosen cards into your library and put the rest into your hand"]
+        );
+    }
 
     #[test]
     fn bare_and_does_not_split_creature_and_all_other() {
@@ -2514,6 +2714,52 @@ mod tests {
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Graveyard),
+            })
+        );
+    }
+
+    #[test]
+    fn choose_from_zone_partitions_chosen_and_rest_destinations() {
+        let choose = Effect::ChooseFromZone {
+            count: 2,
+            zone: Zone::Exile,
+            chooser: Chooser::Opponent,
+            up_to: false,
+            constraint: None,
+        };
+        let result = parse_followup_continuation_ast(
+            "Put the chosen cards into your graveyard and the rest into your hand.",
+            &choose,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            result,
+            Some(ContinuationAst::ChoicePartitionDestinations {
+                chosen_destination: Zone::Graveyard,
+                rest_destination: Zone::Hand,
+            })
+        );
+    }
+
+    #[test]
+    fn choose_from_zone_partitions_shuffle_chosen_and_rest_destinations() {
+        let choose = Effect::ChooseFromZone {
+            count: 2,
+            zone: Zone::Exile,
+            chooser: Chooser::Opponent,
+            up_to: false,
+            constraint: None,
+        };
+        let result = parse_followup_continuation_ast(
+            "Shuffle the chosen cards into your library and put the rest into your hand.",
+            &choose,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            result,
+            Some(ContinuationAst::ChoicePartitionDestinations {
+                chosen_destination: Zone::Library,
+                rest_destination: Zone::Hand,
             })
         );
     }

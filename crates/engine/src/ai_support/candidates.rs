@@ -606,7 +606,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             // clones state + applies the action per candidate. Without a cap, a
             // count=4 search against an 80-card library produces ~C(80,4) ≈ 1.6M
             // combinations and stalls validation for hours. The cap is constraint-
-            // aware so DistinctNames searches collapse duplicate-named entries
+            // aware so distinct-name searches collapse duplicate-named entries
             // before combinatorial explosion (Gifts Ungiven against an 80-card pool
             // with 8 distinct names → 8 candidate ids, C(8,4)=70 legal combos).
             //
@@ -3010,7 +3010,7 @@ fn station_target_candidates(
 
 /// CR 608.2c: Cap a SearchChoice candidate pool to at most `cap` ids before
 /// the combinatorial enumerator runs. Constraint-aware: under
-/// `DistinctNames` the canonical id per printed name is kept (further
+/// distinct-name constraints keep the canonical id per printed name (further
 /// duplicates are inert because they cannot legally appear in any chosen set
 /// alongside their twin), so the cap collapses sized libraries with many
 /// repeated names down to the unique-name set first. The cap exists strictly
@@ -3025,13 +3025,15 @@ fn cap_search_choice_pool(
     constraint: &crate::types::ability::SearchSelectionConstraint,
     cap: usize,
 ) -> Vec<crate::types::identifiers::ObjectId> {
-    use crate::types::ability::SearchSelectionConstraint;
+    use crate::types::ability::{SearchSelectionConstraint, SharedQuality};
     // CR 201.2: Two cards "have the same name" iff their printed name strings
-    // match. Under DistinctNames, keep the first id encountered per name —
+    // match. Under distinct-name constraints, keep the first id encountered per name —
     // later duplicates can never appear in a legal chosen set with their twin
     // and only inflate the candidate count.
     let collapsed: Vec<crate::types::identifiers::ObjectId> = match constraint {
-        SearchSelectionConstraint::DistinctNames => {
+        SearchSelectionConstraint::DistinctQualities { qualities }
+            if matches!(qualities.as_slice(), [SharedQuality::Name]) =>
+        {
             let mut seen = std::collections::HashSet::new();
             cards
                 .iter()
@@ -3042,9 +3044,9 @@ fn cap_search_choice_pool(
                 })
                 .collect()
         }
-        SearchSelectionConstraint::None | SearchSelectionConstraint::TotalManaValue { .. } => {
-            cards.to_vec()
-        }
+        SearchSelectionConstraint::None
+        | SearchSelectionConstraint::DistinctQualities { .. }
+        | SearchSelectionConstraint::TotalManaValue { .. } => cards.to_vec(),
     };
     if collapsed.len() <= cap {
         collapsed
@@ -3705,15 +3707,15 @@ mod tests {
     }
 
     /// CR 608.2c + CR 701.23: SearchChoice candidate enumeration must drop
-    /// combinations that violate `SearchSelectionConstraint::DistinctNames`.
-    /// The engine pool cap is also constraint-aware: under DistinctNames the
+    /// combinations that violate distinct-name search constraints.
+    /// The engine pool cap is also constraint-aware: under distinct names the
     /// duplicate-named entry is collapsed to its canonical id before
     /// combinations are generated (a duplicate cannot legally appear in any
     /// chosen set with its twin), so a 5-card pool with one duplicate
     /// collapses to 4 unique-name ids → C(4,2) = 6 combinations.
     #[test]
     fn search_choice_candidates_filter_distinct_names() {
-        use crate::types::ability::SearchSelectionConstraint;
+        use crate::types::ability::{SearchSelectionConstraint, SharedQuality};
         use crate::types::identifiers::ObjectId;
 
         let mut state = GameState::new_two_player(42);
@@ -3747,7 +3749,7 @@ mod tests {
             "C(5,2) baseline must be 10 combinations when no constraint applies"
         );
 
-        // With DistinctNames the engine pool cap collapses the duplicate
+        // With distinct names the engine pool cap collapses the duplicate
         // Alpha to a single canonical id (5 → 4 ids), and the post-hoc
         // selection-constraint filter then enumerates C(4,2) = 6 combos —
         // every one of which contains two distinct names.
@@ -3757,13 +3759,15 @@ mod tests {
             count: 2,
             reveal: false,
             up_to: false,
-            constraint: SearchSelectionConstraint::DistinctNames,
+            constraint: SearchSelectionConstraint::DistinctQualities {
+                qualities: vec![SharedQuality::Name],
+            },
         };
         let filtered = candidate_actions_broad(&state);
         assert_eq!(
             filtered.len(),
             6,
-            "DistinctNames must collapse duplicate-named ids before enumeration"
+            "distinct names must collapse duplicate-named ids before enumeration"
         );
         for action in &filtered {
             let GameAction::SelectCards { cards } = &action.action else {
@@ -3791,7 +3795,7 @@ mod tests {
     /// previously stalled `validate_candidates` for hours.
     #[test]
     fn search_choice_distinct_names_caps_large_pool_to_unique_names() {
-        use crate::types::ability::SearchSelectionConstraint;
+        use crate::types::ability::{SearchSelectionConstraint, SharedQuality};
         use crate::types::identifiers::ObjectId;
 
         let mut state = GameState::new_two_player(42);
@@ -3813,7 +3817,9 @@ mod tests {
             count: 4,
             reveal: false,
             up_to: true,
-            constraint: SearchSelectionConstraint::DistinctNames,
+            constraint: SearchSelectionConstraint::DistinctQualities {
+                qualities: vec![SharedQuality::Name],
+            },
         };
         let actions = candidate_actions_broad(&state);
         // Σ_{k=0..=4} C(8, k) = 1 + 8 + 28 + 56 + 70 = 163.

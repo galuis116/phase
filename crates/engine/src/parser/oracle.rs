@@ -6773,6 +6773,54 @@ mod tests {
     }
 
     #[test]
+    fn choice_partition_after_search_routes_chosen_and_rest() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{AbilityKind, Chooser};
+
+        let chain = parse_effect_chain(
+            "Search your library for up to four cards with different names and reveal them. Target opponent chooses two of those cards. Put the chosen cards into your graveyard and the rest into your hand. Then shuffle.",
+            AbilityKind::Spell,
+        );
+        let choose = chain
+            .sub_ability
+            .as_ref()
+            .and_then(|search_move| search_move.sub_ability.as_ref())
+            .expect("search move should chain to ChooseFromZone");
+        assert!(matches!(
+            &*choose.effect,
+            Effect::ChooseFromZone {
+                count: 2,
+                chooser: Chooser::Opponent,
+                ..
+            }
+        ));
+        let chosen_move = choose
+            .sub_ability
+            .as_ref()
+            .expect("choice should route chosen cards first");
+        assert!(matches!(
+            &*chosen_move.effect,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Graveyard,
+                ..
+            }
+        ));
+        let rest_move = chosen_move
+            .sub_ability
+            .as_ref()
+            .expect("chosen move should route the unchosen remainder");
+        assert!(matches!(
+            &*rest_move.effect,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Hand,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn emergent_growth_routes_to_spell_not_static() {
         // Emergent Growth: compound pump + must-be-blocked should route to spell
         // effect parsing, not static parsing.

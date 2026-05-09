@@ -11,8 +11,8 @@ use engine::types::ability::{
     ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
     GainLifePlayer, LibraryPosition, ManaProduction, ManaSpendRestriction,
     ModalSelectionConstraint, MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtValue,
-    QuantityExpr, QuantityRef, SearchSelectionConstraint, StaticDefinition, TargetFilter,
-    TriggerDefinition, TypedFilter,
+    QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition,
+    TargetFilter, TriggerDefinition, TypedFilter,
 };
 use engine::types::game_state::DistributionUnit;
 use engine::types::mana::ManaCost;
@@ -5861,7 +5861,9 @@ fn convert_multi_filter_search_library(
 
 fn group_filter_to_search_constraint(group: &GroupFilter) -> ConvResult<SearchSelectionConstraint> {
     match group {
-        GroupFilter::DifferentNames => Ok(SearchSelectionConstraint::DistinctNames),
+        GroupFilter::DifferentNames => Ok(SearchSelectionConstraint::DistinctQualities {
+            qualities: vec![SharedQuality::Name],
+        }),
         other => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "SearchSelectionConstraint",
             needed_variant: format!("GroupFilter::{}", group_filter_tag(other)),
@@ -6570,9 +6572,13 @@ mod tests {
             Effect::SearchLibrary {
                 count: QuantityExpr::UpTo { .. },
                 reveal: true,
-                selection_constraint: SearchSelectionConstraint::DistinctNames,
+                selection_constraint,
                 ..
-            }
+            } if matches!(
+                selection_constraint,
+                SearchSelectionConstraint::DistinctQualities { qualities }
+                    if matches!(qualities.as_slice(), [SharedQuality::Name])
+            )
         ));
         assert!(matches!(
             &effects[1],

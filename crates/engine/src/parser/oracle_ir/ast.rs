@@ -218,6 +218,13 @@ pub(crate) enum ContinuationAst {
     /// already moved chosen cards out of the library. Appends a library-bottom placement
     /// step onto the preceding ChangeZone so the unchosen cards are handled by that chain.
     PutChoiceRemainderOnBottom,
+    /// "Put/shuffle the chosen cards into <zone> and put the rest into <zone>"
+    /// after a tracked-set choice. The choice resolver injects chosen cards into
+    /// the first continuation and unchosen cards into its immediate sub-ability.
+    ChoicePartitionDestinations {
+        chosen_destination: Zone,
+        rest_destination: Zone,
+    },
     /// "Put the rest on the bottom/into your graveyard" after Dig/RevealTop —
     /// sets `rest_destination` on the preceding Dig effect. The destination is
     /// parsed from the text (bottom of library, graveyard, hand, etc.).

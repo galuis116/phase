@@ -2061,7 +2061,7 @@ mod tests {
     /// uniquely-named cards.
     #[test]
     fn gifts_ungiven_search_choice_returns_quickly_with_distinct_names() {
-        use engine::types::ability::SearchSelectionConstraint;
+        use engine::types::ability::{SearchSelectionConstraint, SharedQuality};
         use std::time::Instant;
 
         let mut state = make_state();
@@ -2095,7 +2095,9 @@ mod tests {
             count: 4,
             reveal: true,
             up_to: true,
-            constraint: SearchSelectionConstraint::DistinctNames,
+            constraint: SearchSelectionConstraint::DistinctQualities {
+                qualities: vec![SharedQuality::Name],
+            },
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
