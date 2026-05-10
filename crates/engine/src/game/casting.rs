@@ -705,6 +705,7 @@ struct GraveyardPermissionSource<'a> {
     source_id: ObjectId,
     filter: &'a TargetFilter,
     frequency: CastFrequency,
+    graveyard_destination_replacement: Option<Zone>,
 }
 
 fn graveyard_permission_sources(
@@ -734,6 +735,7 @@ fn graveyard_permission_sources(
                     StaticMode::GraveyardCastPermission {
                         frequency,
                         play_mode,
+                        graveyard_destination_replacement,
                     } if graveyard_permission_play_mode_matches(play_mode, play_mode_filter) => {
                         definition
                             .affected
@@ -742,6 +744,7 @@ fn graveyard_permission_sources(
                                 source_id,
                                 filter,
                                 frequency,
+                                graveyard_destination_replacement,
                             })
                     }
                     _ => None,
@@ -844,12 +847,13 @@ fn frequency_slot_available(
 }
 
 /// CR 601.2a: Find the first valid permission source for a specific graveyard object.
-/// Returns (source_id, frequency) so the caller can track per-turn usage.
+/// Returns the permission source so the caller can track per-turn usage and
+/// preserve any destination replacement rider.
 fn graveyard_permission_source(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
-) -> Option<(ObjectId, CastFrequency)> {
+) -> Option<GraveyardPermissionSource<'_>> {
     if state.objects.get(&object_id).is_some_and(|obj| {
         obj.card_types
             .core_types
@@ -859,12 +863,12 @@ fn graveyard_permission_source(
     }
     graveyard_permission_sources(state, player, Some(CardPlayMode::Cast))
         .into_iter()
-        .find_map(|source| {
+        .find(|source| {
             // CR 604.2 + CR 110.4: Skip if this source's slot has already been used.
             if !frequency_slot_available(state, source.source_id, object_id, source.frequency) {
-                return None;
+                return false;
             }
-            if super::filter::matches_target_filter(
+            super::filter::matches_target_filter(
                 state,
                 object_id,
                 source.filter,
@@ -872,11 +876,7 @@ fn graveyard_permission_source(
                     source.source_id,
                     player,
                 ),
-            ) {
-                Some((source.source_id, source.frequency))
-            } else {
-                None
-            }
+            )
         })
 }
 
@@ -1348,13 +1348,13 @@ fn prepare_spell_cast_with_variant_override(
             )
         {
             CastingVariant::Aftermath
-        } else if let Some((source, frequency)) = graveyard_permission_src {
+        } else if let Some(source) = graveyard_permission_src {
             // CR 110.4: For OncePerTurnPerPermanentType permissions, auto-pick
             // the slot when only one is available. When multiple slots are
             // available (multi-type card), leave `None` — the engine will
             // prompt the player to choose via `ChoosePermanentTypeSlot`.
-            let slot_type = if frequency == CastFrequency::OncePerTurnPerPermanentType {
-                let slots = available_permanent_type_slots(state, source, object_id);
+            let slot_type = if source.frequency == CastFrequency::OncePerTurnPerPermanentType {
+                let slots = available_permanent_type_slots(state, source.source_id, object_id);
                 if slots.len() == 1 {
                     Some(slots[0])
                 } else {
@@ -1364,9 +1364,10 @@ fn prepare_spell_cast_with_variant_override(
                 None
             };
             CastingVariant::GraveyardPermission {
-                source,
-                frequency,
+                source: source.source_id,
+                frequency: source.frequency,
                 slot_type,
+                graveyard_destination_replacement: source.graveyard_destination_replacement,
             }
         } else if warp_cost.is_some() {
             CastingVariant::Warp
@@ -3117,16 +3118,16 @@ pub fn handle_cast_spell(
     // has multiple available slots (multi-type permanents like Artifact Creature).
     if let Some(obj) = state.objects.get(&object_id) {
         if obj.zone == Zone::Graveyard {
-            if let Some((source, CastFrequency::OncePerTurnPerPermanentType)) =
-                graveyard_permission_source(state, player, object_id)
+            if let Some(source) = graveyard_permission_source(state, player, object_id)
+                .filter(|source| source.frequency == CastFrequency::OncePerTurnPerPermanentType)
             {
-                let slots = available_permanent_type_slots(state, source, object_id);
+                let slots = available_permanent_type_slots(state, source.source_id, object_id);
                 if slots.len() > 1 {
                     return Ok(WaitingFor::ChoosePermanentTypeSlot {
                         player,
                         object_id,
                         card_id,
-                        source,
+                        source: source.source_id,
                         available_slots: slots,
                     });
                 }
@@ -3149,6 +3150,9 @@ pub fn handle_permanent_type_slot_choice(
     slot: crate::types::card_type::CoreType,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let graveyard_destination_replacement = graveyard_permission_source(state, player, object_id)
+        .filter(|permission| permission.source_id == source)
+        .and_then(|permission| permission.graveyard_destination_replacement);
     let prepared = prepare_spell_cast_with_variant_override(
         state,
         player,
@@ -3157,6 +3161,7 @@ pub fn handle_permanent_type_slot_choice(
             source,
             frequency: CastFrequency::OncePerTurnPerPermanentType,
             slot_type: Some(slot),
+            graveyard_destination_replacement,
         }),
     )?;
     continue_with_prepared(state, player, prepared, events)

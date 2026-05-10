@@ -2079,6 +2079,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
             source,
             frequency: crate::types::statics::CastFrequency::OncePerTurnPerPermanentType,
             slot_type: Some(slot),
+            ..
         } => {
             // CR 110.4: Consume the chosen permanent-type slot for this source.
             state

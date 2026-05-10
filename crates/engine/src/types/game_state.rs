@@ -2370,6 +2370,11 @@ pub enum CastingVariant {
         /// frequencies (those track by source only).
         #[serde(default)]
         slot_type: Option<super::card_type::CoreType>,
+        /// CR 614.1a: Some graveyard cast permissions add "If a spell cast
+        /// this way would be put into your graveyard, exile it instead."
+        /// This replaces only stack-to-graveyard destinations.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graveyard_destination_replacement: Option<Zone>,
     },
     /// CR 601.2b + CR 118.9a: Cast from hand via a `CastFromHandFree` static
     /// permission source (Zaffai). Stores the granting permanent's ObjectId for
@@ -2464,6 +2469,29 @@ pub enum CastingVariant {
     /// battlefield, the type-changing effect ends — it remains as an
     /// enchantment creature (overrides CR 704.5m for bestow Auras).
     Bestow,
+}
+
+impl CastingVariant {
+    pub fn stack_to_graveyard_replacement(self) -> Option<Zone> {
+        if matches!(
+            self,
+            CastingVariant::Flashback | CastingVariant::Aftermath | CastingVariant::Harmonize
+        ) {
+            return Some(Zone::Exile);
+        }
+        if let CastingVariant::GraveyardPermission {
+            graveyard_destination_replacement,
+            ..
+        } = self
+        {
+            return graveyard_destination_replacement;
+        }
+        None
+    }
+
+    pub fn replaces_stack_to_graveyard_with_exile(self) -> bool {
+        matches!(self.stack_to_graveyard_replacement(), Some(Zone::Exile))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

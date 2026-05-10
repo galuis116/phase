@@ -216,6 +216,7 @@ fn player_effect_to_static(
             return Ok(StaticDefinition::new(StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
+                graveyard_destination_replacement: None,
             })
             .affected(affected));
         }

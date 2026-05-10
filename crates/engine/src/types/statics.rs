@@ -10,6 +10,7 @@ use super::ability::{
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost};
 use super::phase::Phase;
+use super::zones::Zone;
 
 /// CR 109.5 + CR 102.1: The "who" axis of a continuous prohibition static.
 ///
@@ -481,6 +482,12 @@ pub enum StaticMode {
         frequency: CastFrequency,
         /// Play (lands+spells) vs Cast (spells only)
         play_mode: CardPlayMode,
+        /// CR 614.1a: "If a spell cast this way would be put into your
+        /// graveyard, exile it instead." This is narrower than flashback: it
+        /// replaces only stack-to-graveyard destinations produced by this
+        /// permission.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        graveyard_destination_replacement: Option<Zone>,
     },
     /// CR 401.5 + CR 118.9 + CR 601.2a: Static ability granting permission to
     /// play/cast the top card of the controller's library when it matches
@@ -740,9 +747,11 @@ impl Hash for StaticMode {
             StaticMode::GraveyardCastPermission {
                 frequency,
                 play_mode,
+                graveyard_destination_replacement,
             } => {
                 frequency.hash(state);
                 play_mode.hash(state);
+                graveyard_destination_replacement.hash(state);
             }
             StaticMode::TopOfLibraryCastPermission { play_mode, .. } => {
                 // alt_cost contains AbilityCost which lacks Hash; discriminant + play_mode only.
@@ -824,7 +833,17 @@ impl fmt::Display for StaticMode {
             StaticMode::GraveyardCastPermission {
                 frequency,
                 play_mode,
-            } => write!(f, "GraveyardCastPermission({play_mode},{frequency})"),
+                graveyard_destination_replacement,
+            } => {
+                if matches!(graveyard_destination_replacement, Some(Zone::Exile)) {
+                    write!(
+                        f,
+                        "GraveyardCastPermission({play_mode},{frequency},exile_on_graveyard)"
+                    )
+                } else {
+                    write!(f, "GraveyardCastPermission({play_mode},{frequency})")
+                }
+            }
             StaticMode::TopOfLibraryCastPermission {
                 play_mode,
                 alt_cost,
@@ -1033,21 +1052,27 @@ impl FromStr for StaticMode {
             "GraveyardCastPermission" => StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: None,
             },
             s if s.starts_with("GraveyardCastPermission(") => {
                 let inner = s
                     .strip_prefix("GraveyardCastPermission(")
                     .and_then(|s| s.strip_suffix(')'))
                     .unwrap_or("");
-                if let Some((pm, freq)) = inner.split_once(',') {
+                let parts = inner.split(',').collect::<Vec<_>>();
+                if let [pm, freq, rest @ ..] = parts.as_slice() {
                     StaticMode::GraveyardCastPermission {
                         play_mode: pm.parse().unwrap_or(CardPlayMode::Cast),
                         frequency: freq.parse().unwrap_or(CastFrequency::OncePerTurn),
+                        graveyard_destination_replacement: rest
+                            .contains(&"exile_on_graveyard")
+                            .then_some(Zone::Exile),
                     }
                 } else {
                     StaticMode::GraveyardCastPermission {
                         frequency: CastFrequency::OncePerTurn,
                         play_mode: CardPlayMode::Cast,
+                        graveyard_destination_replacement: None,
                     }
                 }
             }
@@ -1415,10 +1440,12 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: None,
             },
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
+                graveyard_destination_replacement: None,
             },
             // Cast-from-hand-free permissions (Omniscience; Zaffai).
             StaticMode::CastFromHandFree {

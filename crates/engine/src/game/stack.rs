@@ -166,12 +166,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // Aftermath, and Harmonize exile when leaving the stack
                     // for any reason, including fizzle. Escape (CR 702.138)
                     // has no such clause — escaped spells go to graveyard normally.
-                    let dest = if matches!(
-                        casting_variant,
-                        CastingVariant::Flashback
-                            | CastingVariant::Aftermath
-                            | CastingVariant::Harmonize
-                    ) {
+                    let dest = if casting_variant.replaces_stack_to_graveyard_with_exile() {
                         Zone::Exile
                     } else {
                         Zone::Graveyard
@@ -241,15 +236,23 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             } else {
                 Zone::Exile
             }
+        } else if casting_variant == CastingVariant::Aftermath {
+            // CR 702.127a: If an aftermath spell was cast from a graveyard,
+            // exile it instead of putting it anywhere else any time it would
+            // leave the stack.
+            Zone::Exile
         } else if casting_variant == CastingVariant::Flashback {
             // CR 702.34a: If the flashback cost was paid, exile this card
             // instead of putting it anywhere else any time it would leave the stack.
             // Flashback only appears on instants/sorceries — unconditional exile is correct.
             Zone::Exile
-        } else if casting_variant == CastingVariant::Aftermath {
-            // CR 702.127a: If an aftermath spell was cast from a graveyard,
-            // exile it instead of putting it anywhere else any time it would
-            // leave the stack.
+        } else if casting_variant.replaces_stack_to_graveyard_with_exile()
+            && !is_permanent_type(state, entry.id)
+        {
+            // CR 614.1a + CR 608.2n: Graveyard-cast permission riders that
+            // say "If a spell cast this way would be put into your graveyard,
+            // exile it instead" replace the normal non-permanent resolution
+            // destination. Permanent spells still resolve to the battlefield.
             Zone::Exile
         } else if is_permanent_type(state, entry.id) {
             // CR 608.3: Permanent spells enter the battlefield.
@@ -1722,6 +1725,42 @@ mod tests {
         obj_id
     }
 
+    fn push_graveyard_permission_spell_with_exile_rider(
+        state: &mut GameState,
+        effect: Effect,
+    ) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let obj_id = create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            "Permission Spell".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+        }
+        let resolved = ResolvedAbility::new(effect, vec![], obj_id, PlayerId(0));
+        state.stack.push_back(StackEntry {
+            id: obj_id,
+            source_id: obj_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: Some(resolved),
+                casting_variant: CastingVariant::GraveyardPermission {
+                    source: ObjectId(999),
+                    frequency: crate::types::statics::CastFrequency::OncePerTurn,
+                    slot_type: None,
+                    graveyard_destination_replacement: Some(Zone::Exile),
+                },
+                actual_mana_spent: 0,
+            },
+        });
+        obj_id
+    }
+
     #[test]
     fn flashback_spell_exiles_on_resolution() {
         let mut state = setup();
@@ -1740,6 +1779,27 @@ mod tests {
             state.objects[&obj_id].zone,
             Zone::Exile,
             "Flashback spell should be exiled on resolution, not sent to graveyard"
+        );
+    }
+
+    #[test]
+    fn graveyard_permission_exile_rider_exiles_on_resolution() {
+        let mut state = setup();
+        let obj_id = push_graveyard_permission_spell_with_exile_rider(
+            &mut state,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&obj_id].zone,
+            Zone::Exile,
+            "graveyard permission rider should replace the normal resolution graveyard destination"
         );
     }
 

@@ -4,7 +4,7 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
-use nom::character::complete::{alpha1, space1};
+use nom::character::complete::{alpha1, space0, space1};
 use nom::combinator::{all_consuming, eof, opt, rest, value};
 use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
@@ -7396,6 +7396,7 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
             StaticDefinition::new(StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurnPerPermanentType,
                 play_mode: CardPlayMode::Play,
+                graveyard_destination_replacement: None,
             })
             .affected(affected)
             .description(text.to_string()),
@@ -7443,6 +7444,9 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
 
     // Parse optional alt-cost rider from the text after "from your graveyard".
     let rider_kind = parse_alt_cost_rider(trailing).ok().map(|(_, k)| k);
+    let graveyard_destination_replacement = parse_exile_spell_cast_this_way_rider(trailing)
+        .is_ok()
+        .then_some(Zone::Exile);
     let condition = parse_graveyard_permission_condition(trailing)
         .ok()
         .and_then(|(rest, condition)| rest.is_empty().then_some(condition));
@@ -7456,6 +7460,7 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
     let mut def = StaticDefinition::new(StaticMode::GraveyardCastPermission {
         frequency,
         play_mode,
+        graveyard_destination_replacement,
     })
     .affected(affected)
     .description(text.to_string());
@@ -7483,6 +7488,20 @@ fn parse_graveyard_permission_condition(input: &str) -> OracleResult<'_, StaticC
         preceded(tag(" as long as "), nom_condition::parse_inner_condition).parse(input)?;
     let (rest, _) = opt(tag(".")).parse(rest)?;
     Ok((rest, condition))
+}
+
+fn parse_exile_spell_cast_this_way_rider(input: &str) -> OracleResult<'_, ()> {
+    all_consuming(preceded(
+        terminated(opt(tag(".")), space0),
+        value(
+            (),
+            terminated(
+                tag("if a spell cast this way would be put into your graveyard, exile it instead"),
+                opt(tag(".")),
+            ),
+        ),
+    ))
+    .parse(input)
 }
 
 /// CR 401.5 + CR 118.9 + CR 601.2a: Parse "you may [play|cast] [filter] from
@@ -11122,6 +11141,7 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
+                ..
             }
         ));
         let filter = def.affected.expect("should have affected filter");
@@ -11154,6 +11174,7 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
+                ..
             }
         ));
         match &def.affected {
@@ -11174,10 +11195,26 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
+                ..
             }
         ));
         // Should parse as a union or typed filter covering instant/sorcery
         assert!(def.affected.is_some());
+    }
+
+    #[test]
+    fn graveyard_cast_permission_exile_rider() {
+        let def = parse_static_line(
+            "Once during each of your turns, you may cast an instant or sorcery spell from your graveyard. If a spell cast this way would be put into your graveyard, exile it instead."
+        ).unwrap();
+        assert!(matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::OncePerTurn,
+                play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: Some(Zone::Exile),
+            }
+        ));
     }
 
     #[test]
@@ -11191,6 +11228,7 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
+                ..
             }
         ));
         // "zombie creature" → parse_type_phrase recognizes "zombie" as subtype.
@@ -11212,6 +11250,7 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Cast,
+                ..
             }
         ));
         assert_eq!(def.affected, Some(TargetFilter::SelfRef));
@@ -11311,6 +11350,7 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
+                ..
             }
         ));
         if let Some(TargetFilter::Typed(tf)) = &def.affected {
@@ -11332,6 +11372,7 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Cast,
+                ..
             }
         ));
         if let Some(TargetFilter::Typed(tf)) = &def.affected {
@@ -11361,6 +11402,7 @@ mod tests {
                 StaticMode::GraveyardCastPermission {
                     frequency: CastFrequency::OncePerTurnPerPermanentType,
                     play_mode: CardPlayMode::Play,
+                    ..
                 }
             ),
             "expected OncePerTurnPerPermanentType + Play, got {:?}",
@@ -11388,6 +11430,7 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurnPerPermanentType,
                 play_mode: CardPlayMode::Play,
+                ..
             }
         ));
     }
@@ -11404,6 +11447,7 @@ mod tests {
             StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Cast,
+                ..
             }
         ));
         let filter = def.affected.expect("should have affected filter");

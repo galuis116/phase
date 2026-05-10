@@ -6,7 +6,7 @@ use crate::types::ability::{
     TargetRef, UnlessCost,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{CastingVariant, GameState, StackEntryKind, WaitingFor};
+use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::statics::StaticMode;
@@ -123,15 +123,12 @@ pub fn resolve(
                 // Aftermath, and Harmonize exile when leaving the stack for
                 // any reason, including when countered. Escape (CR 702.138)
                 // has no such clause — countered escape spells go to graveyard.
-                let exiles_on_counter = matches!(
-                    &state.stack[idx].kind,
+                let exiles_on_counter = match &state.stack[idx].kind {
                     StackEntryKind::Spell {
-                        casting_variant: CastingVariant::Harmonize
-                            | CastingVariant::Flashback
-                            | CastingVariant::Aftermath,
-                        ..
-                    }
-                );
+                        casting_variant, ..
+                    } => casting_variant.replaces_stack_to_graveyard_with_exile(),
+                    _ => false,
+                };
                 let source_permanent_id = state.stack[idx].source_id;
                 state.stack.remove(idx);
 
@@ -258,15 +255,12 @@ pub fn resolve_all(
         // CR 702.34a / CR 702.127a / CR 702.180a: Flashback / Aftermath /
         // Harmonize exile on leaving the stack for any reason, including
         // counter. Escape (CR 702.138) has no such clause.
-        let exiles_on_counter = matches!(
-            &state.stack[idx].kind,
+        let exiles_on_counter = match &state.stack[idx].kind {
             StackEntryKind::Spell {
-                casting_variant: CastingVariant::Harmonize
-                    | CastingVariant::Flashback
-                    | CastingVariant::Aftermath,
-                ..
-            }
-        );
+                casting_variant, ..
+            } => casting_variant.replaces_stack_to_graveyard_with_exile(),
+            _ => false,
+        };
         state.stack.remove(idx);
 
         if is_spell {
@@ -426,6 +420,52 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::SpellCountered { .. })));
+    }
+
+    #[test]
+    fn graveyard_permission_exile_rider_exiles_countered_spell() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: obj_id,
+            source_id: obj_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::GraveyardPermission {
+                    source: ObjectId(200),
+                    frequency: crate::types::statics::CastFrequency::OncePerTurn,
+                    slot_type: None,
+                    graveyard_destination_replacement: Some(Zone::Exile),
+                },
+                actual_mana_spent: 0,
+            },
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::Counter {
+                target: TargetFilter::Any,
+                source_static: None,
+                unless_payment: None,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.stack.is_empty());
+        assert!(state.exile.contains(&obj_id));
+        assert!(!state.players[1].graveyard.contains(&obj_id));
     }
 
     #[test]

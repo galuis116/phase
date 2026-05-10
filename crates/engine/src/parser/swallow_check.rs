@@ -1234,6 +1234,10 @@ fn detect_condition_if(
         // CR 117.3a: TopOfLibraryCastPermission with `alt_cost` IS the "if
         // you cast a spell this way, pay X" gate (Bolas's Citadel etc.).
         "TopOfLibraryCastPermission",
+        // CR 614.1a: GraveyardCastPermission with this flag carries the "if
+        // a spell cast this way would be put into your graveyard, exile it
+        // instead" replacement rider.
+        "graveyard_destination_replacement",
         // CR 705: FlipCoin / FlipCoins / RollDie variants encode the
         // "if you win the flip" / "if you lose" / die-result branches as
         // structured win_effect/lose_effect/results sub-trees. Their
