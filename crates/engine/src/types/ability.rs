@@ -1119,6 +1119,11 @@ pub enum CastingPermission {
         /// `frequency` is bounded. Filled by `grant_permission::resolve`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_id: Option<ObjectId>,
+        /// Controller of the ability that exiled this card and attached this
+        /// permission. Evelyn-class statics use this as provenance, then find
+        /// a currently-live static permission source at play/cast time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exiled_by_ability_controller: Option<PlayerId>,
         /// CR 609.4b: Optional payment permission carried by the same effect
         /// that allows the card to be played/cast from exile. This scopes
         /// "mana of any type can be spent to cast that spell" to the exiled
@@ -7890,8 +7895,8 @@ pub enum TriggerConstraint {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
     },
-    /// "Whenever you draw your Nth card each turn" — fires exactly when
-    /// the controller's `cards_drawn_this_turn` equals `n`.
+    /// "Whenever you draw your Nth card each turn" — fires exactly when the
+    /// triggering draw event's per-turn ordinal equals `n`.
     NthDrawThisTurn { n: u32 },
     /// "At the beginning of each opponent's [phase]"
     OnlyDuringOpponentsTurn,

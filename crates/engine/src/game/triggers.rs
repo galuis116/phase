@@ -1984,18 +1984,14 @@ fn check_trigger_constraint(
                 });
             count == *n
         }
-        // CR 121.2: Extract the drawing player from the event (not the controller).
-        // Matches the NthSpellThisTurn pattern which extracts the caster from SpellCast.
+        // CR 121.2: Use the ordinal stamped onto the individual draw event
+        // rather than the final per-turn count after a multi-card draw batch.
         TriggerConstraint::NthDrawThisTurn { n } => {
-            let drawer = match event {
-                GameEvent::CardDrawn { player_id, .. } => *player_id,
+            let nth_in_turn = match event {
+                GameEvent::CardDrawn { nth_in_turn, .. } => *nth_in_turn,
                 _ => return false,
             };
-            state
-                .players
-                .iter()
-                .find(|p| p.id == drawer)
-                .is_some_and(|p| p.cards_drawn_this_turn == *n)
+            nth_in_turn == *n
         }
         // CR 716.2a: "When this Class becomes level N" — fire only at the specified level.
         TriggerConstraint::AtClassLevel { level } => state
@@ -5368,6 +5364,94 @@ pub mod tests {
     }
 
     #[test]
+    fn sneaky_snacker_returns_tapped_from_graveyard_on_third_draw_in_turn() {
+        let mut state = setup();
+        let snacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sneaky Snacker".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&snacker).unwrap();
+            let mut trigger = make_trigger(TriggerMode::Drawn);
+            trigger.trigger_zones = vec![Zone::Graveyard];
+            trigger.valid_target = Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ));
+            trigger.constraint = Some(TriggerConstraint::NthDrawThisTurn { n: 3 });
+            trigger.execute = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    under_your_control: false,
+                    enter_tapped: true,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+            )));
+            obj.trigger_definitions.push(trigger);
+        }
+
+        for i in 0..4 {
+            create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(0),
+                format!("Drawn Card {i}"),
+                Zone::Library,
+            );
+        }
+
+        let draw_one = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(0),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::draw::resolve(&mut state, &draw_one, &mut events).unwrap();
+        process_triggers(&mut state, &events);
+        assert_eq!(state.stack.len(), 0);
+
+        events.clear();
+        crate::game::effects::draw::resolve(&mut state, &draw_one, &mut events).unwrap();
+        process_triggers(&mut state, &events);
+        assert_eq!(state.stack.len(), 0);
+
+        let draw_two = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(0),
+            PlayerId(0),
+        );
+        events.clear();
+        crate::game::effects::draw::resolve(&mut state, &draw_two, &mut events).unwrap();
+        process_triggers(&mut state, &events);
+        assert_eq!(state.stack.len(), 1);
+
+        events.clear();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+        let snacker_obj = state.objects.get(&snacker).unwrap();
+        assert_eq!(snacker_obj.zone, Zone::Battlefield);
+        assert!(snacker_obj.tapped);
+        assert!(state.players[0].graveyard.iter().all(|id| *id != snacker));
+        assert!(state.battlefield.contains(&snacker));
+    }
+
+    #[test]
     fn stack_zone_spell_cast_trigger_fires_from_stack() {
         let mut state = setup();
         let spell_id = create_object(
@@ -6059,12 +6143,9 @@ pub mod tests {
     }
 
     #[test]
-    fn nth_draw_constraint_uses_drawing_player_not_controller() {
+    fn nth_draw_constraint_uses_draw_event_ordinal_not_final_turn_total() {
         let mut state = setup();
-        // Player 1 (opponent) has drawn 2 cards this turn
-        state.players[1].cards_drawn_this_turn = 2;
-        // Player 0 (controller) has drawn 0 cards
-        state.players[0].cards_drawn_this_turn = 0;
+        state.players[1].cards_drawn_this_turn = 4;
 
         let mut trig_def = make_trigger(TriggerMode::Drawn);
         trig_def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n: 2 });
@@ -6073,10 +6154,12 @@ pub mod tests {
         let event = GameEvent::CardDrawn {
             player_id: PlayerId(1),
             object_id: ObjectId(99),
+            nth_in_turn: 2,
             nth_in_step: 1,
         };
 
-        // Should fire: opponent (player 1) drew their 2nd card
+        // Should fire: this event is the opponent's 2nd draw, even though the
+        // batch has already advanced their final turn count to 4.
         assert!(check_trigger_constraint(
             &state,
             &trig_def,
@@ -6086,10 +6169,11 @@ pub mod tests {
             &event,
         ));
 
-        // Should NOT fire when controller drew (count is 0)
+        // Should NOT fire: this event is a first draw.
         let controller_draw = GameEvent::CardDrawn {
             player_id: PlayerId(0),
             object_id: ObjectId(100),
+            nth_in_turn: 1,
             nth_in_step: 1,
         };
         assert!(!check_trigger_constraint(
@@ -9065,6 +9149,7 @@ pub mod tests {
         let first_draw = GameEvent::CardDrawn {
             player_id: PlayerId(0),
             object_id: ObjectId(50),
+            nth_in_turn: 1,
             nth_in_step: 1,
         };
         assert!(
@@ -9076,6 +9161,7 @@ pub mod tests {
         let extra_draw = GameEvent::CardDrawn {
             player_id: PlayerId(0),
             object_id: ObjectId(51),
+            nth_in_turn: 2,
             nth_in_step: 2,
         };
         assert!(
@@ -9088,6 +9174,7 @@ pub mod tests {
         let upkeep_first = GameEvent::CardDrawn {
             player_id: PlayerId(0),
             object_id: ObjectId(52),
+            nth_in_turn: 3,
             nth_in_step: 1,
         };
         assert!(
@@ -9103,6 +9190,7 @@ pub mod tests {
         let opponent_draw = GameEvent::CardDrawn {
             player_id: PlayerId(1),
             object_id: ObjectId(53),
+            nth_in_turn: 1,
             nth_in_step: 1,
         };
         assert!(
@@ -9133,6 +9221,7 @@ pub mod tests {
         let own_turn_draw = GameEvent::CardDrawn {
             player_id: opponent,
             object_id: ObjectId(50),
+            nth_in_turn: 1,
             nth_in_step: 1,
         };
         assert!(
@@ -9149,6 +9238,7 @@ pub mod tests {
         let off_turn_draw = GameEvent::CardDrawn {
             player_id: opponent,
             object_id: ObjectId(51),
+            nth_in_turn: 2,
             nth_in_step: 2,
         };
         assert!(

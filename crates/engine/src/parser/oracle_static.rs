@@ -2036,11 +2036,6 @@ fn parse_arcane_adaptation_chosen_type_static(
             tag("creatures you control are the chosen type in addition to their other types")
                 .parse(input)?;
         let (input, _) = opt(tag(".")).parse(input)?;
-        let (input, _) = opt(preceded(
-            tag(" the same is true for "),
-            terminated(take_until::<_, _, OracleError<'_>>("."), opt(tag("."))),
-        ))
-        .parse(input)?;
         let (input, _) = eof.parse(input)?;
         Ok((input, ()))
     })?;
@@ -15514,7 +15509,7 @@ mod tests {
     #[test]
     fn parser_shape_arcane_adaptation_chosen_type_applies_to_creatures_you_control() {
         let def = parse_static_line(
-            "Creatures you control are the chosen type in addition to their other types. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.",
+            "Creatures you control are the chosen type in addition to their other types.",
         )
         .unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
@@ -15524,6 +15519,11 @@ mod tests {
                 kind: ChosenSubtypeKind::CreatureType
             }
         )));
+        assert_eq!(
+            def.description.as_deref(),
+            Some("Creatures you control are the chosen type in addition to their other types."),
+            "the unsupported creature-spell/nonbattlefield-card tail must not be represented by the battlefield-only static"
+        );
         match &def.affected {
             Some(TargetFilter::Typed(tf)) => {
                 assert_eq!(tf.controller, Some(ControllerRef::You));

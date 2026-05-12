@@ -18,6 +18,10 @@ fn default_nth_in_step() -> u32 {
     1
 }
 
+fn default_nth_in_turn() -> u32 {
+    1
+}
+
 /// Avatar crossover: The four elemental bending types, tracked per-turn on each player.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BendingType {
@@ -122,6 +126,12 @@ pub enum GameEvent {
     CardDrawn {
         player_id: PlayerId,
         object_id: ObjectId,
+        /// Ordinal of this draw within the current turn (1-indexed). Set by
+        /// the emitter after incrementing `player.cards_drawn_this_turn`, so
+        /// Nth-card draw triggers evaluate against the individual draw event
+        /// rather than the final post-batch turn total.
+        #[serde(default = "default_nth_in_turn")]
+        nth_in_turn: u32,
         /// CR 121.1 + CR 504.1: Ordinal of this draw within the current step
         /// (1-indexed). Set by the emitter to `player.cards_drawn_this_step`
         /// AFTER incrementing for this draw, so the first card drawn in a step

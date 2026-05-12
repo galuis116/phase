@@ -109,11 +109,13 @@ pub fn resolve(
             if let CastingPermission::PlayFromExile {
                 granted_to,
                 source_id,
+                exiled_by_ability_controller,
                 ..
             } = &mut granted
             {
                 *granted_to = granted_to_pid;
                 *source_id = Some(ability.source_id);
+                *exiled_by_ability_controller = Some(ability.controller);
             }
             // CR 611.2a + CR 118.9: Bind `granted_to` for `ExileWithAltCost` and
             // `ExileWithAltAbilityCost` to the resolved grantee. Without this
@@ -194,6 +196,7 @@ mod tests {
                     granted_to: PlayerId(0),
                     frequency: crate::types::statics::CastFrequency::Unlimited,
                     source_id: None,
+                    exiled_by_ability_controller: None,
                     mana_spend_permission: None,
                 },
                 target: TargetFilter::Any,
@@ -245,6 +248,7 @@ mod tests {
                     granted_to: PlayerId(0),
                     frequency: crate::types::statics::CastFrequency::Unlimited,
                     source_id: None,
+                    exiled_by_ability_controller: None,
                     mana_spend_permission: None,
                 },
                 target: TargetFilter::Any,
@@ -295,6 +299,7 @@ mod tests {
                     granted_to: PlayerId(0),
                     frequency: crate::types::statics::CastFrequency::Unlimited,
                     source_id: None,
+                    exiled_by_ability_controller: None,
                     mana_spend_permission: None,
                 },
                 target: TargetFilter::Any,

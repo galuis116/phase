@@ -347,6 +347,7 @@ pub fn room_effects(
                         granted_to: crate::types::player::PlayerId(0),
                         frequency: crate::types::statics::CastFrequency::Unlimited,
                         source_id: None,
+                        exiled_by_ability_controller: None,
                         mana_spend_permission: None,
                     },
                     target: TargetFilter::Any,

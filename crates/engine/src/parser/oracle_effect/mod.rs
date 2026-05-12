@@ -3810,6 +3810,7 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
             granted_to: crate::types::player::PlayerId(0),
             frequency: CastFrequency::Unlimited,
             source_id: None,
+            exiled_by_ability_controller: None,
             mana_spend_permission: None,
         },
         target: TargetFilter::TrackedSet {
@@ -3882,6 +3883,7 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
             granted_to: crate::types::player::PlayerId(0),
             frequency: CastFrequency::Unlimited,
             source_id: None,
+            exiled_by_ability_controller: None,
             mana_spend_permission,
         },
         // CR 603.7 + CR 608.2c: TrackedSet sentinel — the runtime resolver
@@ -3940,6 +3942,7 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
             granted_to: crate::types::player::PlayerId(0),
             frequency: CastFrequency::Unlimited,
             source_id: None,
+            exiled_by_ability_controller: None,
             mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
         },
         target: TargetFilter::Any,
@@ -4033,6 +4036,7 @@ fn try_parse_play_from_exile(tp: TextPair) -> Option<ParsedEffectClause> {
             granted_to: crate::types::player::PlayerId(0),
             frequency: CastFrequency::Unlimited,
             source_id: None,
+            exiled_by_ability_controller: None,
             mana_spend_permission: None,
         },
         target: TargetFilter::Any,
@@ -4061,6 +4065,7 @@ pub(crate) fn try_parse_exile_top_each_library_with_collection_counter(
                 granted_to: crate::types::player::PlayerId(0),
                 frequency: CastFrequency::OncePerTurn,
                 source_id: None,
+                exiled_by_ability_controller: None,
                 mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
             },
             target: TargetFilter::TrackedSet {

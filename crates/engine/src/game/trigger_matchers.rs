@@ -3611,6 +3611,7 @@ mod tests {
         let opponent_event = GameEvent::CardDrawn {
             player_id: PlayerId(1),
             object_id: ObjectId(20),
+            nth_in_turn: 1,
             nth_in_step: 1,
         };
         assert!(match_drawn(&opponent_event, &trigger, source, &state));
@@ -3618,6 +3619,7 @@ mod tests {
         let controller_event = GameEvent::CardDrawn {
             player_id: PlayerId(0),
             object_id: ObjectId(21),
+            nth_in_turn: 1,
             nth_in_step: 1,
         };
         assert!(!match_drawn(&controller_event, &trigger, source, &state));

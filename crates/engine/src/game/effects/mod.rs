@@ -5040,6 +5040,7 @@ mod tests {
                     granted_to: PlayerId(0),
                     frequency: CastFrequency::OncePerTurn,
                     source_id: None,
+                    exiled_by_ability_controller: None,
                     mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
                 },
                 target: TargetFilter::TrackedSet {
@@ -6696,6 +6697,7 @@ mod tests {
                     granted_to: PlayerId(0),
                     frequency: crate::types::statics::CastFrequency::Unlimited,
                     source_id: None,
+                    exiled_by_ability_controller: None,
                     mana_spend_permission: None,
                 },
                 target: TargetFilter::TrackedSet {

@@ -657,19 +657,20 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) -> Optio
                     // `nth_in_step` (1-indexed) reflects this draw — the draw
                     // step's mandatory draw is `nth_in_step == 1` and is the
                     // anchor for `ExceptFirstDrawInDrawStep` exception clauses.
-                    let nth_in_step =
+                    let (nth_in_turn, nth_in_step) =
                         if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
                             p.has_drawn_this_turn = true;
                             p.cards_drawn_this_turn = p.cards_drawn_this_turn.saturating_add(1);
                             p.cards_drawn_this_step = p.cards_drawn_this_step.saturating_add(1);
-                            p.cards_drawn_this_step
+                            (p.cards_drawn_this_turn, p.cards_drawn_this_step)
                         } else {
-                            1
+                            (1, 1)
                         };
                     // CR 121.1: Emit CardDrawn so "whenever a player draws" triggers fire.
                     events.push(GameEvent::CardDrawn {
                         player_id,
                         object_id: obj_id,
+                        nth_in_turn,
                         nth_in_step,
                     });
                     crate::game::effects::drawn_this_turn_choice::record_drawn_card(

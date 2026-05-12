@@ -1,5 +1,9 @@
 use engine::parser::oracle::{keyword_display_name, parse_oracle_text};
+use engine::types::ability::{
+    ChosenSubtypeKind, ContinuousModification, ControllerRef, Effect, TargetFilter, TypeFilter,
+};
 use engine::types::keywords::Keyword;
+use engine::types::statics::StaticMode;
 
 fn parse(
     oracle_text: &str,
@@ -126,6 +130,53 @@ fn snapshot_rancor() {
         &["Aura"],
     );
     insta::assert_json_snapshot!(result);
+}
+
+#[test]
+fn arcane_adaptation_full_oracle_splits_battlefield_static_and_unimplemented_tail() {
+    let result = parse(
+        "As Arcane Adaptation enters, choose a creature type.\nCreatures you control are the chosen type in addition to their other types. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.",
+        "Arcane Adaptation",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+
+    assert_eq!(result.statics.len(), 1);
+    let static_def = &result.statics[0];
+    assert_eq!(static_def.mode, StaticMode::Continuous);
+    assert!(static_def.active_zones.is_empty());
+    assert!(static_def.modifications.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::AddChosenSubtype {
+            kind: ChosenSubtypeKind::CreatureType
+        }
+    )));
+    match &static_def.affected {
+        Some(TargetFilter::Typed(filter)) => {
+            assert_eq!(filter.controller, Some(ControllerRef::You));
+            assert!(filter.type_filters.contains(&TypeFilter::Creature));
+        }
+        other => panic!("expected battlefield creature filter, got {other:?}"),
+    }
+
+    let unimplemented: Vec<_> = result
+        .abilities
+        .iter()
+        .filter_map(|ability| match ability.effect.as_ref() {
+            Effect::Unimplemented {
+                description: Some(description),
+                ..
+            } => Some(description.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        unimplemented,
+        vec![
+            "The same is true for creature spells you control and creature cards you own that aren't on the battlefield."
+        ]
+    );
 }
 
 #[test]

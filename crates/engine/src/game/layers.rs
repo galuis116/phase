@@ -5165,6 +5165,7 @@ mod tests {
                 granted_to: PlayerId(0),
                 frequency: crate::types::statics::CastFrequency::Unlimited,
                 source_id: None,
+                exiled_by_ability_controller: None,
                 mana_spend_permission: None,
             });
 
@@ -5188,6 +5189,7 @@ mod tests {
             granted_to: PlayerId(0),
             frequency: crate::types::statics::CastFrequency::Unlimited,
             source_id: None,
+            exiled_by_ability_controller: None,
             mana_spend_permission: None,
         });
         perms.push(CastingPermission::PlayFromExile {
@@ -5195,6 +5197,7 @@ mod tests {
             granted_to: PlayerId(0),
             frequency: crate::types::statics::CastFrequency::Unlimited,
             source_id: None,
+            exiled_by_ability_controller: None,
             mana_spend_permission: None,
         });
         perms.push(CastingPermission::AdventureCreature);
@@ -5225,6 +5228,7 @@ mod tests {
                 granted_to: PlayerId(0),
                 frequency: crate::types::statics::CastFrequency::Unlimited,
                 source_id: None,
+                exiled_by_ability_controller: None,
                 mana_spend_permission: None,
             });
         state
@@ -5239,6 +5243,7 @@ mod tests {
                 granted_to: PlayerId(1),
                 frequency: crate::types::statics::CastFrequency::Unlimited,
                 source_id: None,
+                exiled_by_ability_controller: None,
                 mana_spend_permission: None,
             });
 
@@ -5270,6 +5275,7 @@ mod tests {
                 granted_to: PlayerId(0),
                 frequency: crate::types::statics::CastFrequency::Unlimited,
                 source_id: None,
+                exiled_by_ability_controller: None,
                 mana_spend_permission: None,
             });
 
