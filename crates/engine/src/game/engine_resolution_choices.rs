@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::types::ability::{
     CategoryChooserScope, ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind,
     PaymentCost, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef,
@@ -801,21 +803,28 @@ pub(super) fn handle_resolution_choice(
                     sideboard_indices.len()
                 )));
             }
+            let mut requested_counts = HashMap::new();
             for index in &sideboard_indices {
-                if !choices
+                *requested_counts.entry(*index).or_insert(0usize) += 1;
+            }
+            for (index, requested_count) in requested_counts {
+                let Some(choice) = choices
                     .iter()
-                    .any(|choice| choice.sideboard_index == *index)
-                {
+                    .find(|choice| choice.sideboard_index == index)
+                else {
                     return Err(EngineError::InvalidAction(
                         "Selected card not in outside-game choices".to_string(),
+                    ));
+                };
+                if requested_count > choice.entry.count as usize {
+                    return Err(EngineError::InvalidAction(
+                        "Selected more copies than are available outside the game".to_string(),
                     ));
                 }
             }
 
-            let mut sorted_indices = sideboard_indices.clone();
-            sorted_indices.sort_unstable_by(|a, b| b.cmp(a));
             let mut chosen_ids = Vec::new();
-            for sideboard_index in sorted_indices {
+            for sideboard_index in sideboard_indices {
                 let object_id = effects::search_outside_game::put_sideboard_entry_into_game(
                     state,
                     player,
@@ -825,7 +834,6 @@ pub(super) fn handle_resolution_choice(
                 .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
                 chosen_ids.push(object_id);
             }
-            chosen_ids.reverse();
 
             if reveal {
                 state.last_revealed_ids = chosen_ids.clone();

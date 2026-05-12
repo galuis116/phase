@@ -191,6 +191,12 @@ export interface OutsideGameChoiceEntry {
   entry: DeckPoolEntry;
 }
 
+export interface OutsideGameCardUse {
+  player: PlayerId;
+  sideboard_index: number;
+  count: number;
+}
+
 // ── Attack Target ───────────────────────────────────────────────────────
 
 export type AttackTarget =
@@ -1215,6 +1221,7 @@ export interface GameState {
     current_main: DeckPoolEntry[];
     current_sideboard: DeckPoolEntry[];
   }>;
+  outside_game_cards_brought_in?: OutsideGameCardUse[];
   sideboard_submitted?: PlayerId[];
   revealed_cards?: ObjectId[];
   restrictions?: GameRestriction[];

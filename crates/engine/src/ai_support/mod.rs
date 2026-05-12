@@ -175,11 +175,16 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             } else {
                 sideboard_indices.len() == *count
             };
+            let mut requested_counts = HashMap::new();
+            for index in sideboard_indices {
+                *requested_counts.entry(*index).or_insert(0usize) += 1;
+            }
             !valid_count
-                || sideboard_indices.iter().any(|index| {
-                    !choices
+                || requested_counts.iter().any(|(index, requested_count)| {
+                    choices
                         .iter()
-                        .any(|choice| choice.sideboard_index == *index)
+                        .find(|choice| choice.sideboard_index == *index)
+                        .is_none_or(|choice| *requested_count > choice.entry.count as usize)
                 })
         }
         (WaitingFor::PairChoice { choices, .. }, GameAction::ChoosePair { partner }) => {

@@ -198,30 +198,17 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
 
     if let WaitingFor::OutsideGameChoice {
         player,
-        ref choices,
-        count,
         reveal,
         up_to,
         destination,
+        ..
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) {
             filtered.waiting_for = WaitingFor::OutsideGameChoice {
                 player,
-                choices: choices
-                    .iter()
-                    .map(|choice| crate::types::game_state::OutsideGameChoiceEntry {
-                        sideboard_index: choice.sideboard_index,
-                        entry: crate::game::deck_loading::DeckEntry {
-                            card: crate::types::card::CardFace {
-                                name: "Hidden Card".to_string(),
-                                ..Default::default()
-                            },
-                            count: choice.entry.count,
-                        },
-                    })
-                    .collect(),
-                count,
+                choices: Vec::new(),
+                count: 0,
                 reveal,
                 up_to,
                 destination,
