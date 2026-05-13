@@ -403,6 +403,65 @@ describe("PermanentCard attachments", () => {
     });
   });
 
+  it("opens the ability picker when a convoke creature can pay colored or generic mana", () => {
+    const helper = makeObject({
+      id: 41,
+      name: "Conclave Helper",
+      color: ["Green"],
+      base_color: ["Green"],
+    });
+
+    const gameState = {
+      ...makeState(),
+      objects: { 41: helper },
+      battlefield: [41],
+    } as unknown as GameState;
+    const genericAction = {
+      type: "TapForConvoke",
+      data: { object_id: 41, mana_type: "Colorless" },
+    } as const;
+    const greenAction = {
+      type: "TapForConvoke",
+      data: { object_id: 41, mana_type: "Green" },
+    } as const;
+
+    useGameStore.setState({
+      gameState,
+      waitingFor: {
+        type: "ManaPayment",
+        data: { player: 0, convoke_mode: "Convoke" },
+      },
+      legalActions: [genericAction, greenAction],
+      legalActionsByObject: { 41: [genericAction, greenAction] },
+      spellCosts: {},
+    });
+
+    const { container } = render(
+      <BoardInteractionContext.Provider
+        value={{
+          activatableObjectIds: new Set(),
+          committedAttackerIds: new Set(),
+          incomingAttackerCounts: new Map(),
+          manaTappableObjectIds: new Set([41]),
+          selectableManaCostCreatureIds: new Set(),
+          undoableTapObjectIds: new Set(),
+          validAttackerIds: new Set(),
+          validTargetObjectIds: new Set(),
+        }}
+      >
+        <PermanentCard objectId={41} />
+      </BoardInteractionContext.Provider>,
+    );
+
+    fireEvent.click(container.querySelector('[data-object-id="41"]') as HTMLElement);
+
+    expect(dispatchAction).not.toHaveBeenCalled();
+    expect(useUiStore.getState().pendingAbilityChoice).toEqual({
+      objectId: 41,
+      actions: [genericAction, greenAction],
+    });
+  });
+
   it("renders face-down permanents with the card back in full-card mode", () => {
     const faceDownPermanent = makeObject({
       id: 54,

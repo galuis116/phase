@@ -2006,11 +2006,11 @@ pub(super) fn pay_and_push_adventure(
         }
     });
     // Gate on eligible creatures/artifacts being present.
-    let convoke_mode = convoke_mode.filter(|_| {
-        state
-            .objects
-            .values()
-            .any(|o| o.is_convoke_eligible(player))
+    let convoke_mode = convoke_mode.filter(|mode| {
+        state.objects.values().any(|o| match mode {
+            ConvokeMode::Convoke => o.is_convoke_eligible(player),
+            ConvokeMode::Waterbend => o.is_waterbend_eligible(player),
+        })
     });
 
     // Enter the payment step if cost needs player input (X) or convoke/waterbend is active.
@@ -2207,7 +2207,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         .players
         .iter()
         .find(|p| p.id == player)
-        .map(|p| p.mana_pool.total())
+        .map(|p| p.mana_pool.produced_mana_total())
         .unwrap_or(0);
 
     super::casting::pay_mana_cost_with_choices(
@@ -2244,7 +2244,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         .players
         .iter()
         .find(|p| p.id == player)
-        .map(|p| p.mana_pool.total())
+        .map(|p| p.mana_pool.produced_mana_total())
         .unwrap_or(0);
     let actual_mana_spent = pool_before.saturating_sub(pool_after) as u32;
 

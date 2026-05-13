@@ -2915,42 +2915,41 @@ fn mana_payment_actions(
     if let Some(mode) = convoke_mode {
         // CR 702.51a + CR 302.6: Summoning sickness does not restrict tapping for convoke.
         for (obj_id, obj) in &state.objects {
-            if obj.is_convoke_eligible(player) {
-                match mode {
-                    ConvokeMode::Waterbend => {
-                        // Waterbend: always colorless
+            match mode {
+                ConvokeMode::Waterbend if obj.is_waterbend_eligible(player) => {
+                    // Waterbend: always colorless
+                    actions.push(candidate(
+                        GameAction::TapForConvoke {
+                            object_id: *obj_id,
+                            mana_type: crate::types::mana::ManaType::Colorless,
+                        },
+                        TacticalClass::Mana,
+                        Some(player),
+                    ));
+                }
+                ConvokeMode::Convoke if obj.is_convoke_eligible(player) => {
+                    // CR 702.51a: Colorless (for generic) always available
+                    actions.push(candidate(
+                        GameAction::TapForConvoke {
+                            object_id: *obj_id,
+                            mana_type: crate::types::mana::ManaType::Colorless,
+                        },
+                        TacticalClass::Mana,
+                        Some(player),
+                    ));
+                    // Plus one per color the creature has
+                    for color in &obj.color {
                         actions.push(candidate(
                             GameAction::TapForConvoke {
                                 object_id: *obj_id,
-                                mana_type: crate::types::mana::ManaType::Colorless,
+                                mana_type: mana_sources::mana_color_to_type(color),
                             },
                             TacticalClass::Mana,
                             Some(player),
                         ));
-                    }
-                    ConvokeMode::Convoke => {
-                        // CR 702.51a: Colorless (for generic) always available
-                        actions.push(candidate(
-                            GameAction::TapForConvoke {
-                                object_id: *obj_id,
-                                mana_type: crate::types::mana::ManaType::Colorless,
-                            },
-                            TacticalClass::Mana,
-                            Some(player),
-                        ));
-                        // Plus one per color the creature has
-                        for color in &obj.color {
-                            actions.push(candidate(
-                                GameAction::TapForConvoke {
-                                    object_id: *obj_id,
-                                    mana_type: mana_sources::mana_color_to_type(color),
-                                },
-                                TacticalClass::Mana,
-                                Some(player),
-                            ));
-                        }
                     }
                 }
+                _ => {}
             }
         }
     }

@@ -143,6 +143,10 @@ pub enum ManaRestriction {
     OnlyForSpellWithKeywordKind(KeywordKind),
     /// "Spend this mana only to cast spells with flashback from a graveyard."
     OnlyForSpellWithKeywordKindFromZone(KeywordKind, crate::types::zones::Zone),
+    /// CR 702.51a: Internal marker for a convoke tap that substitutes for
+    /// paying mana. The payment algorithm may consume it for the current spell,
+    /// but cast-spent metrics and mana-added triggers must ignore it.
+    ConvokePayment,
 }
 
 impl ManaRestriction {
@@ -204,6 +208,7 @@ impl ManaRestriction {
                 meta.keyword_kinds.contains(required_keyword)
                     && meta.cast_from_zone == Some(*required_zone)
             }
+            ManaRestriction::ConvokePayment => true,
         }
     }
 
@@ -230,7 +235,7 @@ impl ManaRestriction {
             ManaRestriction::OnlyForActivation => true,
             // X-cost mana can be used for abilities with {X} in their cost.
             // TODO: Check if the ability has {X} in its cost once that data is available.
-            ManaRestriction::OnlyForXCosts => false,
+            ManaRestriction::OnlyForXCosts | ManaRestriction::ConvokePayment => false,
         }
     }
 
@@ -312,6 +317,25 @@ impl ManaUnit {
             grants: Vec::new(),
             expiry: None,
         }
+    }
+
+    /// Construct a convoke payment marker. This is intentionally not mana
+    /// production; it exists only so the shared mana-payment algorithm can
+    /// consume a tap as satisfying the selected shard.
+    pub fn convoke_payment(color: ManaType, source_id: ObjectId) -> Self {
+        Self {
+            color,
+            source_id,
+            snow: false,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: vec![ManaRestriction::ConvokePayment],
+            grants: Vec::new(),
+            expiry: None,
+        }
+    }
+
+    pub fn is_convoke_payment(&self) -> bool {
+        self.restrictions.contains(&ManaRestriction::ConvokePayment)
     }
 }
 
@@ -759,6 +783,13 @@ impl ManaPool {
 
     pub fn total(&self) -> usize {
         self.mana.len()
+    }
+
+    pub fn produced_mana_total(&self) -> usize {
+        self.mana
+            .iter()
+            .filter(|unit| !unit.is_convoke_payment())
+            .count()
     }
 
     pub fn clear(&mut self) {

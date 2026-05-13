@@ -255,6 +255,16 @@ export function abilityChoiceLabel(
       description: `Cast ${object.name} by paying its Web-slinging cost and returning ${returnedName} to your hand (CR 702.188a).`,
     };
   }
+  if (action.type === "TapForConvoke") {
+    const mana =
+      action.data.mana_type === "Colorless"
+        ? "1"
+        : MANA_COLOR_ABBREVIATION[action.data.mana_type] ?? action.data.mana_type;
+    return {
+      label: `Tap for {${mana}}`,
+      description: `Tap ${object.name} to help pay this spell's cost.`,
+    };
+  }
   if (action.type === "ActivateAbility") {
     const ability = object.abilities[action.data.ability_index];
     // For mana abilities, show what they produce (e.g., "Add {U}") instead of just the cost

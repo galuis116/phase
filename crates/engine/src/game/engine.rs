@@ -2290,9 +2290,13 @@ fn apply_action(
                 .objects
                 .get(&object_id)
                 .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
-            if !obj.is_convoke_eligible(*player) {
+            let is_eligible = match mode {
+                ConvokeMode::Convoke => obj.is_convoke_eligible(*player),
+                ConvokeMode::Waterbend => obj.is_waterbend_eligible(*player),
+            };
+            if !is_eligible {
                 return Err(EngineError::ActionNotAllowed(
-                    "Can only tap untapped creatures or artifacts you control for convoke"
+                    "Can only tap an eligible untapped permanent you control for convoke"
                         .to_string(),
                 ));
             }
@@ -2329,18 +2333,28 @@ fn apply_action(
                 object_id,
                 caused_by: None,
             });
-            // Add mana to pool
-            let unit =
-                crate::types::mana::ManaUnit::new(resolved_mana_type, object_id, false, Vec::new());
+            let unit = match mode {
+                ConvokeMode::Convoke => {
+                    crate::types::mana::ManaUnit::convoke_payment(resolved_mana_type, object_id)
+                }
+                ConvokeMode::Waterbend => crate::types::mana::ManaUnit::new(
+                    resolved_mana_type,
+                    object_id,
+                    false,
+                    Vec::new(),
+                ),
+            };
             if let Some(p) = state.players.iter_mut().find(|p| p.id == *player) {
                 p.mana_pool.add(unit);
             }
-            events.push(GameEvent::ManaAdded {
-                player_id: *player,
-                mana_type: resolved_mana_type,
-                source_id: object_id,
-                tapped_for_mana: false,
-            });
+            if mode == ConvokeMode::Waterbend {
+                events.push(GameEvent::ManaAdded {
+                    player_id: *player,
+                    mana_type: resolved_mana_type,
+                    source_id: object_id,
+                    tapped_for_mana: false,
+                });
+            }
             if tapped_creature_for_convoke {
                 let pending = state.pending_cast.as_mut().ok_or_else(|| {
                     EngineError::InvalidAction("No pending cast for convoke".to_string())

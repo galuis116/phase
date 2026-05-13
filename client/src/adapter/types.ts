@@ -261,6 +261,7 @@ export type CoreType =
   | "Dungeon";
 
 export type ManaType = "White" | "Blue" | "Black" | "Red" | "Green" | "Colorless";
+export type ConvokeMode = "Convoke" | "Waterbend";
 export type RoomDoor = "Left" | "Right";
 
 /**
@@ -287,9 +288,9 @@ export type ManaPip =
 
 // ── Mana ─────────────────────────────────────────────────────────────────
 
-export interface ManaRestriction {
-  OnlyForSpellType: string;
-}
+export type ManaRestriction =
+  | { OnlyForSpellType: string }
+  | "ConvokePayment";
 
 export interface ManaUnit {
   color: ManaType;
@@ -732,7 +733,7 @@ export type WaitingFor =
       type: "MulliganBottomCards";
       data: { pending: { player: PlayerId; count: number }[] };
     }
-  | { type: "ManaPayment"; data: { player: PlayerId } }
+  | { type: "ManaPayment"; data: { player: PlayerId; convoke_mode?: ConvokeMode } }
   | {
       type: "ChooseXValue";
       data: { player: PlayerId; min?: number; max: number; pending_cast: PendingCast };
