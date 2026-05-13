@@ -1196,6 +1196,23 @@ export interface GameState {
   pending_replacement: unknown | null;
   layers_dirty: boolean;
   next_timestamp: number;
+  /**
+   * Per-object source attribution for layer-applied continuous effects,
+   * rebuilt every layers pass. Maps each affected object's id to the set
+   * of `EffectRef`s that contributed grants/modifications/removals to its
+   * current characteristics. Display-only — game logic never reads it.
+   *
+   * Empty objects (no granted effects) are omitted, so most state.attribution
+   * lookups for a given object id will be undefined.
+   */
+  attribution?: Record<string, ObjectAttribution>;
+  /**
+   * Runtime continuous effects from resolved spells/abilities. The frontend
+   * dereferences `EffectRef::Transient` entries here to recover the
+   * snapshotted `source_name` (which survives the spell's zone change to
+   * the graveyard per CR 400.7) and the granted `ContinuousModification`.
+   */
+  transient_continuous_effects?: TransientContinuousEffect[];
   seat_order?: PlayerId[];
   format_config?: FormatConfig;
   /**
@@ -1244,6 +1261,81 @@ export interface GameState {
 export type AutoPassMode =
   | { type: "UntilStackEmpty"; initial_stack_len: number }
   | { type: "UntilEndOfTurn" };
+
+// ── Source attribution (CR 613 layers) ───────────────────────────────────
+
+/**
+ * One CR 613 layer of the continuous-effect pipeline.
+ *
+ * Mirrors `engine::types::layers::Layer`. Serialized as the variant name
+ * string by serde, so this is a plain TypeScript string union — match
+ * directly with `"Ability"`, `"ModifyPT"`, etc.
+ */
+export type AttributionLayer =
+  | "Copy"
+  | "Control"
+  | "Text"
+  | "Type"
+  | "Color"
+  | "Ability"
+  | "CharDef"
+  | "SetPT"
+  | "ModifyPT"
+  | "SwitchPT"
+  | "CounterPT";
+
+/**
+ * Reference to a single `ContinuousModification` that contributed to an
+ * object's characteristics. Resolves either to a static ability on a
+ * tracked-zone permanent or to a runtime transient effect from a resolved
+ * spell/ability.
+ *
+ * The frontend dereferences a `Static` ref via
+ *   state.objects[source].static_definitions[def_index].modifications[mod_index]
+ * and a `Transient` ref via
+ *   state.transient_continuous_effects.find(t => t.id === id).modifications[mod_index]
+ */
+export type EffectRef =
+  | { type: "Transient"; data: { id: number; mod_index: number } }
+  | {
+      type: "Static";
+      data: { source: ObjectId; def_index: number; mod_index: number };
+    };
+
+/**
+ * Per-object record of which continuous effects contributed grants /
+ * modifications / removals to that object during the last layers pass.
+ *
+ * Entries within a single layer bucket are in CR 613.7 timestamp order
+ * (the engine applies effects timestamp-sorted before recording them).
+ */
+export interface ObjectAttribution {
+  by_layer?: Partial<Record<AttributionLayer, EffectRef[]>>;
+}
+
+export interface TransientContinuousEffect {
+  id: number;
+  source_id: ObjectId;
+  controller: PlayerId;
+  timestamp: number;
+  /** Snapshotted at the originating spell/ability's resolution time. */
+  source_name: string;
+  /** `ContinuousModification` payloads — opaque to the display layer; the
+   *  FE only inspects the discriminant + a small subset of fields. */
+  modifications: ContinuousModification[];
+}
+
+/**
+ * Minimal display-layer shape for the engine's `ContinuousModification`
+ * enum. Internally tagged (`#[serde(tag = "type")]`) so variant fields
+ * flatten alongside the discriminant. Only the variants the FE currently
+ * renders attribution for are typed; everything else falls through the
+ * catch-all. Mirrors `engine::types::ability::ContinuousModification`.
+ */
+export type ContinuousModification =
+  | { type: "AddKeyword"; keyword: Keyword }
+  | { type: "RemoveKeyword"; keyword: Keyword }
+  | { type: string; [key: string]: unknown };
 
 // ── Adapter Interface ────────────────────────────────────────────────────
 
