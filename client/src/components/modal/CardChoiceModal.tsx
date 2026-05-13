@@ -2311,7 +2311,9 @@ function HarmonizeTapModal({ data }: { data: HarmonizeTapChoice["data"] }) {
 
 function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
   const dispatch = useGameDispatch();
-  const objects = useGameStore((s) => s.gameState?.objects);
+  const gameState = useGameStore((s) => s.gameState);
+  const objects = gameState?.objects;
+  const turnNumber = gameState?.turn_number;
   const hoverProps = useInspectHoverProps();
 
   if (!objects) return null;
@@ -2325,9 +2327,13 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
         {data.candidates.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
+          const isCurrentTurnEntry =
+            turnNumber != null && obj.entered_battlefield_turn === turnNumber;
+          const entryLabel = isCurrentTurnEntry ? "Just entered" : "Already on battlefield";
           return (
             <motion.button
               key={id}
+              aria-label={`Keep ${obj.name} (${entryLabel})`}
               className="relative rounded-lg transition hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
               initial={{ opacity: 0, y: 60, scale: 0.85 }}
               animate={{ opacity: 0.85, y: 0, scale: 1 }}
@@ -2343,6 +2349,17 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
+              <div className="absolute top-2 left-1/2 -translate-x-1/2">
+                <span
+                  className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-bold text-white shadow ${
+                    isCurrentTurnEntry
+                      ? "bg-amber-500/95"
+                      : "bg-sky-700/95"
+                  }`}
+                >
+                  {entryLabel}
+                </span>
+              </div>
             </motion.button>
           );
         })}
