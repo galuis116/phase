@@ -18,7 +18,7 @@ interface DialogShellProps {
 const SIZE_CLASS: Record<NonNullable<DialogShellProps["size"]>, string> = {
   sm: "max-w-sm",
   md: "max-w-md",
-  lg: "max-w-2xl",
+  lg: "max-w-3xl",
 };
 
 export function DialogShell({

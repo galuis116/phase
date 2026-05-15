@@ -4,7 +4,7 @@ import type { ObjectId, PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getPlayerDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { DialogShell } from "../modal/DialogShell.tsx";
-import { PermanentCard } from "../board/PermanentCard.tsx";
+import { DialogAttachmentCard } from "./DialogAttachmentCard.tsx";
 
 /** What's enchanted/equipped/fortified — the thing on the left of the dialog.
  *  A discriminated union so the dialog renders the appropriate visual without
@@ -23,21 +23,32 @@ interface Props {
   attachmentIds: readonly ObjectId[];
 }
 
-const CARD_SIZE_VARS: CSSProperties = {
-  "--card-w": "120px",
-  "--card-h": "168px",
+// Dialog cards render the full Scryfall image at a size where oracle text is
+// readable without zooming. 220px wide hits the readability threshold; the
+// host card is smaller (140px) since the player avatar is identity, not text.
+const ATTACHMENT_W_PX = 220;
+const HOST_W_PX = 140;
+
+const HOST_SIZE_VARS: CSSProperties = {
+  "--card-w": `${HOST_W_PX}px`,
+  "--card-h": `${Math.round(HOST_W_PX * 1.4)}px`,
 } as CSSProperties;
 
 /**
  * Modal that shows a host (creature, planeswalker, battle, or player) on the
- * left and every permanent attached to it on the right. Reads card data
- * straight from the engine state via `<PermanentCard>` so each attachment
- * keeps full interaction parity (target select, activation, hover preview,
- * debug-highlight) — the dialog is a layout container, not a render path.
+ * left and every permanent attached to it on the right. Each attachment is a
+ * full Scryfall card via `<DialogAttachmentCard>` (not the battlefield-
+ * compact `<PermanentCard>`) so the player can actually read what's
+ * enchanting them — the dialog's primary purpose.
+ *
+ * `<DialogAttachmentCard>` preserves the two interactions that matter for
+ * Auras: click-to-target (when the engine is asking for an enchantment
+ * target) and click-to-activate (rare on Auras but exists). Counters render
+ * as overlay badges in the top-right.
  *
  * Used for player-attached Aura clusters today (Curse of Opulence, Faith's
- * Fetters, etc.) and is structured to take creature hosts as well, so the
- * `PermanentCard` "host with N attachments" stack can adopt the same dialog
+ * Fetters, etc.) and structured to take object hosts as well, so
+ * PermanentCard's "host with N attachments" stack can adopt the same dialog
  * for a less-cluttered N>=2 affordance.
  */
 export function AttachmentsDialog({ isOpen, onClose, host, attachmentIds }: Props) {
@@ -58,21 +69,22 @@ export function AttachmentsDialog({ isOpen, onClose, host, attachmentIds }: Prop
       title={title}
       subtitle={subtitle}
       size="lg"
+      scrollable
       onClose={onClose}
     >
-      <div className="flex items-start gap-4 px-4 py-4 lg:px-6 lg:py-5" style={CARD_SIZE_VARS}>
-        <div className="shrink-0">
+      <div className="flex items-start gap-4 px-4 py-4 lg:px-6 lg:py-5">
+        <div className="shrink-0" style={HOST_SIZE_VARS}>
           <HostVisual host={host} />
         </div>
         <div aria-hidden className="w-px self-stretch bg-white/10" />
         {/* `min-w-0` lets the flex-1 child shrink below its content's
             intrinsic width so wrapping engages cleanly when the dialog is
-            constrained (small viewports). Without it, the children's `w-fit`
-            keeps the row from shrinking and the cards overflow-hidden out
-            of the dialog card. */}
+            constrained. Cards wrap to a new row when there isn't horizontal
+            room — `scrollable` on the DialogShell handles the vertical
+            overflow if the row count grows. */}
         <div className="flex min-w-0 flex-1 flex-wrap content-start gap-3">
           {attachmentIds.map((id) => (
-            <PermanentCard key={id} objectId={id} />
+            <DialogAttachmentCard key={id} objectId={id} widthPx={ATTACHMENT_W_PX} />
           ))}
         </div>
       </div>
@@ -82,7 +94,11 @@ export function AttachmentsDialog({ isOpen, onClose, host, attachmentIds }: Prop
 
 function HostVisual({ host }: { host: AttachmentHost }) {
   if (host.type === "object") {
-    return <PermanentCard objectId={host.objectId} />;
+    // Object hosts (creatures/planeswalkers/battles with Auras attached) get
+    // the same full-card readable treatment. Reuses DialogAttachmentCard
+    // with no extra interaction wiring beyond what the host normally exposes
+    // — the user clicked the dialog to read about the host, after all.
+    return <DialogAttachmentCard objectId={host.objectId} widthPx={HOST_W_PX} />;
   }
   return <PlayerHostCard playerId={host.playerId} />;
 }
