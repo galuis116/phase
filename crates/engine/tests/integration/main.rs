@@ -49,3 +49,4 @@ mod treasured_find_regression;
 mod ureni_attack_trigger;
 mod urzas_saga_chapter_two;
 mod virulent_emissary_trigger;
+mod wise_mothman_milled_trigger;

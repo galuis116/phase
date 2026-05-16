@@ -3573,6 +3573,42 @@ fn parse_enters_tapped_state_rider(input: &str) -> Option<TriggerCondition> {
     })
 }
 
+/// CR 701.17a: Parse the milled-card filter from the predicate tail of an
+/// active-voice mill trigger ("mills **a nonland card**", "mills **one or more
+/// creature cards**"). Optionally consumes a leading "one or more " quantifier
+/// (semantically redundant — `valid_card` matching is per-object), then
+/// delegates the typed-filter recognition to `parse_type_phrase` (which strips
+/// the "a "/"an " article itself). Returns `None` when the tail is not a
+/// recognizable type phrase, so the caller falls through to the next arm.
+fn parse_milled_object_filter(input: &str) -> Option<TargetFilter> {
+    let after_quantifier = value((), tag::<_, _, OracleError<'_>>("one or more "))
+        .parse(input)
+        .map(|(rest, _)| rest)
+        .unwrap_or(input);
+    let (filter, rest) = parse_type_phrase(after_quantifier);
+    // Require the type phrase to have consumed something — a bare fallthrough
+    // (rest == after_quantifier) means no typed filter was recognized.
+    if rest.len() < after_quantifier.len() {
+        Some(filter)
+    } else {
+        None
+    }
+}
+
+/// Returns `true` when the trigger subject is an opponent-scoped player filter
+/// (produced by `parse_single_subject` for "an opponent" / "each opponent").
+/// Used by the active-voice mill arm to scope the milled-card filter to the
+/// opponent's library.
+fn subject_is_opponent(subject: &TargetFilter) -> bool {
+    matches!(
+        subject,
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::Opponent),
+            ..
+        })
+    )
+}
+
 /// Try to parse an event verb and build a TriggerDefinition from subject + event.
 fn try_parse_event(
     subject: &TargetFilter,
@@ -3875,6 +3911,51 @@ fn try_parse_event(
         def.mode = TriggerMode::Destroyed;
         def.valid_card = Some(subject.clone());
         return Some((TriggerMode::Destroyed, def));
+    }
+
+    // CR 701.17a: "is milled" / "are milled" — passive-voice mill trigger.
+    // "For a player to mill a number of cards, that player puts that many cards
+    // from the top of their library into their graveyard." Mirrors the `is exiled`
+    // / `is sacrificed` arms above. The passive subject (parsed by
+    // `parse_trigger_subject`) IS the milled card, so it maps straight to
+    // `valid_card`. The per-batch vs per-card distinction (CR 603.2c — an
+    // ability triggers only once each time its trigger event occurs) is carried
+    // by `def.batched`, which the caller stamps from the "one or more …"
+    // subject quantifier — this arm emits `TriggerMode::Milled` unconditionally.
+    if alt((
+        value((), tag::<_, _, OracleError<'_>>("is milled")),
+        value((), tag("are milled")),
+    ))
+    .parse(rest)
+    .is_ok()
+    {
+        let mut def = make_base();
+        def.mode = TriggerMode::Milled;
+        def.valid_card = Some(subject.clone());
+        return Some((TriggerMode::Milled, def));
+    }
+
+    // CR 701.17a + CR 603.2c: "mills <object filter>" — active-voice mill trigger
+    // ("a player mills a nonland card", "an opponent mills a nonland card",
+    // "a player mills one or more creature cards"). Here the parsed subject is
+    // the *milling player*, not the milled card; the milled card is the typed
+    // filter in the predicate tail. This mirrors how `DamageDone` separates
+    // `valid_source` from `valid_target`. When the milling player is an
+    // opponent, the milled card lives in that opponent's library, so the
+    // milled-card filter carries `ControllerRef::Opponent`. As above, the mode
+    // is emitted unconditionally; `def.batched` is the caller's responsibility.
+    if let Ok((after_mills, ())) = value((), tag::<_, _, OracleError<'_>>("mills ")).parse(rest) {
+        if let Some(card_filter) = parse_milled_object_filter(after_mills) {
+            let card_filter = if subject_is_opponent(subject) {
+                add_controller(card_filter, ControllerRef::Opponent)
+            } else {
+                card_filter
+            };
+            let mut def = make_base();
+            def.mode = TriggerMode::Milled;
+            def.valid_card = Some(card_filter);
+            return Some((TriggerMode::Milled, def));
+        }
     }
 
     // CR 701.14: "fights" / "fight" — fight trigger
@@ -13955,6 +14036,109 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::Destroyed);
         assert!(def.valid_card.is_some());
+    }
+
+    // --- Milled triggers (CR 701.17a) ---
+
+    #[test]
+    fn trigger_passive_milled_batched() {
+        // The Wise Mothman / Mirelurk Queen / Screeching Scorchbeast shape.
+        let def = parse_trigger_line(
+            "Whenever one or more nonland cards are milled, put a +1/+1 counter on it.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Milled);
+        assert!(def.batched, "\"one or more\" subject must stamp batched");
+        match def.valid_card {
+            Some(TargetFilter::Typed(ref f)) => {
+                assert!(
+                    f.type_filters.iter().any(|t| matches!(t, TypeFilter::Card)),
+                    "valid_card should be a card filter, got {:?}",
+                    f.type_filters
+                );
+                assert!(
+                    f.type_filters.iter().any(|t| matches!(
+                        t,
+                        TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land)
+                    )),
+                    "valid_card should carry Non(Land), got {:?}",
+                    f.type_filters
+                );
+            }
+            other => panic!("expected Typed nonland-card filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_passive_milled_single_card() {
+        // Single-card passive form — no "one or more", so not batched.
+        let def = parse_trigger_line("Whenever a card is milled, you gain 1 life.", "Test Card");
+        assert_eq!(def.mode, TriggerMode::Milled);
+        assert!(!def.batched);
+        assert!(def.valid_card.is_some());
+    }
+
+    #[test]
+    fn trigger_active_milled_a_player() {
+        // Glowing One shape: "Whenever a player mills a nonland card, …"
+        let def = parse_trigger_line(
+            "Whenever a player mills a nonland card, you gain 1 life.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Milled);
+        match def.valid_card {
+            Some(TargetFilter::Typed(ref f)) => {
+                assert!(
+                    f.type_filters.iter().any(|t| matches!(t, TypeFilter::Card)),
+                    "valid_card should be a card filter"
+                );
+                assert!(
+                    f.controller.is_none(),
+                    "\"a player\" milling has no controller scope, got {:?}",
+                    f.controller
+                );
+            }
+            other => panic!("expected Typed nonland-card filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_active_milled_an_opponent_scopes_controller() {
+        // Infesting Radroach shape: the milled card lives in the opponent's library.
+        let def = parse_trigger_line(
+            "Whenever an opponent mills a nonland card, you gain 1 life.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Milled);
+        match def.valid_card {
+            Some(TargetFilter::Typed(ref f)) => assert_eq!(
+                f.controller,
+                Some(ControllerRef::Opponent),
+                "opponent milling must scope the milled-card filter to Opponent"
+            ),
+            other => panic!("expected Typed opponent-scoped filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_active_milled_one_or_more() {
+        // Zellix shape: "Whenever a player mills one or more creature cards, …"
+        let def = parse_trigger_line(
+            "Whenever a player mills one or more creature cards, create a 1/1 black Insect creature token.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::Milled);
+        assert!(def.batched, "\"one or more\" subject must stamp batched");
+        match def.valid_card {
+            Some(TargetFilter::Typed(ref f)) => assert!(
+                f.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Creature)),
+                "valid_card should be a creature-card filter, got {:?}",
+                f.type_filters
+            ),
+            other => panic!("expected Typed creature-card filter, got {other:?}"),
+        }
     }
 
     #[test]
