@@ -12,7 +12,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
-use nom::sequence::terminated;
+use nom::sequence::{pair, terminated};
 use nom::Parser;
 
 use super::oracle_ir::context::ParseContext;
@@ -308,6 +308,65 @@ pub(crate) fn parse_cda_quantity_with_context(
             return Some(QuantityExpr::Offset {
                 inner: Box::new(inner_expr),
                 offset: n as i32,
+            });
+        }
+    }
+
+    // CR 208.1: "the difference between its power and toughness" — the
+    // unsigned gap between an object's two current post-layer characteristics.
+    // ("The difference between A and B" being unsigned is an Oracle templating
+    // convention with no dedicated CR number; the resolver takes `.abs()`.)
+    // Composed from `tag`s by axis (subject form ×
+    // power/toughness ordering), emitting a general `QuantityExpr::Difference`
+    // over existing `QuantityRef::Power`/`Toughness` leaves. Placed before the
+    // generic `parse_quantity_ref` arm so the whole difference phrase is
+    // recognized as a unit. Operand order is irrelevant — `Difference`
+    // resolves to an absolute value — but both orderings are parsed so the
+    // remainder is fully consumed.
+    //
+    // CR 115.10: the P/T refs are scoped to `ObjectScope::Recipient`. On a
+    // trigger pump like Doran's ("Whenever a creature you control attacks or
+    // blocks, it gets +X/+X … where X is the difference between its power and
+    // toughness"), "its" anaphors back to the *affected* creature, not the
+    // ability's own source — `Recipient` resolves to the first object target
+    // (the pumped creature) and only falls back to the source when no target
+    // is present (the CDA case), so a single scope is correct for every
+    // parse path that lands a difference phrase.
+    if let Ok((rest, (left_ref, right_ref))) = (
+        tag::<_, _, OracleError<'_>>("the difference between "),
+        alt((tag("its "), tag("~'s "), tag("this creature's "))),
+        alt((
+            value(
+                (
+                    QuantityRef::Power {
+                        scope: ObjectScope::Recipient,
+                    },
+                    QuantityRef::Toughness {
+                        scope: ObjectScope::Recipient,
+                    },
+                ),
+                pair(tag("power and "), tag("toughness")),
+            ),
+            value(
+                (
+                    QuantityRef::Toughness {
+                        scope: ObjectScope::Recipient,
+                    },
+                    QuantityRef::Power {
+                        scope: ObjectScope::Recipient,
+                    },
+                ),
+                pair(tag("toughness and "), tag("power")),
+            ),
+        )),
+    )
+        .parse(text)
+        .map(|(rest, (_, _, refs))| (rest, refs))
+    {
+        if rest.is_empty() {
+            return Some(QuantityExpr::Difference {
+                left: Box::new(QuantityExpr::Ref { qty: left_ref }),
+                right: Box::new(QuantityExpr::Ref { qty: right_ref }),
             });
         }
     }
@@ -1232,6 +1291,68 @@ mod tests {
         CardTypeSetSource, ControllerRef, FilterProp, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
+
+    /// The expected `QuantityExpr::Difference` for "power and toughness" order:
+    /// `Difference { Ref(Power{Recipient}), Ref(Toughness{Recipient}) }`.
+    /// Operand order is irrelevant at resolution (`Difference` resolves to an
+    /// unsigned magnitude — an Oracle templating convention) but the
+    /// constructor pins it for assertion.
+    fn pt_difference() -> QuantityExpr {
+        QuantityExpr::Difference {
+            left: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Recipient,
+                },
+            }),
+            right: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Recipient,
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn difference_between_its_power_and_toughness() {
+        assert_eq!(
+            parse_cda_quantity("the difference between its power and toughness"),
+            Some(pt_difference()),
+            "Doran's `where X is` tail must resolve to a typed Difference, not a Variable"
+        );
+    }
+
+    #[test]
+    fn difference_between_self_ref_power_and_toughness() {
+        // `~`-normalized self-reference form
+        assert_eq!(
+            parse_cda_quantity("the difference between ~'s power and toughness"),
+            Some(pt_difference()),
+        );
+    }
+
+    #[test]
+    fn difference_between_this_creatures_power_and_toughness() {
+        assert_eq!(
+            parse_cda_quantity("the difference between this creature's power and toughness"),
+            Some(pt_difference()),
+        );
+    }
+
+    #[test]
+    fn difference_between_toughness_and_power_order_irrelevant() {
+        // The reversed ordering parses to a Difference with swapped operands;
+        // resolution is absolute, so both produce the same value at runtime.
+        let expr = parse_cda_quantity("the difference between its toughness and power");
+        assert!(
+            matches!(
+                expr,
+                Some(QuantityExpr::Difference { ref left, ref right })
+                    if matches!(**left, QuantityExpr::Ref { qty: QuantityRef::Toughness { scope: ObjectScope::Recipient } })
+                    && matches!(**right, QuantityExpr::Ref { qty: QuantityRef::Power { scope: ObjectScope::Recipient } })
+            ),
+            "reversed ordering should still parse to a Difference, got {expr:?}"
+        );
+    }
 
     #[test]
     fn for_each_counter_on_self_normalized() {

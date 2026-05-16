@@ -1037,6 +1037,10 @@ fn quantity_expr_has_unresolved_variable(
         QuantityExpr::Sum { exprs } => exprs
             .iter()
             .any(|expr| quantity_expr_has_unresolved_variable(state, ability, expr)),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_has_unresolved_variable(state, ability, left)
+                || quantity_expr_has_unresolved_variable(state, ability, right)
+        }
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
     }
 }

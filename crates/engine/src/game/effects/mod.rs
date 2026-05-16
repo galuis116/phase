@@ -1111,6 +1111,10 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
         QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_references_tracked_set),
         QuantityExpr::UpTo { max } => quantity_expr_references_tracked_set(max),
         QuantityExpr::Power { exponent, .. } => quantity_expr_references_tracked_set(exponent),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_references_tracked_set(left)
+                || quantity_expr_references_tracked_set(right)
+        }
     }
 }
 

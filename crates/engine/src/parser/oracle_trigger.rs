@@ -1750,6 +1750,10 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
             factor: *factor,
             inner: Box::new(substitute_another_in_expr(inner)),
         },
+        QuantityExpr::Difference { left, right } => QuantityExpr::Difference {
+            left: Box::new(substitute_another_in_expr(left)),
+            right: Box::new(substitute_another_in_expr(right)),
+        },
         other => other.clone(),
     }
 }
@@ -8852,6 +8856,56 @@ mod tests {
                 "expected Effect::Pump with TriggeringSource, got {:?}",
                 other
             ),
+        }
+    }
+
+    #[test]
+    fn doran_attack_block_pump_resolves_pt_difference() {
+        // Issue #417 — Doran, Besieged by Time.
+        // "Whenever a creature you control attacks or blocks, it gets +X/+X
+        //  until end of turn, where X is the difference between its power and
+        //  toughness." The `where X is` tail must lower to a typed
+        //  QuantityExpr::Difference, NOT leak the clause text into a
+        //  PtValue::Variable (the `unwrap_or_else` fallback in
+        //  oracle_effect/mod.rs). CR 208.1 / CR 611.2d. ("The difference
+        //  between A and B" is an unsigned Oracle templating convention with
+        //  no dedicated CR number — the resolver takes `.abs()`.)
+        let def = parse_trigger_line(
+            "Whenever a creature you control attacks or blocks, it gets +X/+X until end of turn, where X is the difference between its power and toughness.",
+            "Doran, Besieged by Time",
+        );
+        let exec = def.execute.as_ref().expect("execute must be Some");
+        let expected = QuantityExpr::Difference {
+            left: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Recipient,
+                },
+            }),
+            right: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Recipient,
+                },
+            }),
+        };
+        match &*exec.effect {
+            Effect::Pump {
+                power,
+                toughness,
+                target,
+            } => {
+                assert_eq!(
+                    *power,
+                    PtValue::Quantity(expected.clone()),
+                    "power must be a typed Difference, not a Variable leak"
+                );
+                assert_eq!(
+                    *toughness,
+                    PtValue::Quantity(expected),
+                    "toughness must be a typed Difference, not a Variable leak"
+                );
+                assert_eq!(*target, TargetFilter::TriggeringSource);
+            }
+            other => panic!("expected Effect::Pump, got {other:?}"),
         }
     }
 

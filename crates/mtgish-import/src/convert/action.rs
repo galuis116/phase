@@ -254,6 +254,10 @@ fn rewrite_bound_x_in_quantity_expr(expr: &mut QuantityExpr, binding: &QuantityE
             .iter_mut()
             .map(|inner| rewrite_bound_x_in_quantity_expr(inner, binding))
             .sum(),
+        QuantityExpr::Difference { left, right } => {
+            rewrite_bound_x_in_quantity_expr(left, binding)
+                + rewrite_bound_x_in_quantity_expr(right, binding)
+        }
     }
 }
 

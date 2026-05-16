@@ -189,6 +189,9 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
         QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_uses_recipient),
         QuantityExpr::UpTo { max } => quantity_expr_uses_recipient(max),
         QuantityExpr::Power { exponent, .. } => quantity_expr_uses_recipient(exponent),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_uses_recipient(left) || quantity_expr_uses_recipient(right)
+        }
     }
 }
 
@@ -234,11 +237,11 @@ pub fn resolve_quantity_with_ctx(
 }
 
 /// Compose recursively-resolved inner values for the non-leaf
-/// `QuantityExpr` variants (`DivideRounded`, `Offset`, `Multiply`, `Sum`).
-/// All four resolver entry points share this logic; only the leaf arms
-/// (`Fixed`, `Ref`) differ in context handling. `recurse` is a closure
-/// the caller supplies that re-enters its own resolver with the inner
-/// expression.
+/// `QuantityExpr` variants (`DivideRounded`, `Offset`, `Multiply`, `Sum`,
+/// `Power`, `UpTo`, `Difference`). All resolver entry points share this
+/// logic; only the leaf arms (`Fixed`, `Ref`) differ in context handling.
+/// `recurse` is a closure the caller supplies that re-enters its own
+/// resolver with the inner expression.
 ///
 /// Panics if called with a leaf variant — callers must dispatch leaves
 /// before delegating here.
@@ -273,6 +276,14 @@ fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> 
         // (e.g., `DivideRounded { inner: UpTo { max: ... } }`) collapse to a
         // sensible bound rather than panicking.
         QuantityExpr::UpTo { max } => recurse(max),
+        // "The difference between A and B" is an unsigned-magnitude Oracle
+        // templating convention — it has no dedicated Comprehensive Rules
+        // number. `.abs()` implements that convention: the gap between the two
+        // operands regardless of operand order. (CR 107.1b is related but
+        // distinct — it clamps a negative *result* to zero, which is not the
+        // same operation as an absolute value; it confirms only that the
+        // resulting amount is non-negative.)
+        QuantityExpr::Difference { left, right } => (recurse(left) - recurse(right)).abs(),
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {
             unreachable!("fold_compose called on leaf variant — caller must dispatch leaves first")
         }

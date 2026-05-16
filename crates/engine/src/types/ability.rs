@@ -3026,6 +3026,21 @@ pub enum QuantityExpr {
         base: i32,
         exponent: Box<QuantityExpr>,
     },
+    /// The (unsigned) difference between two dynamic quantities. Resolves to
+    /// `(resolve(left) - resolve(right)).abs()`. "The difference between A and
+    /// B" is an unsigned-magnitude Oracle templating convention — it has no
+    /// dedicated Comprehensive Rules number; `.abs()` implements that
+    /// convention. (CR 107.1b is related but distinct: it governs clamping a
+    /// negative *result* to zero, not taking an absolute value — it confirms
+    /// only that the resulting amount is non-negative, not the operation.)
+    /// A general arithmetic peer of `Offset`/`Multiply`/`Sum`: composes any
+    /// "difference between A and B" card from existing `QuantityExpr` leaves
+    /// (e.g. Doran's "the difference between its power and toughness" is
+    /// `Difference { Ref(Power{Recipient}), Ref(Toughness{Recipient}) }`).
+    Difference {
+        left: Box<QuantityExpr>,
+        right: Box<QuantityExpr>,
+    },
 }
 
 impl QuantityExpr {

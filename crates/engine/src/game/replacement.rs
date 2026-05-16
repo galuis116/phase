@@ -749,6 +749,16 @@ fn resolve_event_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> 
             let exp = resolve_event_replacement_quantity(exponent, event_count)?.max(0) as u32;
             Some(base.saturating_pow(exp))
         }
+        // "The difference between A and B" being unsigned is an Oracle
+        // templating convention with no dedicated CR number — resolves to the
+        // absolute value of the gap. (CR 107.1b is distinct: it clamps a
+        // negative result to zero, not the operand-order-independent magnitude
+        // taken here.)
+        QuantityExpr::Difference { left, right } => {
+            let l = resolve_event_replacement_quantity(left, event_count)?;
+            let r = resolve_event_replacement_quantity(right, event_count)?;
+            Some((l - r).abs())
+        }
         QuantityExpr::Ref { .. } => None,
     }
 }

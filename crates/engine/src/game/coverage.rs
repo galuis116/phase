@@ -671,6 +671,9 @@ fn fmt_quantity(q: &QuantityExpr) -> String {
         QuantityExpr::Power { base, exponent } => {
             format!("{}^{}", base, fmt_quantity(exponent))
         }
+        QuantityExpr::Difference { left, right } => {
+            format!("|{} - {}|", fmt_quantity(left), fmt_quantity(right))
+        }
     }
 }
 
@@ -4687,6 +4690,10 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
         }
         QuantityExpr::UpTo { max } => extract_quantity_features(max, features),
         QuantityExpr::Power { exponent, .. } => extract_quantity_features(exponent, features),
+        QuantityExpr::Difference { left, right } => {
+            extract_quantity_features(left, features);
+            extract_quantity_features(right, features);
+        }
     }
 }
 

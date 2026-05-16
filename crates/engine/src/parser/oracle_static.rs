@@ -3849,6 +3849,10 @@ fn rebind_source_object_quantity_expr_to_recipient(expr: QuantityExpr) -> Quanti
             base,
             exponent: Box::new(rebind_source_object_quantity_expr_to_recipient(*exponent)),
         },
+        QuantityExpr::Difference { left, right } => QuantityExpr::Difference {
+            left: Box::new(rebind_source_object_quantity_expr_to_recipient(*left)),
+            right: Box::new(rebind_source_object_quantity_expr_to_recipient(*right)),
+        },
         other => other,
     }
 }

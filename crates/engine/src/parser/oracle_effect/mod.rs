@@ -7300,6 +7300,10 @@ fn rewrite_quantity_controller(expr: &mut QuantityExpr, from: ControllerRef, to:
                 rewrite_quantity_controller(inner, from.clone(), to.clone());
             }
         }
+        QuantityExpr::Difference { left, right } => {
+            rewrite_quantity_controller(left, from.clone(), to.clone());
+            rewrite_quantity_controller(right, from, to);
+        }
         QuantityExpr::Fixed { .. } => {}
     }
 }
@@ -7326,6 +7330,10 @@ fn rewrite_event_source_power_to_object_power(expr: &mut QuantityExpr, scope: Ob
             for inner in exprs {
                 rewrite_event_source_power_to_object_power(inner, scope);
             }
+        }
+        QuantityExpr::Difference { left, right } => {
+            rewrite_event_source_power_to_object_power(left, scope);
+            rewrite_event_source_power_to_object_power(right, scope);
         }
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {}
     }
@@ -9015,6 +9023,10 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
             }
             QuantityExpr::UpTo { max } => rewrite_condition_quantity_expr(max),
             QuantityExpr::Power { exponent, .. } => rewrite_condition_quantity_expr(exponent),
+            QuantityExpr::Difference { left, right } => {
+                rewrite_condition_quantity_expr(left);
+                rewrite_condition_quantity_expr(right);
+            }
             QuantityExpr::Fixed { .. } => {}
         }
     }
@@ -9097,6 +9109,10 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
             }
             QuantityExpr::UpTo { max } => rewrite_quantity_expr(max),
             QuantityExpr::Power { exponent, .. } => rewrite_quantity_expr(exponent),
+            QuantityExpr::Difference { left, right } => {
+                rewrite_quantity_expr(left);
+                rewrite_quantity_expr(right);
+            }
             QuantityExpr::Fixed { .. } => {}
         }
     }
@@ -9142,6 +9158,10 @@ fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
             }
             QuantityExpr::UpTo { max } => rewrite_quantity_expr(max, mode),
             QuantityExpr::Power { exponent, .. } => rewrite_quantity_expr(exponent, mode),
+            QuantityExpr::Difference { left, right } => {
+                rewrite_quantity_expr(left, mode);
+                rewrite_quantity_expr(right, mode);
+            }
             QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
         }
     }
