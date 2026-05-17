@@ -5,8 +5,9 @@ use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CostPaidObjectSnapshot, Effect,
-    EffectError, EffectKind, FilterProp, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility,
-    SharedQuality, SharedQualityRelation, TargetFilter, TargetRef,
+    EffectError, EffectKind, FilterProp, PlayerFilter, QuantityExpr, QuantityRef,
+    RepeatContinuation, ResolvedAbility, SharedQuality, SharedQualityRelation, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -297,6 +298,38 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     if !waits_for_resolution_choice(&state.waiting_for) {
         choose_one_of::resume_pending(state, events);
     }
+    // CR 608.2c + CR 107.1c: After the iteration's choice and any chained
+    // continuation have fully drained (state is back at priority), resume a
+    // paused "repeat this process" loop — re-set the `ControllerChoice` repeat
+    // prompt.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.pending_continuation.is_none()
+        && state.pending_repeat_iteration.is_none()
+    {
+        drain_pending_repeat_until(state);
+    }
+}
+
+/// CR 608.2c + CR 107.1c: Resume a "repeat this process" loop that paused when
+/// an iteration's process entered an interactive `WaitingFor` state. Called by
+/// `drain_pending_continuation` once the iteration's choice (and any chained
+/// continuation) has fully drained.
+fn drain_pending_repeat_until(state: &mut GameState) {
+    let Some(pending) = state.pending_repeat_until.take() else {
+        return;
+    };
+    let crate::types::game_state::PendingRepeatUntil { ability } = pending;
+    match &ability.repeat_until {
+        // CR 107.1c: the iteration's choice has resolved — prompt the
+        // controller whether to repeat the process.
+        Some(RepeatContinuation::ControllerChoice) => {
+            state.waiting_for = WaitingFor::RepeatDecision {
+                player: ability.controller,
+                ability,
+            };
+        }
+        None => {}
+    }
 }
 
 /// CR 609.3 + CR 109.5: Resume a paused `repeat_for` loop. Each iteration
@@ -531,6 +564,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::TributeChoice { .. }
             | WaitingFor::DiscoverChoice { .. }
             | WaitingFor::RevealUntilKeptChoice { .. }
+            | WaitingFor::RepeatDecision { .. }
             | WaitingFor::CascadeChoice { .. }
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::ProliferateChoice { .. }
@@ -1816,6 +1850,55 @@ pub fn resolve_ability_chain(
         }
     }
 
+    // CR 608.2c + CR 107.1c: "Repeat this process" dispatch — the non-count
+    // companion to `repeat_for`. Instead of a fixed iteration count, a
+    // predicate decides per-iteration whether to re-follow the whole
+    // resolution chain. The dispatch is ITERATIVE (not recursive): `depth`
+    // never accumulates, the `depth > 20` guard is never approached, and the
+    // `depth == 0` prelude above ran exactly once — a repeated process is one
+    // resolution (CR 608.2c), so per-resolution accumulators and the
+    // resolution counter must not re-fire per iteration.
+    debug_assert!(
+        !(ability.repeat_for.is_some() && ability.repeat_until.is_some()),
+        "repeat_for (count) and repeat_until (predicate) are mutually exclusive"
+    );
+    match ability.repeat_until.clone() {
+        None => resolve_chain_body(state, ability, events, depth),
+        Some(RepeatContinuation::ControllerChoice) => {
+            let initial_waiting_for = state.waiting_for.clone();
+            resolve_chain_body(state, ability, events, depth)?;
+            if state.waiting_for != initial_waiting_for {
+                // Inner pause: stash so the drain re-sets the repeat prompt
+                // after the iteration's player choice resolves.
+                state.pending_repeat_until = Some(crate::types::game_state::PendingRepeatUntil {
+                    ability: Box::new(ability.clone()),
+                });
+            } else {
+                // CR 107.1c: after the iteration fully resolved, prompt the
+                // controller to repeat the process or stop.
+                state.waiting_for = WaitingFor::RepeatDecision {
+                    player: ability.controller,
+                    ability: Box::new(ability.clone()),
+                };
+            }
+            Ok(())
+        }
+    }
+}
+
+/// One full pass of an ability's resolution chain — the parent effect (with its
+/// `repeat_for` count loop) and the entire `sub_ability` chain. This is one
+/// "process" for the purposes of "repeat this process" (CR 608.2c). Extracted
+/// from `resolve_ability_chain` so the `repeat_until` dispatch can drive it
+/// iteratively. The `depth == 0` prelude (state-clearing, the resolution
+/// counter, the BeginGame/Mulligan guards) runs once in `resolve_ability_chain`
+/// and is intentionally NOT repeated per iteration.
+fn resolve_chain_body(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+) -> Result<(), EffectError> {
     // CR 608.2e: "Instead" kicker — check if a sub overrides the parent.
     // When condition is met, replace the current ability's effect with the sub's
     // effect, preserving the full resolution flow (tracked sets, continuations).
@@ -5682,6 +5765,114 @@ mod tests {
             state.players[0].hand.len(),
             1,
             "Expected 1 card drawn from base continuation chain"
+        );
+    }
+
+    #[test]
+    fn repeat_until_controller_choice_prompts_each_iteration() {
+        // CR 107.1c: a "you may repeat this process" loop resolves one
+        // iteration, prompts the controller via `WaitingFor::RepeatDecision`,
+        // and repeats on accept. Accept twice then decline → 3 resolutions.
+        let mut state = GameState::new_two_player(42);
+        let start_life = state.players[0].life;
+
+        let mut ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: crate::types::ability::GainLifePlayer::default(),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.repeat_until = Some(RepeatContinuation::ControllerChoice);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // First iteration resolved; the controller is now prompted.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::RepeatDecision { .. }),
+            "expected RepeatDecision prompt, got {:?}",
+            state.waiting_for,
+        );
+        assert_eq!(state.players[0].life, start_life + 1);
+
+        // Accept twice, then decline.
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            crate::types::actions::GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::RepeatDecision { .. }
+        ));
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            crate::types::actions::GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::RepeatDecision { .. }
+        ));
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            crate::types::actions::GameAction::DecideOptionalEffect { accept: false },
+        )
+        .unwrap();
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::RepeatDecision { .. }),
+            "declining ends the loop",
+        );
+        assert_eq!(
+            state.players[0].life,
+            start_life + 3,
+            "initial iteration + 2 accepted = 3 resolutions, each gaining 1 life",
+        );
+    }
+
+    #[test]
+    fn repeat_until_paused_resume_resets_prompt_after_inner_choice() {
+        // CR 107.1c: when a `ControllerChoice` iteration pauses on an inner
+        // player choice, `pending_repeat_until` is stashed and
+        // `drain_pending_continuation` re-sets `WaitingFor::RepeatDecision`
+        // once the choice drains.
+        let mut state = GameState::new_two_player(42);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: crate::types::ability::GainLifePlayer::default(),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.repeat_until = Some(RepeatContinuation::ControllerChoice);
+
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.pending_repeat_until = Some(crate::types::game_state::PendingRepeatUntil {
+            ability: Box::new(ability),
+        });
+
+        let mut events = Vec::new();
+        drain_pending_continuation(&mut state, &mut events);
+
+        assert!(
+            state.pending_repeat_until.is_none(),
+            "the resume slot must be consumed by the drain",
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::RepeatDecision { .. }),
+            "the drain re-sets the repeat prompt, got {:?}",
+            state.waiting_for,
         );
     }
 

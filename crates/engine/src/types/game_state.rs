@@ -644,6 +644,22 @@ pub struct PendingRepeatIteration {
     pub total_iterations: usize,
 }
 
+/// CR 608.2c + CR 107.1c: Resume state for a "repeat this process" loop
+/// (`RepeatContinuation`) paused when an iteration's process entered an
+/// interactive `WaitingFor` state.
+///
+/// The loop in `resolve_ability_chain` cannot set the repeat prompt while a
+/// player choice from the iteration is still unresolved. It stashes this
+/// struct and `drain_pending_continuation` re-checks it once the choice (and
+/// any chained continuation) drains.
+///
+/// - `ability` — the loop ability, retaining `repeat_until` so the drain knows
+///   which continuation mode to apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRepeatUntil {
+    pub ability: Box<crate::types::ability::ResolvedAbility>,
+}
+
 /// CR 701.55d: Remaining players queued to face the same resolution-time
 /// branch choice after the current chosen branch finishes resolving.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1989,6 +2005,16 @@ pub enum WaitingFor {
         revealed_misses: Vec<ObjectId>,
         rest_destination: Zone,
     },
+    /// CR 107.1c + CR 608.2c: After one iteration of a "you may repeat this
+    /// process any number of times" effect resolves, the controller chooses
+    /// whether to run the process again. Answered by
+    /// `GameAction::DecideOptionalEffect { accept }`.
+    RepeatDecision {
+        player: PlayerId,
+        /// The ability chain to re-resolve on accept (one further iteration).
+        /// `repeat_until` is retained so the next iteration re-prompts.
+        ability: Box<crate::types::ability::ResolvedAbility>,
+    },
     /// CR 702.85a: Player chooses to cast the cascaded card without paying its
     /// mana cost or decline. Unlike `DiscoverChoice`, the declined card goes to
     /// the bottom of the library in a random order together with the misses
@@ -2428,6 +2454,7 @@ impl WaitingFor {
             | WaitingFor::UnlessPaymentChooseCost { player, .. }
             | WaitingFor::DiscoverChoice { player, .. }
             | WaitingFor::RevealUntilKeptChoice { player, .. }
+            | WaitingFor::RepeatDecision { player, .. }
             | WaitingFor::CascadeChoice { player, .. }
             | WaitingFor::TopOrBottomChoice { player, .. }
             | WaitingFor::ParadigmCastOffer { player, .. }
@@ -3414,6 +3441,14 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_repeat_iteration: Option<PendingRepeatIteration>,
 
+    /// CR 608.2c + CR 107.1c: Pending "repeat this process" loop paused because
+    /// an iteration's process entered an interactive `WaitingFor` state.
+    /// Drained by `drain_pending_continuation` after `pending_continuation`,
+    /// so the iteration's player choice fully resolves before the loop decides
+    /// whether to run another pass. See [`PendingRepeatUntil`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_repeat_until: Option<PendingRepeatUntil>,
+
     /// CR 701.55d: Pending continuation of a multi-player ChooseOneOf after a
     /// selected branch has finished resolving, including any nested choices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3942,6 +3977,7 @@ impl GameState {
             revealed_cards: HashSet::new(),
             pending_continuation: None,
             pending_repeat_iteration: None,
+            pending_repeat_until: None,
             pending_choose_one_of: None,
             pending_optional_effect: None,
             pending_optional_trigger_event: None,
@@ -4209,6 +4245,7 @@ impl PartialEq for GameState {
             && self.modal_modes_chosen_this_game == other.modal_modes_chosen_this_game
             && self.pending_continuation == other.pending_continuation
             && self.pending_repeat_iteration == other.pending_repeat_iteration
+            && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.pending_begin_game_abilities == other.pending_begin_game_abilities

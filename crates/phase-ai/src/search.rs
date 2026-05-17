@@ -446,6 +446,11 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::CascadeChoice { .. } => Some(GameAction::CascadeChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
+        // CR 107.1c: "repeat this process" — stop as the forced-action default;
+        // the candidate generator still explores repeating.
+        WaitingFor::RepeatDecision { .. } => {
+            Some(GameAction::DecideOptionalEffect { accept: false })
+        }
 
         // Learn: skip.
         WaitingFor::LearnChoice { .. } => Some(GameAction::LearnDecision {

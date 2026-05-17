@@ -877,6 +877,7 @@ export type WaitingFor =
   | { type: "ChooseRingBearer"; data: { player: PlayerId; candidates: ObjectId[] } }
   | { type: "DiscoverChoice"; data: { player: PlayerId; hit_card: ObjectId; exiled_misses: ObjectId[] } }
   | { type: "RevealUntilKeptChoice"; data: { player: PlayerId; hit_card: ObjectId; accept_zone: string; decline_zone: string; enter_tapped: boolean; revealed_misses: ObjectId[]; rest_destination: string } }
+  | { type: "RepeatDecision"; data: { player: PlayerId; ability: unknown } }
   | { type: "CascadeChoice"; data: { player: PlayerId; hit_card: ObjectId; exiled_misses: ObjectId[]; source_mv: number } }
   | { type: "TopOrBottomChoice"; data: { player: PlayerId; object_id: ObjectId } }
   | { type: "ParadigmCastOffer"; data: { player: PlayerId; offers: ObjectId[] } }

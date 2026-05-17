@@ -7445,6 +7445,45 @@ mod tests {
     }
 
     #[test]
+    fn repeat_this_process_you_may_sets_controller_choice() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::RepeatContinuation;
+        // CR 107.1c: Ad Nauseam — "You may repeat this process any number of
+        // times." sets the root ability's `repeat_until` to a controller
+        // decision, instead of being silently dropped.
+        let def = parse_effect_chain(
+            "Reveal the top card of your library and put that card into your hand. \
+             You lose life equal to its mana value. \
+             You may repeat this process any number of times.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.repeat_until,
+            Some(RepeatContinuation::ControllerChoice),
+            "expected repeat_until = ControllerChoice, got {:?}",
+            def.repeat_until,
+        );
+    }
+
+    #[test]
+    fn repeat_this_process_if_you_do_stays_recognized_without_predicate() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        // CR 608.2c: Primal Surge — "If you do, repeat this process." is the
+        // game-state-predicate form, a deferred unit. The directive is still
+        // recognized (no Unimplemented gap) but sets no `repeat_until`.
+        let def = parse_effect_chain(
+            "Exile the top card of your library. If it's a permanent card, you \
+             may put it onto the battlefield. If you do, repeat this process.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.repeat_until, None,
+            "the 'if you do' form is deferred — no predicate set, got {:?}",
+            def.repeat_until,
+        );
+    }
+
+    #[test]
     fn proliferate_twice_uses_repeat_for() {
         use crate::parser::oracle_effect::parse_effect_chain;
         let def = parse_effect_chain("proliferate twice", AbilityKind::Spell);

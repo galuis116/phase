@@ -7452,6 +7452,32 @@ pub struct AbilityDefinition {
     /// Read at target-selection time to short-circuit `WaitingFor::TargetSelection`.
     #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
     pub target_selection_mode: TargetSelectionMode,
+    /// CR 608.2c + CR 107.1c: per-iteration loop-continuation predicate, the
+    /// non-count companion to `repeat_for`. When `Some`, the resolution chain
+    /// is re-followed ("repeat this process") under this predicate instead of
+    /// a fixed iteration count. Mutually exclusive with `repeat_for` in
+    /// practice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_until: Option<RepeatContinuation>,
+}
+
+/// CR 608.2c + CR 107.1c: how a "repeat this process" loop decides whether to
+/// run another iteration. The non-count companion to `AbilityDefinition`'s
+/// `repeat_for` (a fixed `QuantityExpr` count) — this predicate decides
+/// per-iteration whether to re-follow the resolving ability's instructions.
+///
+/// Currently a single-variant enum: only the controller-decision form ("you
+/// may repeat this process any number of times") is modeled. The game-state
+/// predicate form ("if you do, repeat this process" — Primal Surge) is a
+/// separately-tracked deferred unit; it will add a `While(...)` variant once
+/// the optional-put pause semantics it depends on are designed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum RepeatContinuation {
+    /// CR 107.1c: "you may repeat this process [any number of times]" — after
+    /// each iteration fully resolves, the controller is prompted
+    /// (`WaitingFor::RepeatDecision`) to repeat or stop.
+    ControllerChoice,
 }
 
 impl fmt::Debug for AbilityDefinition {
@@ -7508,6 +7534,7 @@ impl AbilityDefinition {
             forward_result: false,
             player_scope: None,
             target_selection_mode: TargetSelectionMode::Chosen,
+            repeat_until: None,
         }
     }
 
@@ -9672,6 +9699,12 @@ pub struct ResolvedAbility {
     /// this list as the exclusion set when computing the next choice's options.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_players: Vec<PlayerId>,
+    /// CR 608.2c + CR 107.1c: per-iteration loop-continuation predicate carried
+    /// through from the originating `AbilityDefinition`. When `Some`, the
+    /// resolution chain is re-followed ("repeat this process") under this
+    /// predicate. Read by the `repeat_until` dispatch in `resolve_ability_chain`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_until: Option<RepeatContinuation>,
 }
 
 impl ResolvedAbility {
@@ -9715,6 +9748,7 @@ impl ResolvedAbility {
             may_trigger_origin: None,
             target_selection_mode: TargetSelectionMode::Chosen,
             chosen_players: Vec::new(),
+            repeat_until: None,
         }
     }
 

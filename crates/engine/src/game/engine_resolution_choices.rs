@@ -31,6 +31,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::DiscoverChoice { .. }
             | WaitingFor::RevealUntilKeptChoice { .. }
+            | WaitingFor::RepeatDecision { .. }
             | WaitingFor::CascadeChoice { .. }
             | WaitingFor::LearnChoice { .. }
             | WaitingFor::TopOrBottomChoice { .. }
@@ -201,6 +202,30 @@ pub(super) fn handle_resolution_choice(
             }
             state.revealed_cards.remove(&hit_card);
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        // CR 107.1c + CR 608.2c: "you may repeat this process any number of
+        // times" — after one iteration resolved, the controller decides
+        // whether to run the process again.
+        (
+            WaitingFor::RepeatDecision { player, ability },
+            GameAction::DecideOptionalEffect { accept },
+        ) => {
+            if accept {
+                // Re-resolve one more process pass. `ability` retains
+                // `repeat_until: Some(ControllerChoice)`, so this hits the
+                // `repeat_until` dispatch, runs `resolve_chain_body` once, and
+                // re-sets `WaitingFor::RepeatDecision` (or, on an inner choice,
+                // pauses and stashes `pending_repeat_until`). depth = 1: each
+                // accept is a fresh top-level `apply()`, so depth never
+                // accumulates across prompts and the `depth > 20` guard never
+                // applies — CR 107.1c permits looping a whole library.
+                effects::resolve_ability_chain(state, &ability, events, 1)
+                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            } else {
+                // CR 107.1c: declining ends the loop; drain any trailing chain.
+                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            }
         }
         (
             WaitingFor::CascadeChoice {

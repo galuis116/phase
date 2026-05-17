@@ -114,6 +114,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::UnlessBounceChoice { .. }
         | WaitingFor::DiscoverChoice { .. }
         | WaitingFor::RevealUntilKeptChoice { .. }
+        | WaitingFor::RepeatDecision { .. }
         | WaitingFor::CascadeChoice { .. }
         | WaitingFor::TopOrBottomChoice { .. }
         | WaitingFor::PopulateChoice { .. }

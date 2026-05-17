@@ -115,6 +115,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "UnlessBounceChoice",
     "DiscoverChoice",
     "RevealUntilKeptChoice",
+    "RepeatDecision",
     "CascadeChoice",
     "VoteChoice",
     "ChooseRingBearer",

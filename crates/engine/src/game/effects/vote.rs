@@ -262,6 +262,7 @@ pub fn resolve_tally(
             may_trigger_origin: None,
             target_selection_mode: per_choice_effect[idx].target_selection_mode,
             chosen_players: Vec::new(),
+            repeat_until: None,
         };
         // CR 608.2c: depth = 1 so the chain entry doesn't clear
         // `state.last_vote_ballots`; see ledger-publication note above.
@@ -318,6 +319,7 @@ fn resolved_from_def(
         may_trigger_origin: None,
         target_selection_mode: def.target_selection_mode,
         chosen_players: Vec::new(),
+        repeat_until: None,
     }
 }
 
@@ -456,6 +458,7 @@ mod tests {
             may_trigger_origin: None,
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
             chosen_players: Vec::new(),
+            repeat_until: None,
         };
 
         let mut events = Vec::new();
@@ -542,6 +545,7 @@ mod tests {
             may_trigger_origin: None,
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
             chosen_players: Vec::new(),
+            repeat_until: None,
         }
     }
 
@@ -829,6 +833,7 @@ mod tests {
             may_trigger_origin: None,
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
             chosen_players: Vec::new(),
+            repeat_until: None,
         };
 
         // Resolution parks on VoteChoice with controller as first subject.
@@ -972,6 +977,7 @@ mod tests {
             may_trigger_origin: None,
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
             chosen_players: Vec::new(),
+            repeat_until: None,
         };
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).expect("vote initiates");

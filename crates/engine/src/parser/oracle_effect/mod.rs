@@ -9718,6 +9718,10 @@ pub(crate) fn parse_effect_chain_ir(
     // sentence before the body clause. The count is stashed here and applied
     // to the immediately-following clause so the body executes N times.
     let mut pending_repeat_for: Option<QuantityExpr> = None;
+    // CR 608.2c + CR 107.1c: Chain-level "repeat this process" loop predicate.
+    // A back-reference recognized as its own trailing sentence; applied to the
+    // root `AbilityDefinition` during lowering.
+    let mut pending_repeat_until: Option<crate::types::ability::RepeatContinuation> = None;
     // CR 608.2c + CR 109.4: Chain-spanning chosen-player state. The per-chunk
     // `chunk_ctx` is rebuilt fresh each iteration, so these loop-locals thread
     // the running `Choose(Player)` count and the active chosen-player scope
@@ -9906,23 +9910,33 @@ pub(crate) fn parse_effect_chain_ir(
             }
         }
 
-        // "Repeat this process" — recognized directive that doesn't produce an
-        // independent effect. Repetition semantics are handled by the specific card
-        // effects (cascade, explore, etc.); the parser recognizes these to avoid
-        // Unimplemented gaps. The trailing qualifier ("once", "any number of times",
-        // "for the next card", "until ...") is consumed with the prefix.
-        // Also handles "you may repeat this process" and "if you do, repeat this process".
-        if nom_on_lower(normalized_text, &lower_check, |i| {
-            let (i, _) = nom::combinator::opt(alt((
+        // CR 608.2c + CR 107.1c: "Repeat this process" — a loop-continuation
+        // directive that doesn't produce an independent effect. It is a
+        // back-reference applying to the process (chain) built so far.
+        //
+        //   - "you may repeat this process [any number of times]" → a
+        //     per-iteration controller decision; recorded chain-level in
+        //     `pending_repeat_until` and applied to the root
+        //     `AbilityDefinition` during lowering (`ControllerChoice`).
+        //   - "[if you do, ]repeat this process" — the game-state-predicate
+        //     form (Primal Surge) is a deferred unit. It is still recognized
+        //     here so the directive is consumed rather than producing an
+        //     Unimplemented gap, but it sets no `repeat_until` predicate.
+        if let Some((continuation, _)) = nom_on_lower(normalized_text, &lower_check, |i| {
+            let (i, prefix) = nom::combinator::opt(alt((
                 tag::<_, _, OracleError<'_>>("you may "),
                 tag("if you do, "),
                 tag("if you do "),
             )))
             .parse(i)?;
-            value((), tag("repeat this process")).parse(i)
-        })
-        .is_some()
-        {
+            let (i, _) = value((), tag("repeat this process")).parse(i)?;
+            let continuation = (prefix == Some("you may "))
+                .then_some(crate::types::ability::RepeatContinuation::ControllerChoice);
+            Ok((i, continuation))
+        }) {
+            if continuation.is_some() {
+                pending_repeat_until = continuation;
+            }
             continue;
         }
 
@@ -11238,6 +11252,7 @@ pub(crate) fn parse_effect_chain_ir(
         kind,
         chain_rounding,
         actor: ctx.actor.clone(),
+        repeat_until: pending_repeat_until,
     }
 }
 
@@ -11835,6 +11850,13 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     if matches!(&*result.effect, Effect::SearchOutsideGame { .. }) {
         result.optional = false;
         result.optional_for = None;
+    }
+
+    // CR 608.2c + CR 107.1c: A trailing "repeat this process" directive sets a
+    // chain-level loop predicate; apply it to the assembled root ability so the
+    // resolver re-follows the whole chain.
+    if let Some(ref continuation) = ir.repeat_until {
+        result.repeat_until = Some(continuation.clone());
     }
 
     result

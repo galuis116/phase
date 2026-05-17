@@ -46,6 +46,7 @@ type PairChoice = Extract<WaitingFor, { type: "PairChoice" }>;
 type ChooseLegend = Extract<WaitingFor, { type: "ChooseLegend" }>;
 type CommanderZoneChoice = Extract<WaitingFor, { type: "CommanderZoneChoice" }>;
 type RevealUntilKeptChoice = Extract<WaitingFor, { type: "RevealUntilKeptChoice" }>;
+type RepeatDecision = Extract<WaitingFor, { type: "RepeatDecision" }>;
 type ManifestDreadChoice = Extract<WaitingFor, { type: "ManifestDreadChoice" }>;
 type CrewVehicle = Extract<WaitingFor, { type: "CrewVehicle" }>;
 type StationTarget = Extract<WaitingFor, { type: "StationTarget" }>;
@@ -263,6 +264,9 @@ export function CardChoiceModal() {
     case "RevealUntilKeptChoice":
       if (!canActForWaitingState) return null;
       return <RevealUntilKeptChoiceModal data={waitingFor.data} />;
+    case "RepeatDecision":
+      if (!canActForWaitingState) return null;
+      return <RepeatDecisionModal data={waitingFor.data} />;
     case "ConniveDiscard":
       if (!canActForWaitingState) return null;
       return <DiscardModal data={waitingFor.data} title={`Connive \u2014 Discard ${waitingFor.data.count === 1 ? "a card" : `${waitingFor.data.count} cards`}`} />;
@@ -2718,6 +2722,30 @@ function RevealUntilKeptChoiceModal({ data }: { data: RevealUntilKeptChoice["dat
             onClick={() => dispatch({ type: "DecideOptionalEffect", data: { accept: false } })}
           />
         </div>
+      </div>
+    </ChoiceOverlay>
+  );
+}
+
+// ── Repeat Decision Modal ──────────────────────────────────────────────────
+
+function RepeatDecisionModal({ data: _data }: { data: RepeatDecision["data"] }) {
+  const dispatch = useGameDispatch();
+
+  return (
+    <ChoiceOverlay
+      title="Repeat This Process"
+      subtitle="Repeat the process again?"
+    >
+      <div className="flex flex-col gap-3">
+        <ConfirmButton
+          label="Repeat"
+          onClick={() => dispatch({ type: "DecideOptionalEffect", data: { accept: true } })}
+        />
+        <ConfirmButton
+          label="Stop"
+          onClick={() => dispatch({ type: "DecideOptionalEffect", data: { accept: false } })}
+        />
       </div>
     </ChoiceOverlay>
   );

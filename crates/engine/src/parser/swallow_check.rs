@@ -300,6 +300,15 @@ fn def_tree_has_optional(def: &AbilityDefinition) -> bool {
     if def.optional || def.optional_targeting {
         return true;
     }
+    // CR 107.1c: "you may repeat this process [any number of times]" is a
+    // controller decision captured on `repeat_until` — an optional player
+    // action, so the "you may" in the text is accounted for.
+    if matches!(
+        def.repeat_until,
+        Some(crate::types::ability::RepeatContinuation::ControllerChoice)
+    ) {
+        return true;
+    }
     if effect_has_internal_optionality(&def.effect) {
         return true;
     }
@@ -2094,6 +2103,21 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_repeat_this_process() {
+        // CR 107.1c: "You may repeat this process any number of times" is
+        // captured as `repeat_until: ControllerChoice` on the root ability —
+        // a controller decision, not a swallowed optional effect.
+        let parsed = parse(
+            "Reveal the top card of your library and put that card into your \
+             hand. You lose life equal to its mana value. You may repeat this \
+             process any number of times.",
+            &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
     }
 
     #[test]

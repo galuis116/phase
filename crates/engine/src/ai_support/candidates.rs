@@ -262,6 +262,21 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        // CR 107.1c: "you may repeat this process any number of times" — both
+        // repeating and stopping are legitimate plays, so emit both for the
+        // search to explore.
+        WaitingFor::RepeatDecision { player, .. } => vec![
+            candidate(
+                GameAction::DecideOptionalEffect { accept: true },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::DecideOptionalEffect { accept: false },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+        ],
         // CR 702.85a: Cascade offers a binary cast/decline choice. Tactical
         // ordering: place Cast first when the hit has at least one legal
         // target (or no targets at all — typically a permanent or untargeted
@@ -1932,6 +1947,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::DiscoverChoice { .. }
         | WaitingFor::RevealUntilKeptChoice { .. }
+        | WaitingFor::RepeatDecision { .. }
         | WaitingFor::CascadeChoice { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::TopOrBottomChoice { .. }
