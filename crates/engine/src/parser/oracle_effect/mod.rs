@@ -7049,28 +7049,51 @@ fn is_exile_after_spell_rider_clause(lower: &str) -> bool {
 /// Check if text contains anaphoric pronouns referencing a previously mentioned object.
 /// Unlike `contains_object_pronoun`, this handles word boundaries at end-of-string
 /// (e.g., "counter on it" where "it" is the last word).
+///
+/// CR 608.2c: bare anaphoric pronouns binding to a prior clause. Detection runs on
+/// the `parse_word_bounded` combinator scanned at every word boundary — no `find()`
+/// heuristic. The bare-object-pronoun set is sourced from `is_bare_object_pronoun`
+/// so it has a single authority; the demonstratives are matched as two-word phrases.
 fn has_anaphoric_reference(lower: &str) -> bool {
-    for pronoun in [
+    // Single-word object pronouns (it/itself/him/himself/her/herself/them/themselves).
+    const PRONOUNS: [&str; 8] = [
         "it",
+        "itself",
+        "him",
+        "himself",
+        "her",
+        "herself",
         "them",
+        "themselves",
+    ];
+    // Two-word demonstrative anaphors ("that creature", "those cards", ...).
+    const DEMONSTRATIVES: [&str; 4] = [
         "that creature",
         "that card",
         "those cards",
         "that permanent",
-    ] {
-        // Check whole-word boundary: pronoun preceded by space/start and followed by space/end/punctuation
-        if let Some(pos) = lower.find(pronoun) {
-            let before_ok = pos == 0 || lower.as_bytes()[pos - 1] == b' ';
-            let after_pos = pos + pronoun.len();
-            let after_ok = after_pos >= lower.len()
-                || matches!(
-                    lower.as_bytes()[after_pos],
-                    b' ' | b',' | b'.' | b'\'' | b's'
-                );
-            if before_ok && after_ok {
-                return true;
-            }
+    ];
+    debug_assert!(
+        PRONOUNS.iter().all(|p| is_bare_object_pronoun(p)),
+        "PRONOUNS must stay in sync with is_bare_object_pronoun"
+    );
+
+    let mut remaining = lower;
+    while !remaining.is_empty() {
+        let matched = PRONOUNS
+            .iter()
+            .chain(DEMONSTRATIVES.iter())
+            .any(|w| super::oracle_target::parse_word_bounded(remaining, w).is_ok());
+        if matched {
+            return true;
         }
+        // structural: not dispatch — advance to the next word boundary so the
+        // `parse_word_bounded` combinator can be retried at each position
+        // (the `scan_timing_restrictions` scan-loop idiom).
+        remaining = match remaining.find(' ') {
+            Some(i) => remaining[i + 1..].trim_start(),
+            None => "",
+        };
     }
     false
 }
@@ -7137,6 +7160,31 @@ fn replace_target_with_parent(effect: &mut Effect) {
         _ => {
             // Effects without a target field (Draw, GainLife, etc.) stay as-is.
             // ParentTarget is handled by the sub_ability chain's target propagation.
+        }
+    }
+}
+
+/// CR 608.2c: rebind an anaphoric pronoun to the source object when a preceding
+/// clause named it via `~` (parsed as a `SelfRef`-targeted effect — e.g.
+/// "exile ~, then return him to the battlefield transformed"). Sibling of
+/// `replace_target_with_parent`, but assigns `TargetFilter::SelfRef`.
+///
+/// Only the effect arms reachable for the "name ~ then refer back" class are
+/// populated: zone changes (the issue card) and `Transform` for the DFC family.
+/// Arms with `ParentTargetController`/`LastCreated` guards (`Sacrifice`,
+/// `Attach`) are intentionally omitted — those guards are meaningless for a
+/// `SelfRef` rebind, and no card in this class reaches them.
+fn replace_target_with_self(effect: &mut Effect) {
+    match effect {
+        Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => {
+            *target = TargetFilter::SelfRef;
+        }
+        Effect::Transform { target, .. } => {
+            *target = TargetFilter::SelfRef;
+        }
+        _ => {
+            // Effects without a target field, or outside this anaphor class,
+            // stay as-is.
         }
     }
 }
@@ -11155,6 +11203,29 @@ pub(crate) fn parse_effect_chain_ir(
             })
         {
             replace_target_with_parent(&mut clause.effect);
+        }
+        // CR 608.2c: A clause whose bare pronoun ("it"/"him"/"her") follows an
+        // earlier clause that named the source object via `~` (parsed as a
+        // SelfRef-targeted zone change — "exile ~, then return him transformed",
+        // Ajani, Nacatl Pariah) must bind that pronoun to the source, not the
+        // typed trigger subject. Mirrors the Toshiro exile-after-spell rider
+        // above: a rewrite that fires even under a typed trigger subject because
+        // the antecedent is a *named clause*, not the trigger condition. The
+        // SelfRef prior-clause test is a typed `matches!` on the parsed Effect
+        // AST — the parser's own output is the detector, no string heuristic.
+        if typed_trigger_subject
+            && has_anaphoric_reference(&text_lower)
+            && clauses.last().is_some_and(|prev| {
+                matches!(
+                    &prev.parsed.effect,
+                    Effect::ChangeZone {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                )
+            })
+        {
+            replace_target_with_self(&mut clause.effect);
         }
 
         if condition
@@ -15849,6 +15920,82 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaExpiry};
     use crate::types::player::PlayerCounterKind;
+
+    /// Build a typed Cat trigger subject ("one or more other Cats you
+    /// control") for anaphor-resolution tests.
+    fn cat_subject_ctx() -> ParseContext {
+        ParseContext {
+            subject: Some(TargetFilter::Typed(crate::types::ability::TypedFilter {
+                type_filters: vec![TypeFilter::Subtype("Cat".to_string())],
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::Another],
+            })),
+            ..ParseContext::default()
+        }
+    }
+
+    /// CR 608.2c (issue #503): "exile ~, then return him to the battlefield
+    /// transformed" — clause 2's bare pronoun "him" binds to the source named
+    /// by clause 1 (`exile ~` → SelfRef), NOT to the typed Cat trigger
+    /// subject. Building-block test: drives `parse_effect_chain_ir` directly.
+    #[test]
+    fn anaphor_rebinds_to_self_after_named_exile_clause() {
+        let mut ctx = cat_subject_ctx();
+        let def = parse_effect_chain_with_context(
+            "you may exile ~, then return him to the battlefield transformed under his owner's control.",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        // Clause 1: exile ~ → SelfRef.
+        match &*def.effect {
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            } => {}
+            other => panic!("expected clause 1 = ChangeZone exile SelfRef, got {other:?}"),
+        }
+        // Clause 2 (sub_ability): return him transformed → SelfRef, not
+        // TriggeringSource.
+        let sub = def.sub_ability.as_ref().expect("clause 2 sub_ability");
+        match &*sub.effect {
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target,
+                enter_transformed,
+                ..
+            } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::SelfRef,
+                    "clause 2 pronoun 'him' must bind to SelfRef (Ajani), not the Cat subject"
+                );
+                assert!(*enter_transformed, "clause 2 must carry enter_transformed");
+            }
+            other => panic!("expected clause 2 = ChangeZone battlefield, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2k (issue #319, negative guard): a bare-pronoun clause with NO
+    /// preceding `exile ~`/`SelfRef` clause must NOT be rewritten — "exile it"
+    /// under a typed Cat subject stays bound to the triggering source.
+    #[test]
+    fn anaphor_self_rewrite_does_not_fire_without_named_clause() {
+        let mut ctx = cat_subject_ctx();
+        let def = parse_effect_chain_with_context("exile it.", AbilityKind::Spell, &mut ctx);
+        match &*def.effect {
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target,
+                ..
+            } => assert_eq!(
+                *target,
+                TargetFilter::TriggeringSource,
+                "single-clause 'exile it' must stay TriggeringSource (issue #319 class)"
+            ),
+            other => panic!("expected ChangeZone exile, got {other:?}"),
+        }
+    }
 
     #[test]
     fn counter_suffix_body_fixed_count_regression() {

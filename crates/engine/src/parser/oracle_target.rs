@@ -92,7 +92,7 @@ pub(crate) fn resolve_pronoun_target(ctx: &mut ParseContext, pronoun: &str) -> T
 /// Parse a word with a word boundary check: the next char after the word must be
 /// non-alphanumeric (whitespace, comma, period, etc.) or end-of-input.
 /// Prevents "it" from matching "item", "you" from matching "your", etc.
-fn parse_word_bounded<'a>(
+pub(crate) fn parse_word_bounded<'a>(
     input: &'a str,
     word: &str,
 ) -> super::oracle_nom::error::OracleResult<'a, ()> {
