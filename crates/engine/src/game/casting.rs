@@ -1989,25 +1989,23 @@ fn apply_all_cost_modifiers(
     apply_cost_floor(state, player, object_id, mana_cost);
 }
 
-/// CR 601.2f + CR 601.2g: Re-derive a pending cast's total mana cost after an
-/// optional additional cost (e.g. Bargain) is declared. CR 601.2f (additional
-/// costs declared) precedes CR 601.2g/601.2h (total cost calculated and locked),
-/// so re-running the cost-modifier passes here — after the Bargain opt-in is
-/// resolved and `additional_cost_paid` is set, before mana payment — places the
-/// final cost calculation in the CR-correct window.
+/// CR 601.2f + CR 118.9d: Apply the full cost-modifier stack (commander tax,
+/// cost reductions, cost increases) to an arbitrary base mana cost. The base may
+/// be the spell's printed mana cost OR an alternative cost (warp/evoke/overload/
+/// bestow) — cost modifiers apply identically to alternative costs (CR 118.9d).
 ///
-/// The base is the spell's printed mana cost plus commander tax (CR 408.3 +
-/// CR 903.8). The whole Bargain class (Hamlet Glutton, Ice Out, Johann's
-/// Stopgap) is cast for its normal mana cost — Bargain is an *additional* cost,
-/// never an alternative one — so the printed cost is the correct base.
-pub(super) fn recompute_pending_cast_cost(
+/// CR 903.8: The commander-tax surcharge applies only when the object is in the
+/// command zone; alternative-cost bases are always hand cards, so they never
+/// incur the tax.
+pub(super) fn apply_cost_modifiers_to_base(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
+    base: ManaCost,
 ) -> Option<ManaCost> {
     let obj = state.objects.get(&object_id)?;
-    let mut mana_cost = obj.mana_cost.clone();
-    // CR 408.3 + CR 903.8: Commanders cast from the command zone incur a tax.
+    let mut mana_cost = base;
+    // CR 903.8: Commanders cast from the command zone incur a tax.
     if obj.zone == Zone::Command {
         let tax = super::commander::commander_tax(state, object_id);
         if tax > 0 {
@@ -2025,6 +2023,26 @@ pub(super) fn recompute_pending_cast_cost(
     }
     apply_all_cost_modifiers(state, player, object_id, &mut mana_cost);
     Some(mana_cost)
+}
+
+/// CR 601.2f + CR 601.2g: Re-derive a pending cast's total mana cost after an
+/// optional additional cost (e.g. Bargain) is declared. CR 601.2f (additional
+/// costs declared) precedes CR 601.2g/601.2h (total cost calculated and locked),
+/// so re-running the cost-modifier passes here — after the Bargain opt-in is
+/// resolved and `additional_cost_paid` is set, before mana payment — places the
+/// final cost calculation in the CR-correct window.
+///
+/// The base is the spell's printed mana cost plus commander tax (CR 903.8). The
+/// whole Bargain class (Hamlet Glutton, Ice Out, Johann's Stopgap) is cast for
+/// its normal mana cost — Bargain is an *additional* cost, never an alternative
+/// one — so the printed cost is the correct base.
+pub(super) fn recompute_pending_cast_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<ManaCost> {
+    let obj = state.objects.get(&object_id)?;
+    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
 }
 
 /// CR 117.7 + CR 601.2f: Apply self-spell cost modifications — `ReduceCost` / `RaiseCost`
@@ -3550,18 +3568,27 @@ pub fn handle_cast_spell(
                 crate::types::keywords::Keyword::Warp(cost) => Some(cost.clone()),
                 _ => None,
             }) {
+                // CR 601.2f + CR 118.9d: affordability and the displayed costs
+                // must reflect active cost modifiers — applied to BOTH the printed
+                // cost and the warp alternative cost (CR 118.9d).
+                let normal_cost =
+                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
+                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let warp_cost_eff =
+                    apply_cost_modifiers_to_base(state, player, object_id, warp_cost.clone())
+                        .unwrap_or_else(|| warp_cost.clone());
                 let normal_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &obj.mana_cost);
+                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
                 let warp_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &warp_cost);
+                    can_pay_cost_after_auto_tap(state, player, object_id, &warp_cost_eff);
                 if normal_affordable && warp_affordable {
                     return Ok(WaitingFor::AlternativeCastChoice {
                         player,
                         object_id,
                         card_id,
                         keyword: crate::types::game_state::AlternativeCastKeyword::Warp,
-                        normal_cost: obj.mana_cost.clone(),
-                        alternative_cost: warp_cost.clone(),
+                        normal_cost,
+                        alternative_cost: warp_cost_eff,
                     });
                 }
                 // If only normal is affordable, skip warp — prepare_spell_cast will
@@ -3595,18 +3622,27 @@ pub fn handle_cast_spell(
                 crate::types::keywords::Keyword::Evoke(cost) => Some(cost.clone()),
                 _ => None,
             }) {
+                // CR 601.2f + CR 118.9d: affordability and the displayed costs
+                // must reflect active cost modifiers — applied to BOTH the printed
+                // cost and the evoke alternative cost (CR 118.9d).
+                let normal_cost =
+                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
+                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let evoke_cost_eff =
+                    apply_cost_modifiers_to_base(state, player, object_id, evoke_cost.clone())
+                        .unwrap_or_else(|| evoke_cost.clone());
                 let normal_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &obj.mana_cost);
+                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
                 let evoke_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &evoke_cost);
+                    can_pay_cost_after_auto_tap(state, player, object_id, &evoke_cost_eff);
                 if normal_affordable && evoke_affordable {
                     return Ok(WaitingFor::AlternativeCastChoice {
                         player,
                         object_id,
                         card_id,
                         keyword: crate::types::game_state::AlternativeCastKeyword::Evoke,
-                        normal_cost: obj.mana_cost.clone(),
-                        alternative_cost: evoke_cost,
+                        normal_cost,
+                        alternative_cost: evoke_cost_eff,
                     });
                 }
                 if !normal_affordable && evoke_affordable {
@@ -3636,18 +3672,27 @@ pub fn handle_cast_spell(
                 crate::types::keywords::Keyword::Overload(cost) => Some(cost.clone()),
                 _ => None,
             }) {
+                // CR 601.2f + CR 118.9d: affordability and the displayed costs
+                // must reflect active cost modifiers — applied to BOTH the printed
+                // cost and the overload alternative cost (CR 118.9d).
+                let normal_cost =
+                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
+                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let overload_cost_eff =
+                    apply_cost_modifiers_to_base(state, player, object_id, overload_cost.clone())
+                        .unwrap_or_else(|| overload_cost.clone());
                 let normal_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &obj.mana_cost);
+                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
                 let overload_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &overload_cost);
+                    can_pay_cost_after_auto_tap(state, player, object_id, &overload_cost_eff);
                 if normal_affordable && overload_affordable {
                     return Ok(WaitingFor::AlternativeCastChoice {
                         player,
                         object_id,
                         card_id,
                         keyword: crate::types::game_state::AlternativeCastKeyword::Overload,
-                        normal_cost: obj.mana_cost.clone(),
-                        alternative_cost: overload_cost,
+                        normal_cost,
+                        alternative_cost: overload_cost_eff,
                     });
                 }
                 if !normal_affordable && overload_affordable {
@@ -3692,18 +3737,27 @@ pub fn handle_cast_spell(
                 let has_legal_creature_target =
                     !targeting::find_legal_targets(state, &creature_filter, player, object_id)
                         .is_empty();
+                // CR 601.2f + CR 118.9d: affordability and the displayed costs
+                // must reflect active cost modifiers — applied to BOTH the printed
+                // cost and the bestow alternative cost (CR 118.9d).
+                let normal_cost =
+                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
+                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let bestow_cost_eff =
+                    apply_cost_modifiers_to_base(state, player, object_id, bestow_cost.clone())
+                        .unwrap_or_else(|| bestow_cost.clone());
                 let normal_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &obj.mana_cost);
+                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
                 let bestow_affordable =
-                    can_pay_cost_after_auto_tap(state, player, object_id, &bestow_cost);
+                    can_pay_cost_after_auto_tap(state, player, object_id, &bestow_cost_eff);
                 if has_legal_creature_target && normal_affordable && bestow_affordable {
                     return Ok(WaitingFor::AlternativeCastChoice {
                         player,
                         object_id,
                         card_id,
                         keyword: crate::types::game_state::AlternativeCastKeyword::Bestow,
-                        normal_cost: obj.mana_cost.clone(),
-                        alternative_cost: bestow_cost,
+                        normal_cost,
+                        alternative_cost: bestow_cost_eff,
                     });
                 }
                 if has_legal_creature_target && !normal_affordable && bestow_affordable {
@@ -18770,6 +18824,323 @@ mod tests {
                 matches!(*def.effect, Effect::DestroyAll { .. }),
                 "expected DestroyAll after overload transform, got {:?}",
                 def.effect
+            );
+        }
+    }
+
+    /// Issue #509 (also #507): alt-cost spells (Warp/Evoke/Overload/Bestow) must
+    /// compute affordability and the displayed `AlternativeCastChoice` costs from
+    /// the COST-REDUCED effective cost — not the printed `obj.mana_cost`. A spell
+    /// whose printed cost is unaffordable at face value but affordable after an
+    /// active cost reduction must still offer the player the choice rather than
+    /// being auto-skipped to the alternative cost.
+    ///
+    /// CR 601.2f: cost modifiers are folded into the total cost. CR 118.9d: cost
+    /// modifiers apply to alternative costs identically.
+    mod alt_cost_reduction_509 {
+        use super::*;
+        use crate::types::game_state::AlternativeCastKeyword;
+        use crate::types::keywords::Keyword;
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::StaticMode;
+
+        /// Attach a fixed self-spell `ReduceCost` static (active in Hand) to a
+        /// hand card. With `affected = SelfRef` and `dynamic_count = None`, this
+        /// reduces the generic component of whatever base cost is being computed
+        /// — printed OR alternative — mirroring a flat cost reduction.
+        fn add_self_cost_reduction(state: &mut GameState, obj_id: ObjectId, generic: u32) {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            let mut def = StaticDefinition::new(StaticMode::ReduceCost {
+                amount: ManaCost::generic(generic),
+                spell_filter: None,
+                dynamic_count: None,
+            })
+            .affected(TargetFilter::SelfRef);
+            def.active_zones = vec![Zone::Hand, Zone::Stack];
+            obj.static_definitions.push(def);
+        }
+
+        /// A Warp spell in hand with the given printed and warp costs.
+        fn create_warp_spell(
+            state: &mut GameState,
+            player: PlayerId,
+            card_id: u64,
+            printed: ManaCost,
+            warp: ManaCost,
+        ) -> ObjectId {
+            let obj_id = create_object(
+                state,
+                CardId(card_id),
+                player,
+                "Warp Spell".to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = printed.clone();
+            obj.base_mana_cost = printed;
+            obj.keywords.push(Keyword::Warp(warp));
+            obj_id
+        }
+
+        /// An Evoke creature in hand with the given printed and evoke costs.
+        fn create_evoke_spell(
+            state: &mut GameState,
+            player: PlayerId,
+            card_id: u64,
+            printed: ManaCost,
+            evoke: ManaCost,
+        ) -> ObjectId {
+            let obj_id = create_object(
+                state,
+                CardId(card_id),
+                player,
+                "Evoke Creature".to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = printed.clone();
+            obj.base_mana_cost = printed;
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.base_characteristics_initialized = true;
+            obj.keywords.push(Keyword::Evoke(evoke));
+            obj_id
+        }
+
+        /// Test 1 — #509 regression guard. Printed cost ({6}) is unaffordable at
+        /// face value with only 4 mana, but a {3} reduction makes the effective
+        /// printed cost ({3}) affordable; the warp cost ({2}) is affordable too.
+        /// The player must be OFFERED the choice (`AlternativeCastChoice`), not
+        /// auto-skipped.
+        ///
+        /// REVERTED-FIX DISCRIMINATOR: with the fix reverted (the Warp block
+        /// reading the printed `obj.mana_cost` instead of the cost-reduced
+        /// effective cost), `normal_affordable` is false and the `normal &&
+        /// warp` / `normal && !warp` branches are both skipped — the block
+        /// falls THROUGH (returns a non-`AlternativeCastChoice` waiting state as
+        /// the cast proceeds via `CastingVariant::Warp` precedence). This
+        /// assertion fails under the reverted fix.
+        #[test]
+        fn warp_offers_choice_when_reduced_printed_cost_affordable() {
+            let mut state = setup_game_at_main_phase();
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 4);
+
+            let obj = create_warp_spell(
+                &mut state,
+                PlayerId(0),
+                509,
+                ManaCost::generic(6),
+                ManaCost::generic(2),
+            );
+            add_self_cost_reduction(&mut state, obj, 3);
+
+            let mut events = Vec::new();
+            let wf =
+                handle_cast_spell(&mut state, PlayerId(0), obj, CardId(509), &mut events).unwrap();
+            assert!(
+                matches!(
+                    wf,
+                    WaitingFor::AlternativeCastChoice {
+                        keyword: AlternativeCastKeyword::Warp,
+                        ..
+                    }
+                ),
+                "reduced printed cost is affordable ⇒ player must be offered the \
+                 Warp choice, not auto-skipped; got {:?}",
+                wf
+            );
+        }
+
+        /// Test 2 — CR 118.9d. The cost reduction also lowers the warp
+        /// alternative cost; the displayed `alternative_cost` must reflect the
+        /// reduced value and affordability is computed against it.
+        #[test]
+        fn warp_displayed_alternative_cost_reflects_reduction() {
+            let mut state = setup_game_at_main_phase();
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 10);
+
+            // Printed {6}, warp {5}; a {3} reduction → printed eff {3}, warp eff {2}.
+            let obj = create_warp_spell(
+                &mut state,
+                PlayerId(0),
+                510,
+                ManaCost::generic(6),
+                ManaCost::generic(5),
+            );
+            add_self_cost_reduction(&mut state, obj, 3);
+
+            let mut events = Vec::new();
+            let wf =
+                handle_cast_spell(&mut state, PlayerId(0), obj, CardId(510), &mut events).unwrap();
+            match wf {
+                WaitingFor::AlternativeCastChoice {
+                    keyword: AlternativeCastKeyword::Warp,
+                    normal_cost,
+                    alternative_cost,
+                    ..
+                } => {
+                    assert_eq!(
+                        normal_cost,
+                        ManaCost::generic(3),
+                        "displayed normal_cost must be the reduced printed cost"
+                    );
+                    assert_eq!(
+                        alternative_cost,
+                        ManaCost::generic(2),
+                        "CR 118.9d: displayed alternative_cost must reflect the \
+                         reduction applied to the warp cost"
+                    );
+                }
+                other => panic!("expected AlternativeCastChoice(Warp), got {:?}", other),
+            }
+        }
+
+        /// Test 3 — auto-skip `normal_affordable && !alt_affordable`. The reduced
+        /// printed cost is affordable but the warp cost is not, so the cast
+        /// auto-routes to the normal path via `handle_warp_cost_choice(Normal)`
+        /// with no prompt.
+        #[test]
+        fn warp_auto_skips_to_normal_when_only_printed_affordable() {
+            let mut state = setup_game_at_main_phase();
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+            // Printed {6}, warp {5}; a {3} reduction → printed eff {3} affordable,
+            // warp eff {2}... also affordable. Make warp expensive: warp {9} → eff
+            // {6} unaffordable with 3 mana.
+            let obj = create_warp_spell(
+                &mut state,
+                PlayerId(0),
+                511,
+                ManaCost::generic(6),
+                ManaCost::generic(9),
+            );
+            add_self_cost_reduction(&mut state, obj, 3);
+
+            let mut events = Vec::new();
+            let wf =
+                handle_cast_spell(&mut state, PlayerId(0), obj, CardId(511), &mut events).unwrap();
+            assert!(
+                !matches!(wf, WaitingFor::AlternativeCastChoice { .. }),
+                "only the reduced printed cost is affordable ⇒ auto-route to \
+                 normal cast, no prompt; got {:?}",
+                wf
+            );
+        }
+
+        /// Test 4 — auto-skip discriminator `!normal_affordable && alt_affordable`.
+        /// A {3} reduction makes the EVOKE cost affordable when it otherwise would
+        /// not be, while the printed cost stays unaffordable. The cast must
+        /// auto-route to `handle_evoke_cost_choice(Alternative)`.
+        ///
+        /// With 3 mana: printed {12} → eff {9} unaffordable; evoke {5} → eff {2}
+        /// affordable. Without the reduction the evoke cost ({5}) would also be
+        /// unaffordable — so the reduction genuinely flips the evoke branch.
+        #[test]
+        fn evoke_auto_skips_to_alternative_when_only_reduced_evoke_affordable() {
+            let mut state = setup_game_at_main_phase();
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+            let obj = create_evoke_spell(
+                &mut state,
+                PlayerId(0),
+                512,
+                ManaCost::generic(12),
+                ManaCost::generic(5),
+            );
+            add_self_cost_reduction(&mut state, obj, 3);
+
+            let mut events = Vec::new();
+            let wf =
+                handle_cast_spell(&mut state, PlayerId(0), obj, CardId(512), &mut events).unwrap();
+            // The Evoke block's `!normal && evoke` branch routes through
+            // handle_evoke_cost_choice(Alternative), which proceeds with the
+            // cast — it does NOT return an AlternativeCastChoice prompt.
+            assert!(
+                !matches!(
+                    wf,
+                    WaitingFor::AlternativeCastChoice {
+                        keyword: AlternativeCastKeyword::Evoke,
+                        ..
+                    }
+                ),
+                "only the reduced evoke cost is affordable ⇒ auto-route to the \
+                 evoke path, no Evoke choice prompt; got {:?}",
+                wf
+            );
+        }
+
+        /// Test 5 — prompt-unchanged baseline. With no cost modifiers and both
+        /// costs affordable, the displayed `AlternativeCastChoice` costs equal
+        /// the printed `obj.mana_cost` and the keyword cost verbatim.
+        #[test]
+        fn warp_prompt_costs_unchanged_without_modifiers() {
+            let mut state = setup_game_at_main_phase();
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 10);
+
+            let printed = ManaCost::generic(4);
+            let warp = ManaCost::generic(2);
+            let obj =
+                create_warp_spell(&mut state, PlayerId(0), 513, printed.clone(), warp.clone());
+
+            let mut events = Vec::new();
+            let wf =
+                handle_cast_spell(&mut state, PlayerId(0), obj, CardId(513), &mut events).unwrap();
+            match wf {
+                WaitingFor::AlternativeCastChoice {
+                    keyword: AlternativeCastKeyword::Warp,
+                    normal_cost,
+                    alternative_cost,
+                    ..
+                } => {
+                    assert_eq!(
+                        normal_cost, printed,
+                        "no modifiers ⇒ displayed normal_cost equals printed cost"
+                    );
+                    assert_eq!(
+                        alternative_cost, warp,
+                        "no modifiers ⇒ displayed alternative_cost equals warp cost"
+                    );
+                }
+                other => panic!("expected AlternativeCastChoice(Warp), got {:?}", other),
+            }
+        }
+
+        /// Test 6 — Evoke mirror of test 1. Printed cost unaffordable at face
+        /// value, affordable after a {3} reduction; evoke cost affordable. The
+        /// player must be offered the Evoke choice.
+        #[test]
+        fn evoke_offers_choice_when_reduced_printed_cost_affordable() {
+            let mut state = setup_game_at_main_phase();
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 4);
+
+            let obj = create_evoke_spell(
+                &mut state,
+                PlayerId(0),
+                514,
+                ManaCost::generic(6),
+                ManaCost::generic(2),
+            );
+            add_self_cost_reduction(&mut state, obj, 3);
+
+            let mut events = Vec::new();
+            let wf =
+                handle_cast_spell(&mut state, PlayerId(0), obj, CardId(514), &mut events).unwrap();
+            assert!(
+                matches!(
+                    wf,
+                    WaitingFor::AlternativeCastChoice {
+                        keyword: AlternativeCastKeyword::Evoke,
+                        ..
+                    }
+                ),
+                "reduced printed cost is affordable ⇒ player must be offered the \
+                 Evoke choice, not auto-skipped; got {:?}",
+                wf
             );
         }
     }
