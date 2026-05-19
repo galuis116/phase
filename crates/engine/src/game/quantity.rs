@@ -1994,7 +1994,7 @@ fn object_id_for_scope(
     }
 }
 
-fn counter_count_from_map(
+pub(crate) fn counter_count_from_map(
     counters: &HashMap<CounterType, u32>,
     counter_type: Option<&CounterType>,
 ) -> i32 {

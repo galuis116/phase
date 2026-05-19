@@ -7,12 +7,15 @@ use std::collections::{HashMap, HashSet};
 
 use crate::game::combat;
 use crate::game::game_object::GameObject;
-use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
+use crate::game::quantity::{
+    counter_count_from_map, resolve_quantity, resolve_quantity_with_targets,
+};
 use crate::types::ability::{
     ChoiceValue, ChosenAttribute, ControllerRef, FilterProp, QuantityExpr, ResolvedAbility,
     SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
+use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
     CounterAddedRecord, GameState, LKISnapshot, SpellCastRecord, ZoneChangeRecord,
 };
@@ -1540,8 +1543,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Unblocked
         | FilterProp::Tapped
         | FilterProp::Untapped
-        | FilterProp::CountersGE { .. }
-        | FilterProp::HasAnyCounter
+        | FilterProp::Counters { .. }
         | FilterProp::Owned { .. }
         | FilterProp::Foretold
         | FilterProp::EnchantedBy
@@ -1807,20 +1809,22 @@ fn matches_filter_prop(
         FilterProp::WithoutKeywordKind { value } => {
             !crate::game::keywords::object_has_effective_keyword_kind(state, object_id, *value)
         }
-        // CR 122.1: Counter count threshold. Dynamic thresholds
-        // (`QuantityRef::Variable { "X" }`) resolve against the ability's
-        // `chosen_x` when a `ResolvedAbility` is in scope via `FilterContext::from_ability`.
-        FilterProp::CountersGE {
-            counter_type,
+        // CR 122.1: Counter count threshold over `counters` (a specific type or
+        // any type, summed). Dynamic thresholds (`QuantityRef::Variable { "X" }`)
+        // resolve against the ability's `chosen_x` when a `ResolvedAbility` is in
+        // scope via `FilterContext::from_ability`.
+        FilterProp::Counters {
+            counters,
+            comparator,
             count,
         } => {
-            let actual = obj.counters.get(counter_type).copied().unwrap_or(0) as i32;
-            actual >= resolve_filter_threshold(state, count, source)
+            let selector = match counters {
+                CounterMatch::Any => None,
+                CounterMatch::OfType(ct) => Some(ct),
+            };
+            let actual = counter_count_from_map(&obj.counters, selector);
+            comparator.evaluate(actual, resolve_filter_threshold(state, count, source))
         }
-        // CR 122.1: Matches any object with at least one counter of any type
-        // ("creature with one or more counters on it"). Counter types are keyed
-        // by CounterType; a non-zero value for ANY type satisfies the predicate.
-        FilterProp::HasAnyCounter => obj.counters.values().any(|&n| n > 0),
         // CR 202.3: Mana value threshold comparisons. Dynamic thresholds
         // (`QuantityRef::Variable { "X" }`) resolve against the ability's
         // `chosen_x` when a `ResolvedAbility` is in scope via `FilterContext::from_ability`.
@@ -2505,17 +2509,18 @@ fn zone_change_record_matches_property(
         // These predicates query live battlefield state (tap status, attachment,
         // current counters, face-down). The snapshot has already left its public
         // zone, so the predicate is semantically not applicable.
-        FilterProp::CountersGE {
-            counter_type,
+        FilterProp::Counters {
+            counters,
+            comparator,
             count,
         } => state.lki_cache.get(&record.object_id).is_some_and(|lki| {
-            let actual = lki.counters.get(counter_type).copied().unwrap_or(0) as i32;
-            actual >= resolve_filter_threshold(state, count, source)
+            let selector = match counters {
+                CounterMatch::Any => None,
+                CounterMatch::OfType(ct) => Some(ct),
+            };
+            let actual = counter_count_from_map(&lki.counters, selector);
+            comparator.evaluate(actual, resolve_filter_threshold(state, count, source))
         }),
-        FilterProp::HasAnyCounter => state
-            .lki_cache
-            .get(&record.object_id)
-            .is_some_and(|lki| lki.counters.values().any(|&count| count > 0)),
         FilterProp::Tapped
         | FilterProp::Untapped
         | FilterProp::AttackedThisTurn
@@ -5201,14 +5206,15 @@ mod tests {
         assert!(!super::matches_target_filter(&state, cmc2, &filter, &ctx));
     }
 
-    /// CR 122.1: `CountersGE { count: Variable("X") }` + `chosen_x = Some(2)` matches
+    /// CR 122.1: `Counters { count: Variable("X") }` + `chosen_x = Some(2)` matches
     /// only objects with ≥2 counters of the tracked type.
     #[test]
     fn filter_context_from_ability_resolves_x_in_counters_ge() {
         use crate::types::ability::{
-            Effect, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TypedFilter,
+            Comparator, Effect, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
+            TypedFilter,
         };
-        use crate::types::counter::CounterType;
+        use crate::types::counter::{CounterMatch, CounterType};
         let mut state = setup();
         let three = add_creature(&mut state, PlayerId(0), "Three");
         state
@@ -5227,8 +5233,9 @@ mod tests {
 
         let filter =
             TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::CountersGE {
-                    counter_type: CounterType::Plus1Plus1,
+                TypedFilter::creature().properties(vec![FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                    comparator: Comparator::GE,
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::Variable {
                             name: "X".to_string(),
@@ -5252,12 +5259,128 @@ mod tests {
         assert!(!super::matches_target_filter(&state, one, &filter, &ctx));
     }
 
+    /// #526 Wave Goodbye: `Counters { OfType(Plus1Plus1), EQ, Fixed(0) }`
+    /// matches only creatures with zero +1/+1 counters. CR 122.1.
+    #[test]
+    fn counters_eq_zero_typed_matches_counterless_creature() {
+        use crate::types::ability::{Comparator, QuantityExpr, TargetFilter, TypedFilter};
+        use crate::types::counter::{CounterMatch, CounterType};
+        let mut state = setup();
+        let with = add_creature(&mut state, PlayerId(0), "WithCounter");
+        state
+            .objects
+            .get_mut(&with)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        let without = add_creature(&mut state, PlayerId(0), "Bare");
+
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                    comparator: Comparator::EQ,
+                    count: QuantityExpr::Fixed { value: 0 },
+                }]),
+            );
+        let ctx = FilterContext::from_source_with_controller(ObjectId(999), PlayerId(0));
+        assert!(!super::matches_target_filter(&state, with, &filter, &ctx));
+        assert!(super::matches_target_filter(&state, without, &filter, &ctx));
+    }
+
+    /// #527 Damning Verdict: `Counters { Any, EQ, Fixed(0) }` matches only
+    /// creatures with no counters of ANY type — exercises `CounterMatch::Any`
+    /// summing across every counter type. CR 122.1.
+    #[test]
+    fn counters_eq_zero_any_matches_only_uncounted_creature() {
+        use crate::types::ability::{Comparator, QuantityExpr, TargetFilter, TypedFilter};
+        use crate::types::counter::{CounterMatch, CounterType};
+        let mut state = setup();
+        let stunned = add_creature(&mut state, PlayerId(0), "Stunned");
+        state
+            .objects
+            .get_mut(&stunned)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+        let pumped = add_creature(&mut state, PlayerId(0), "Pumped");
+        state
+            .objects
+            .get_mut(&pumped)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+        let bare = add_creature(&mut state, PlayerId(0), "Bare");
+
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Counters {
+                    counters: CounterMatch::Any,
+                    comparator: Comparator::EQ,
+                    count: QuantityExpr::Fixed { value: 0 },
+                }]),
+            );
+        let ctx = FilterContext::from_source_with_controller(ObjectId(999), PlayerId(0));
+        assert!(!super::matches_target_filter(
+            &state, stunned, &filter, &ctx
+        ));
+        assert!(!super::matches_target_filter(&state, pumped, &filter, &ctx));
+        assert!(super::matches_target_filter(&state, bare, &filter, &ctx));
+    }
+
+    /// `CounterMatch::Any` truly SUMS across counter types: a creature with one
+    /// Stun + one +1/+1 counter satisfies `{ Any, GE, Fixed(2) }`. CR 122.1.
+    #[test]
+    fn counters_any_sums_across_counter_types() {
+        use crate::types::ability::{Comparator, QuantityExpr, TargetFilter, TypedFilter};
+        use crate::types::counter::{CounterMatch, CounterType};
+        let mut state = setup();
+        let mixed = add_creature(&mut state, PlayerId(0), "Mixed");
+        {
+            let obj = state.objects.get_mut(&mixed).unwrap();
+            obj.counters.insert(CounterType::Stun, 1);
+            obj.counters.insert(CounterType::Plus1Plus1, 1);
+        }
+        let ctx = FilterContext::from_source_with_controller(ObjectId(999), PlayerId(0));
+
+        let ge2 =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Counters {
+                    counters: CounterMatch::Any,
+                    comparator: Comparator::GE,
+                    count: QuantityExpr::Fixed { value: 2 },
+                }]),
+            );
+        assert!(super::matches_target_filter(&state, mixed, &ge2, &ctx));
+
+        // The comparator axis is honored end-to-end: LE/NE work too.
+        let le1 =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Counters {
+                    counters: CounterMatch::Any,
+                    comparator: Comparator::LE,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }]),
+            );
+        assert!(!super::matches_target_filter(&state, mixed, &le1, &ctx));
+
+        let ne0 =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Stun),
+                    comparator: Comparator::NE,
+                    count: QuantityExpr::Fixed { value: 0 },
+                }]),
+            );
+        assert!(super::matches_target_filter(&state, mixed, &ne0, &ctx));
+    }
+
     /// Serde round-trip for widened `FilterProp::PowerLE.value: QuantityExpr`,
-    /// `CountersGE.count: QuantityExpr`, and `Effect::SearchLibrary.count: QuantityExpr`.
+    /// `Counters.count: QuantityExpr`, and `Effect::SearchLibrary.count: QuantityExpr`.
     #[test]
     fn widened_numeric_fields_roundtrip_through_json() {
-        use crate::types::ability::{Effect, QuantityExpr, TargetFilter, TypedFilter};
-        use crate::types::counter::CounterType;
+        use crate::types::ability::{Comparator, Effect, QuantityExpr, TargetFilter, TypedFilter};
+        use crate::types::counter::{CounterMatch, CounterType};
 
         let power_filter = FilterProp::PowerLE {
             value: QuantityExpr::Fixed { value: 3 },
@@ -5266,8 +5389,9 @@ mod tests {
         let restored: FilterProp = serde_json::from_str(&json).unwrap();
         assert_eq!(power_filter, restored);
 
-        let counters_filter = FilterProp::CountersGE {
-            counter_type: CounterType::Plus1Plus1,
+        let counters_filter = FilterProp::Counters {
+            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+            comparator: Comparator::GE,
             count: QuantityExpr::Fixed { value: 2 },
         };
         let json = serde_json::to_string(&counters_filter).unwrap();

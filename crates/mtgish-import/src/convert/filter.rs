@@ -9,6 +9,7 @@ use engine::types::ability::{
     ChoiceType, Comparator, ControllerRef, FilterProp, QuantityExpr, TargetFilter, TypeFilter,
     TypedFilter,
 };
+use engine::types::counter::CounterMatch;
 use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::ManaColor;
 
@@ -267,21 +268,27 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
         Permanents::HasACounterOfType(ct) => {
             let counter_type = counter_type_to_engine(ct)?;
             TargetFilter::Typed(
-                TypedFilter::permanent().properties(vec![FilterProp::CountersGE {
-                    counter_type,
+                TypedFilter::permanent().properties(vec![FilterProp::Counters {
+                    counters: CounterMatch::OfType(counter_type),
+                    comparator: Comparator::GE,
                     count: QuantityExpr::Fixed { value: 1 },
                 }]),
             )
         }
         // CR 122.1: any kind of counter on it.
-        Permanents::HasACounter => prop_filter(FilterProp::HasAnyCounter),
+        Permanents::HasACounter => prop_filter(FilterProp::Counters {
+            counters: CounterMatch::Any,
+            comparator: Comparator::GE,
+            count: QuantityExpr::Fixed { value: 1 },
+        }),
         // CR 122.1: zero counters of the given kind on it.
         Permanents::HasNoCountersOfType(ct) => {
             let counter_type = counter_type_to_engine(ct)?;
             TargetFilter::Not {
                 filter: Box::new(TargetFilter::Typed(TypedFilter::permanent().properties(
-                    vec![FilterProp::CountersGE {
-                        counter_type,
+                    vec![FilterProp::Counters {
+                        counters: CounterMatch::OfType(counter_type),
+                        comparator: Comparator::GE,
                         count: QuantityExpr::Fixed { value: 1 },
                     }],
                 ))),
@@ -1528,7 +1535,7 @@ pub(crate) fn counter_type_to_engine(
 }
 
 /// Schema `Comparison` over a counter count → a `TargetFilter` battlefield-
-/// scoped on a typed permanent with the corresponding `CountersGE`/`Not`
+/// scoped on a typed permanent with the corresponding `Counters`/`Not`
 /// composition. CR 700.4: comparison semantics; CR 122.1: counter count.
 fn counter_comparison_filter(
     counter_type: engine::types::counter::CounterType,
@@ -1536,8 +1543,9 @@ fn counter_comparison_filter(
 ) -> ConvResult<TargetFilter> {
     let ge = |value: QuantityExpr| {
         TargetFilter::Typed(
-            TypedFilter::permanent().properties(vec![FilterProp::CountersGE {
-                counter_type: counter_type.clone(),
+            TypedFilter::permanent().properties(vec![FilterProp::Counters {
+                counters: CounterMatch::OfType(counter_type.clone()),
+                comparator: Comparator::GE,
                 count: value,
             }]),
         )

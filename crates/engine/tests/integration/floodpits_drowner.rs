@@ -156,8 +156,11 @@ fn activated_shuffle_both_into_owners_libraries() {
             target: TargetFilter::Typed(TypedFilter {
                 type_filters: vec![TypeFilter::Creature],
                 controller: None,
-                properties: vec![FilterProp::CountersGE {
-                    counter_type: engine::types::counter::CounterType::Stun,
+                properties: vec![FilterProp::Counters {
+                    counters: engine::types::counter::CounterMatch::OfType(
+                        engine::types::counter::CounterType::Stun,
+                    ),
+                    comparator: engine::types::ability::Comparator::GE,
                     count: QuantityExpr::Fixed { value: 1 },
                 }],
             }),

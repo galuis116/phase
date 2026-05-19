@@ -9028,9 +9028,13 @@ mod tests {
         let condition = AbilityCondition::ZoneChangeObjectMatchesFilter {
             origin: None,
             destination: Zone::Battlefield,
-            filter: TargetFilter::Typed(
-                TypedFilter::permanent().properties(vec![FilterProp::HasAnyCounter]),
-            ),
+            filter: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                FilterProp::Counters {
+                    counters: crate::types::counter::CounterMatch::Any,
+                    comparator: crate::types::ability::Comparator::GE,
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                },
+            ])),
         };
 
         assert!(evaluate_condition(&condition, &state, &ability));

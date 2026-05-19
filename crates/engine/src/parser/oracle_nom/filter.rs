@@ -15,9 +15,9 @@ use super::error::OracleResult;
 use super::primitives::{parse_article, parse_pt_modifier};
 use super::quantity::parse_quantity_expr_number;
 use crate::types::ability::{Comparator, ControllerRef, FilterProp, QuantityExpr};
-use crate::types::counter::parse_counter_type;
 #[cfg(test)]
 use crate::types::counter::CounterType;
+use crate::types::counter::{parse_counter_type, CounterMatch};
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
@@ -171,8 +171,9 @@ fn parse_with_counter_property(input: &str) -> OracleResult<'_, FilterProp> {
     let counter_type = parse_counter_type(&format!("{p:+}/{t:+}"));
     Ok((
         rest,
-        FilterProp::CountersGE {
-            counter_type,
+        FilterProp::Counters {
+            counters: CounterMatch::OfType(counter_type),
+            comparator: Comparator::GE,
             count: QuantityExpr::Fixed { value: 1 },
         },
     ))
@@ -346,14 +347,16 @@ mod tests {
         let (rest, p) = parse_with_property("with a +1/+1 counter on it").unwrap();
         assert_eq!(rest, " on it");
         match p {
-            FilterProp::CountersGE {
-                counter_type,
+            FilterProp::Counters {
+                counters,
+                comparator,
                 count,
             } => {
-                assert_eq!(counter_type, CounterType::Plus1Plus1);
+                assert_eq!(counters, CounterMatch::OfType(CounterType::Plus1Plus1));
+                assert_eq!(comparator, Comparator::GE);
                 assert_eq!(count, QuantityExpr::Fixed { value: 1 });
             }
-            _ => panic!("expected CountersGE"),
+            _ => panic!("expected Counters"),
         }
     }
 

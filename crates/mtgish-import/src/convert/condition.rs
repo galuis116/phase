@@ -635,7 +635,7 @@ fn permanent_filter_to_ability(
     // Predicate-specific source-axis shortcuts onto existing dedicated variants.
     // Counter checks (`HasACounter[OfType]`) fall through to the general
     // `SourceMatchesFilter` path via `filter::convert` (which maps them to
-    // `FilterProp::HasAnyCounter`/typed counter filter props).
+    // `FilterProp::Counters` with the appropriate `CounterMatch`).
     if axis == PermanentAxis::Source {
         match pred {
             // CR 611.2b: "if ~ is tapped/untapped".
@@ -1067,8 +1067,7 @@ fn unsafe_prop_name(p: &FilterProp) -> Option<&'static str> {
         FilterProp::HasAttachment { .. } => Some("HasAttachment"),
         FilterProp::HasAnyAttachmentOf { .. } => Some("HasAnyAttachmentOf"),
         FilterProp::FaceDown => Some("FaceDown"),
-        FilterProp::CountersGE { .. } => Some("CountersGE"),
-        FilterProp::HasAnyCounter => Some("HasAnyCounter"),
+        FilterProp::Counters { .. } => Some("Counters"),
         FilterProp::NameMatchesAnyPermanent { .. } => Some("NameMatchesAnyPermanent"),
         // Group 4 (filter.rs:1842-1869) — known conservative gaps the snapshot
         // evaluator returns false on.
@@ -3330,7 +3329,14 @@ mod tests {
                 assert!(matches!(
                     filter,
                     TargetFilter::Typed(TypedFilter { properties, .. })
-                        if properties.contains(&FilterProp::HasAnyCounter)
+                        if properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::Counters {
+                                counters: engine::types::counter::CounterMatch::Any,
+                                comparator: engine::types::ability::Comparator::GE,
+                                ..
+                            }
+                        ))
                 ));
             }
             other => panic!("expected ZoneChangeObjectMatchesFilter, got {other:?}"),

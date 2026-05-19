@@ -18,8 +18,8 @@
 //!   quantity_modification: Some(QuantityModification::{Double | Plus | Minus}), .. }`
 //!   at `ability.rs:4818-4874`. CR 614.1a: replacement effects that modify counter
 //!   quantities (Doubling Season, Hardened Scales shapes).
-//! - `FilterProp::CountersGE { counter_type: CounterType::Plus1Plus1, count }` at
-//!   `ability.rs:856-859`. Static payoff shape (Abzan Falconer). CR 122.1a + CR 613.1f.
+//! - `FilterProp::Counters { counters: CounterMatch::OfType(CounterType::Plus1Plus1), .. }`.
+//!   Static payoff shape (Abzan Falconer). CR 122.1a + CR 613.1f.
 //! - `TriggerMode::CounterAdded | CounterAddedOnce | CounterAddedAll | CounterTypeAddedAll`
 //!   with `counter_filter: Some(CounterTriggerFilter { counter_type: CounterType::Plus1Plus1 })`
 //!   in `TriggerDefinition`. CR 122.6 + CR 122.7: triggered payoffs for counter events.
@@ -37,7 +37,7 @@ use engine::types::ability::{
     AbilityDefinition, ControllerRef, Effect, FilterProp, ReplacementDefinition, StaticDefinition,
     TargetFilter, TriggerDefinition,
 };
-use engine::types::counter::CounterType;
+use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::keywords::Keyword;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::statics::StaticMode;
@@ -270,7 +270,7 @@ fn replacement_modifies_p1p1_counters(rep: &ReplacementDefinition) -> bool {
 }
 
 /// True if this static definition is a payoff for creatures with +1/+1 counters
-/// — i.e., its `affected` filter includes `FilterProp::CountersGE` for P1P1.
+/// — i.e., its `affected` filter includes `FilterProp::Counters` for P1P1.
 /// CR 613.1f + CR 122.1a.
 fn static_is_counter_payoff(s: &StaticDefinition) -> bool {
     if s.mode != StaticMode::Continuous {
@@ -280,19 +280,22 @@ fn static_is_counter_payoff(s: &StaticDefinition) -> bool {
 }
 
 /// True if a TargetFilter (or any nested prop in a TypedFilter) references
-/// `FilterProp::CountersGE` for `CounterType::Plus1Plus1`.
+/// `FilterProp::Counters` for `CounterType::Plus1Plus1`.
 fn filter_has_p1p1_counter_prop(filter: Option<&TargetFilter>) -> bool {
     let Some(filter) = filter else {
         return false;
     };
     match filter {
-        TargetFilter::Typed(tf) => tf
-            .properties
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::Counters { counters: CounterMatch::OfType(ct), .. }
+                    if ct == &CounterType::Plus1Plus1
+            )
+        }),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
             .iter()
-            .any(|p| matches!(p, FilterProp::CountersGE { counter_type, .. } if counter_type == &CounterType::Plus1Plus1)),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(|f| filter_has_p1p1_counter_prop(Some(f)))
-        }
+            .any(|f| filter_has_p1p1_counter_prop(Some(f))),
         _ => false,
     }
 }
@@ -355,8 +358,8 @@ mod tests {
     use super::*;
     use engine::game::DeckEntry;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, CounterTriggerFilter, Effect, FilterProp, QuantityExpr,
-        QuantityModification, ReplacementDefinition, StaticDefinition, TargetFilter,
+        AbilityDefinition, AbilityKind, Comparator, CounterTriggerFilter, Effect, FilterProp,
+        QuantityExpr, QuantityModification, ReplacementDefinition, StaticDefinition, TargetFilter,
         TriggerDefinition, TypedFilter,
     };
     use engine::types::card::CardFace;
@@ -417,8 +420,9 @@ mod tests {
 
     fn static_counter_payoff() -> StaticDefinition {
         StaticDefinition::new(StaticMode::Continuous).affected(TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::CountersGE {
-                counter_type: CounterType::Plus1Plus1,
+            TypedFilter::creature().properties(vec![FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                comparator: Comparator::GE,
                 count: QuantityExpr::Fixed { value: 1 },
             }]),
         ))

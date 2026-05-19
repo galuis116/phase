@@ -4355,7 +4355,11 @@ fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
         CombatTaxSubject::EachCreatureWithCounters => TargetFilter::Typed(TypedFilter {
             type_filters: vec![TypeFilter::Creature],
             controller: None,
-            properties: vec![FilterProp::HasAnyCounter],
+            properties: vec![FilterProp::Counters {
+                counters: CounterMatch::Any,
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            }],
         }),
         // CR 508.1d / CR 509.1c: the source permanent itself (Myr Prototype).
         CombatTaxSubject::SourcePermanent => TargetFilter::SelfRef,
@@ -12040,8 +12044,11 @@ mod tests {
         assert_eq!(
             def.affected,
             Some(TargetFilter::Typed(TypedFilter::creature().properties(
-                vec![FilterProp::CountersGE {
-                    counter_type: crate::types::counter::CounterType::Generic("ice".to_string()),
+                vec![FilterProp::Counters {
+                    counters: CounterMatch::OfType(crate::types::counter::CounterType::Generic(
+                        "ice".to_string()
+                    )),
+                    comparator: Comparator::GE,
                     count: QuantityExpr::Fixed { value: 1 },
                 },]
             )))
@@ -12923,8 +12930,11 @@ mod tests {
                 let properties = &tf.properties;
                 assert!(properties.iter().any(|p| matches!(
                     p,
-                    FilterProp::CountersGE {
-                        counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                    FilterProp::Counters {
+                        counters: CounterMatch::OfType(
+                            crate::types::counter::CounterType::Plus1Plus1
+                        ),
+                        comparator: Comparator::GE,
                         count: QuantityExpr::Fixed { value: 1 },
                     }
                 )));
@@ -12952,8 +12962,11 @@ mod tests {
                 let properties = &tf.properties;
                 assert!(properties.iter().any(|p| matches!(
                     p,
-                    FilterProp::CountersGE {
-                        counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                    FilterProp::Counters {
+                        counters: CounterMatch::OfType(
+                            crate::types::counter::CounterType::Plus1Plus1
+                        ),
+                        comparator: Comparator::GE,
                         count: QuantityExpr::Fixed { value: 1 },
                     }
                 )));
@@ -12980,8 +12993,11 @@ mod tests {
             })) => {
                 assert!(properties.iter().any(|p| matches!(
                     p,
-                    FilterProp::CountersGE {
-                        counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                    FilterProp::Counters {
+                        counters: CounterMatch::OfType(
+                            crate::types::counter::CounterType::Plus1Plus1
+                        ),
+                        comparator: Comparator::GE,
                         count: QuantityExpr::Fixed { value: 1 },
                     }
                 )));
@@ -18972,7 +18988,7 @@ mod tests {
     /// ("Each creature with one or more counters on it") with per-attacker-resolved
     /// scaling ({X} = counters on THAT creature). Parses to `PerAffectedWithRef`
     /// with `QuantityRef::AnyCountersOnTarget`, using a creature filter with
-    /// `FilterProp::HasAnyCounter`.
+    /// `FilterProp::Counters { CounterMatch::Any, GE, Fixed(1) }`.
     #[test]
     fn combat_tax_nils_per_affected_with_ref() {
         let def = parse_static_line(
@@ -18987,7 +19003,11 @@ mod tests {
             panic!("expected TypedFilter, got {affected:?}");
         };
         assert!(tf.type_filters.contains(&TypeFilter::Creature));
-        assert!(tf.properties.contains(&FilterProp::HasAnyCounter));
+        assert!(tf.properties.contains(&FilterProp::Counters {
+            counters: CounterMatch::Any,
+            comparator: Comparator::GE,
+            count: QuantityExpr::Fixed { value: 1 },
+        }));
 
         let (_cost, scaling) = extract_unless_pay(&def);
         match scaling {

@@ -4430,7 +4430,11 @@ mod tests {
             .affected(TargetFilter::Typed(TypedFilter {
                 type_filters: vec![TypeFilter::Creature],
                 controller: None,
-                properties: vec![FilterProp::HasAnyCounter],
+                properties: vec![FilterProp::Counters {
+                    counters: crate::types::counter::CounterMatch::Any,
+                    comparator: crate::types::ability::Comparator::GE,
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                }],
             }))
             .description("Nils static".to_string());
         def.condition = Some(StaticCondition::UnlessPay {

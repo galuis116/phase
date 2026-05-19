@@ -18,7 +18,7 @@ use crate::types::ability::{
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
-use crate::types::counter::CounterType;
+use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
@@ -373,14 +373,30 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::WithoutKeywordKind { value } => {
                 parts.push(format!("without {value:?}").to_lowercase())
             }
-            FilterProp::CountersGE {
-                counter_type,
+            FilterProp::Counters {
+                counters,
+                comparator,
                 count,
-            } => parts.push(format!(
-                "{}+ {} counters",
-                fmt_quantity(count),
-                counter_type.as_str()
-            )),
+            } => {
+                let suffix = match comparator {
+                    Comparator::GE => "+",
+                    Comparator::LE => "-",
+                    Comparator::GT => ">",
+                    Comparator::LT => "<",
+                    Comparator::EQ => "",
+                    Comparator::NE => "≠",
+                };
+                let kind = match counters {
+                    CounterMatch::Any => "any".to_string(),
+                    CounterMatch::OfType(ct) => ct.as_str().to_string(),
+                };
+                parts.push(format!(
+                    "{}{} {} counters",
+                    fmt_quantity(count),
+                    suffix,
+                    kind
+                ))
+            }
             FilterProp::Cmc { comparator, value } => {
                 let suffix = match comparator {
                     Comparator::GE => "+",
@@ -552,7 +568,6 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::HasXInManaCost => parts.push("with {X} in cost".into()),
             FilterProp::HasManaAbility => parts.push("with a mana ability".into()),
             FilterProp::HasNoAbilities => parts.push("with no abilities".into()),
-            FilterProp::HasAnyCounter => parts.push("with one or more counters".into()),
         }
     }
     if let Some(ctrl) = &tf.controller {

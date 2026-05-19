@@ -12,7 +12,7 @@ use crate::types::ability::{
     TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
-use crate::types::counter::CounterType;
+use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::identifiers::TrackedSetId;
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::ManaColor;
@@ -957,8 +957,9 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         return (
             TargetFilter::Typed(TypedFilter::card().properties(vec![
                 FilterProp::InZone { zone: Zone::Exile },
-                FilterProp::CountersGE {
-                    counter_type,
+                FilterProp::Counters {
+                    counters: CounterMatch::OfType(counter_type),
+                    comparator: Comparator::GE,
                     count: QuantityExpr::Fixed { value: 1 },
                 },
             ])),
@@ -2951,17 +2952,20 @@ fn parse_cost_paid_mana_value_reference(
     ))
 }
 
-/// Parse "with [count] [counter] counter(s) on it/them" using pure nom combinators.
-/// Returns (FilterProp, bytes consumed from the original text).
+/// Parse a counter-presence suffix ("with [count] [counter] counter(s) on
+/// it/them", "with no counters on them", "without a +1/+1 counter on it")
+/// using pure nom combinators. Returns (FilterProp, bytes consumed).
 ///
-/// Grammar: `"with " <count> <counter_type> (" counter" | " counters") " on " ("it" | "them")`
-/// where `<count>` is either an article ("a"/"an", implying 1) or a quantity
-/// expression (literal N or variable X). Supports both "with a stun counter on it"
-/// (fixed 1) and "with X +1/+1 counters on it" (dynamic — resolves against
-/// `chosen_x` via `FilterContext::from_ability`).
+/// `with` is a positive (`Comparator::GE`) threshold; `with no` and `without`
+/// are negated (`Comparator::EQ` against 0). `<count>` is either an article
+/// ("a"/"an", implying 1) or a quantity expression (literal N or variable X);
+/// in the negated branch the count is discarded — negation means exactly 0.
+/// The counter axis is `CounterMatch::Any` ("a counter on it" / "no counters")
+/// or `CounterMatch::OfType` ("a +1/+1 counter").
 ///
-/// CR 107.3a + CR 601.2b: X counts resolve at effect time against
-/// `ResolvedAbility::chosen_x` via `FilterContext::from_ability`.
+/// CR 122.1: counter-count predicate. CR 107.3a + CR 601.2b: X counts resolve
+/// at effect time against `ResolvedAbility::chosen_x` via
+/// `FilterContext::from_ability`.
 pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
     use nom::branch::alt;
     use nom::bytes::complete::{tag as tag_e, take_until};
@@ -2969,26 +2973,70 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
 
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
-    let (rest, _) = tag_e::<_, _, OracleError<'_>>("with ")
-        .parse(trimmed)
-        .ok()?;
 
-    // CR 122.1: Bare "with a counter on it" / "with a counter on them" — any
-    // counter of any type. Distinct from typed "with a +1/+1 counter on it"
-    // (CountersGE) — emits HasAnyCounter so `creature with a counter on it`
-    // matches any counter-bearing creature regardless of type. Must precede the
-    // typed-counter branch so the empty-counter-type guard there doesn't fire.
-    for prefix in ["a counter on it", "a counter on them", "any counter on it"] {
-        if let Ok((after, _)) = tag_e::<_, _, OracleError<'_>>(prefix).parse(rest) {
-            let consumed = leading_ws + "with ".len() + (rest.len() - after.len());
-            return Some((FilterProp::HasAnyCounter, consumed));
+    // CR 122.1: Leading dispatch — `with` is a positive (GE) threshold, while
+    // `without` and `with no` are negated (EQ 0) filters. Longest-match-first:
+    // `"with no "` / `"without "` must precede the bare `"with "`.
+    let (rest, comparator) = alt((
+        value(Comparator::EQ, tag_e::<_, _, OracleError<'_>>("without ")),
+        value(Comparator::EQ, tag_e::<_, _, OracleError<'_>>("with no ")),
+        value(Comparator::GE, tag_e::<_, _, OracleError<'_>>("with ")),
+    ))
+    .parse(trimmed)
+    .ok()?;
+    let lead_len = trimmed.len() - rest.len();
+
+    // CR 122.1: Negated branch — untyped FIRST, before any `take_until`. The
+    // untyped negated case ("with no counters on them", "without counters")
+    // never touches the typed suffix loop, so the empty-`counter_text` guard
+    // there is never reached.
+    if comparator == Comparator::EQ {
+        let untyped = alt((
+            tag_e::<_, _, OracleError<'_>>("counters on them"),
+            tag_e::<_, _, OracleError<'_>>("counters on it"),
+            tag_e::<_, _, OracleError<'_>>("counter on them"),
+            tag_e::<_, _, OracleError<'_>>("counter on it"),
+            tag_e::<_, _, OracleError<'_>>("counters"),
+        ))
+        .parse(rest);
+        if let Ok((after, _)) = untyped {
+            let consumed = leading_ws + lead_len + (rest.len() - after.len());
+            return Some((
+                FilterProp::Counters {
+                    counters: CounterMatch::Any,
+                    comparator: Comparator::EQ,
+                    count: QuantityExpr::Fixed { value: 0 },
+                },
+                consumed,
+            ));
+        }
+        // Negated typed case ("without a +1/+1 counter on it"): fall through to
+        // the typed suffix loop below. The article-derived count is discarded —
+        // negation always means exactly 0 counters of that type.
+    } else {
+        // CR 122.1: Bare "with a counter on it" / "with a counter on them" — any
+        // counter of any type. Distinct from typed "with a +1/+1 counter on it".
+        // Must precede the typed-counter branch so the empty-counter-type guard
+        // there doesn't fire.
+        for prefix in ["a counter on it", "a counter on them", "any counter on it"] {
+            if let Ok((after, _)) = tag_e::<_, _, OracleError<'_>>(prefix).parse(rest) {
+                let consumed = leading_ws + lead_len + (rest.len() - after.len());
+                return Some((
+                    FilterProp::Counters {
+                        counters: CounterMatch::Any,
+                        comparator: Comparator::GE,
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    consumed,
+                ));
+            }
         }
     }
 
     // Parse count: optional article ("a"/"an" → implicit 1) or an explicit
     // quantity expression followed by a space. Neither branch matching means
-    // the counter type follows "with " directly (e.g. "with ice counters on them"),
-    // which is implicit count 1.
+    // the counter type follows directly (e.g. "with ice counters on them"),
+    // which is implicit count 1. In the negated branch this count is discarded.
     let count_parser = alt((
         value(
             QuantityExpr::Fixed { value: 1 },
@@ -3021,9 +3069,19 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
             continue;
         }
         let consumed = text.len() - after.len() + suffix.len();
+        // CR 122.1: negated typed filter means exactly 0 counters of the type;
+        // positive filter is the parsed (or implicit-1) threshold.
+        let count = if comparator == Comparator::EQ {
+            QuantityExpr::Fixed { value: 0 }
+        } else {
+            count.clone()
+        };
         return Some((
-            FilterProp::CountersGE {
-                counter_type: crate::types::counter::parse_counter_type(counter_type),
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(crate::types::counter::parse_counter_type(
+                    counter_type,
+                )),
+                comparator,
                 count,
             },
             consumed,
@@ -5369,8 +5427,9 @@ mod tests {
         assert_eq!(
             f,
             TargetFilter::Typed(
-                TypedFilter::creature().properties(vec![FilterProp::CountersGE {
-                    counter_type: CounterType::Generic("ice".to_string()),
+                TypedFilter::creature().properties(vec![FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Generic("ice".to_string())),
+                    comparator: Comparator::GE,
                     count: QuantityExpr::Fixed { value: 1 },
                 },])
             )
@@ -6019,7 +6078,7 @@ mod tests {
                     .contains(&FilterProp::InZone { zone: Zone::Exile }));
                 assert!(tf.properties.iter().any(|prop| matches!(
                     prop,
-                    FilterProp::CountersGE { counter_type, .. }
+                    FilterProp::Counters { counters: CounterMatch::OfType(counter_type), .. }
                         if counter_type.as_str() == "aegis"
                 )));
             }
@@ -6203,8 +6262,9 @@ mod tests {
         let (prop, _consumed) = result.unwrap();
         assert!(matches!(
             prop,
-            FilterProp::CountersGE {
-                counter_type: CounterType::Stun,
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Stun),
+                comparator: Comparator::GE,
                 count: QuantityExpr::Fixed { value: 1 },
             }
         ));
@@ -6217,8 +6277,9 @@ mod tests {
         let (prop, _consumed) = result.unwrap();
         assert!(matches!(
             prop,
-            FilterProp::CountersGE {
-                counter_type: CounterType::Generic(ref s),
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Generic(ref s)),
+                comparator: Comparator::GE,
                 count: QuantityExpr::Fixed { value: 1 },
             } if s == "oil"
         ));
@@ -6230,6 +6291,82 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// #526 Wave Goodbye — typed negation: "without a +1/+1 counter on it"
+    /// must produce a negated typed counter filter, not silently drop the clause.
+    #[test]
+    fn parse_counter_suffix_without_typed_counter() {
+        let (prop, _consumed) =
+            parse_counter_suffix(" without a +1/+1 counter on it").expect("must parse");
+        assert_eq!(
+            prop,
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                comparator: Comparator::EQ,
+                count: QuantityExpr::Fixed { value: 0 },
+            }
+        );
+    }
+
+    /// #526 — article-free plural negated typed counter.
+    #[test]
+    fn parse_counter_suffix_without_typed_counter_plural() {
+        let (prop, _consumed) =
+            parse_counter_suffix(" without +1/+1 counters on them").expect("must parse");
+        assert_eq!(
+            prop,
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                comparator: Comparator::EQ,
+                count: QuantityExpr::Fixed { value: 0 },
+            }
+        );
+    }
+
+    /// #527 Damning Verdict — untyped negation: "with no counters on them" must
+    /// produce `Counters { Any, EQ, Fixed(0) }`, NOT `None` (the v1 plan bug).
+    #[test]
+    fn parse_counter_suffix_with_no_counters() {
+        let (prop, _consumed) =
+            parse_counter_suffix(" with no counters on them").expect("must not be None");
+        assert_eq!(
+            prop,
+            FilterProp::Counters {
+                counters: CounterMatch::Any,
+                comparator: Comparator::EQ,
+                count: QuantityExpr::Fixed { value: 0 },
+            }
+        );
+    }
+
+    /// "without counters" — bare untyped negation, no "on it/them" suffix.
+    #[test]
+    fn parse_counter_suffix_without_bare_counters() {
+        let (prop, _consumed) =
+            parse_counter_suffix(" without counters").expect("must not be None");
+        assert_eq!(
+            prop,
+            FilterProp::Counters {
+                counters: CounterMatch::Any,
+                comparator: Comparator::EQ,
+                count: QuantityExpr::Fixed { value: 0 },
+            }
+        );
+    }
+
+    /// Regression — bare positive "with a counter on it" → any-counter GE 1.
+    #[test]
+    fn parse_counter_suffix_bare_positive_any() {
+        let (prop, _consumed) = parse_counter_suffix(" with a counter on it").expect("must parse");
+        assert_eq!(
+            prop,
+            FilterProp::Counters {
+                counters: CounterMatch::Any,
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            }
+        );
+    }
+
     #[test]
     fn parse_type_phrase_creature_with_stun_counter() {
         let (filter, _rest) = parse_type_phrase("creature with a stun counter on it");
@@ -6238,8 +6375,9 @@ mod tests {
                 assert!(tf.type_filters.contains(&TypeFilter::Creature));
                 assert!(tf.properties.iter().any(|p| matches!(
                     p,
-                    FilterProp::CountersGE {
-                        ref counter_type,
+                    FilterProp::Counters {
+                        counters: CounterMatch::OfType(ref counter_type),
+                        comparator: Comparator::GE,
                         count: QuantityExpr::Fixed { value: 1 },
                     } if *counter_type == CounterType::Stun
                 )));

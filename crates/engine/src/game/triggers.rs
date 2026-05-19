@@ -4952,9 +4952,13 @@ pub mod tests {
         let condition = TriggerCondition::ZoneChangeObjectMatchesFilter {
             origin: None,
             destination: Zone::Battlefield,
-            filter: TargetFilter::Typed(
-                TypedFilter::permanent().properties(vec![FilterProp::HasAnyCounter]),
-            ),
+            filter: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                FilterProp::Counters {
+                    counters: crate::types::counter::CounterMatch::Any,
+                    comparator: crate::types::ability::Comparator::GE,
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                },
+            ])),
         };
         let event = zone_changed_event(
             entering,
@@ -5013,9 +5017,13 @@ pub mod tests {
         let condition = TriggerCondition::ZoneChangeObjectMatchesFilter {
             origin: Some(Zone::Battlefield),
             destination: Zone::Graveyard,
-            filter: TargetFilter::Typed(
-                TypedFilter::permanent().properties(vec![FilterProp::HasAnyCounter]),
-            ),
+            filter: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                FilterProp::Counters {
+                    counters: crate::types::counter::CounterMatch::Any,
+                    comparator: crate::types::ability::Comparator::GE,
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                },
+            ])),
         };
         let event = zone_changed_event(
             dead,

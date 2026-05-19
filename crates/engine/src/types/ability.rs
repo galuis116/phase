@@ -1661,14 +1661,18 @@ pub enum FilterProp {
     CanEnchant {
         target: Box<TargetFilter>,
     },
-    CountersGE {
-        counter_type: CounterType,
+    /// CR 122.1: Matches objects whose counter count satisfies `comparator`
+    /// against `count`. `counters` selects which counters are counted —
+    /// `CounterMatch::OfType(t)` counts only type `t`, `CounterMatch::Any` sums
+    /// across all counter types. Replaces the legacy `CountersGE` +
+    /// `HasAnyCounter` variants; the comparator axis is parameterized via
+    /// `Comparator`, unlocking EQ/LT/NE ("without a +1/+1 counter", "with no
+    /// counters") without sibling proliferation — mirrors the `Cmc` refactor.
+    Counters {
+        counters: CounterMatch,
+        comparator: Comparator,
         count: QuantityExpr,
     },
-    /// CR 122.1: Matches objects with at least one counter of any type on them.
-    /// Used for "creature with one or more counters on it" phrases where the
-    /// counter type is unspecified (Nils, Discipline Enforcer's attack-tax class).
-    HasAnyCounter,
     /// Matches objects whose mana value satisfies `comparator` against `value`.
     /// CR 202.3. Replaces the legacy `CmcGE`/`CmcLE`/`CmcEQ` sibling cluster;
     /// the comparator axis is parameterized via the existing `Comparator` enum,
@@ -11247,9 +11251,15 @@ mod tests {
             FilterProp::WithoutKeywordKind {
                 value: KeywordKind::Cycling,
             },
-            FilterProp::CountersGE {
-                counter_type: CounterType::Plus1Plus1,
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                comparator: Comparator::GE,
                 count: QuantityExpr::Fixed { value: 3 },
+            },
+            FilterProp::Counters {
+                counters: CounterMatch::Any,
+                comparator: Comparator::EQ,
+                count: QuantityExpr::Fixed { value: 0 },
             },
             FilterProp::Cmc {
                 comparator: Comparator::GE,

@@ -1083,7 +1083,8 @@ fn parse_for_each_clause_with_they_controller(
 
     // CR 109.1 + CR 122.1: "[type] you control with a [counter] counter on it" —
     // objects matching a type filter AND bearing at least one counter of the given
-    // type. The filter is the type-phrase plus a `FilterProp::CountersGE { count: 1 }`.
+    // type. The filter is the type-phrase plus a
+    // `FilterProp::Counters { OfType(t), GE, Fixed(1) }`.
     // This must be checked BEFORE the self-counter fallback below, which would
     // otherwise misroute any clause containing "counter on" to CountersOnSelf and
     // discard the subject type phrase (Inspiring Call bug: "creature you control
@@ -2287,7 +2288,7 @@ mod tests {
     }
 
     /// CR 109.1 + CR 122.1: "[type] you control with a [counter] counter on it"
-    /// lowers to `ObjectCount` over a filter that includes `FilterProp::CountersGE`,
+    /// lowers to `ObjectCount` over a filter that includes `FilterProp::Counters`,
     /// not `CountersOnSelf` over a bogus counter-type string. Inspiring Call class.
     #[test]
     fn for_each_creature_with_counter_on_it() {
@@ -2299,10 +2300,12 @@ mod tests {
                     assert!(
                         typed.properties.iter().any(|p| matches!(
                             p,
-                            FilterProp::CountersGE { counter_type, .. }
-                                if counter_type == &crate::types::counter::CounterType::Plus1Plus1
+                            FilterProp::Counters {
+                                counters: crate::types::counter::CounterMatch::OfType(counter_type),
+                                ..
+                            } if counter_type == &crate::types::counter::CounterType::Plus1Plus1
                         )),
-                        "expected CountersGE(P1P1), got properties {:?}",
+                        "expected Counters {{ OfType(Plus1Plus1), .. }}, got properties {:?}",
                         typed.properties
                     );
                 }
