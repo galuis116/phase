@@ -199,7 +199,7 @@ export const useDraftPodStore = create<DraftPodState & DraftPodActions>()(
     },
 
     startDraft: async () => {
-      await useMultiplayerDraftStore.getState().startDraft();
+      await useMultiplayerDraftStore.getState().startDraft(get().botFillEnabled);
     },
 
     reset: () => {

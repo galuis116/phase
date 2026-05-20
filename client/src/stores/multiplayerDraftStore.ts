@@ -112,7 +112,7 @@ interface MultiplayerDraftActions {
   /** Guest: join an existing draft pod by room code. */
   joinDraft: (config: DraftPodGuestConfig) => Promise<void>;
   /** Host: start the draft once the pod is ready. */
-  startDraft: () => Promise<void>;
+  startDraft: (botFillEmptySeats?: boolean) => Promise<void>;
   /** Both: submit a pick. */
   submitPick: (cardInstanceId: string) => Promise<void>;
   /** Both: select a card (UI highlight before confirming pick). */
@@ -247,9 +247,9 @@ export const useMultiplayerDraftStore = create<
     }
   },
 
-  startDraft: async () => {
+  startDraft: async (botFillEmptySeats = true) => {
     if (!activeHostAdapter) return;
-    await activeHostAdapter.startDraft();
+    await activeHostAdapter.startDraft(botFillEmptySeats);
   },
 
   submitPick: async (cardInstanceId) => {

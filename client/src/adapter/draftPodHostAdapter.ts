@@ -287,9 +287,9 @@ export class DraftPodHostAdapter {
 
   // ── Draft actions ──────────────────────────────────────────────────
 
-  async startDraft(): Promise<void> {
+  async startDraft(botFillEmptySeats = true): Promise<void> {
     if (!this.host) throw new Error("Host not initialized");
-    await this.host.startDraft();
+    await this.host.startDraft(botFillEmptySeats);
   }
 
   async submitPick(cardInstanceId: string): Promise<DraftPlayerView> {
