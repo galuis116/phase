@@ -7387,6 +7387,39 @@ fn has_typed_target(effect: &Effect) -> bool {
     )
 }
 
+/// CR 608.2c: Does an earlier clause in the chain establish a typed (chosen)
+/// object referent that the current anaphor binds to — looking PAST intermediate
+/// clauses that merely carry that referent forward via `ParentTarget`?
+///
+/// `has_typed_target` alone only inspects the immediately-preceding clause, which
+/// breaks the "target X. <do something to it>. <grant on it>" shape when the
+/// middle clause is itself an anaphor: Nissa, Who Shakes the World — "Put three
+/// +1/+1 counters on up to one target land you control. Untap it. It becomes a
+/// 0/0 Elemental …" — has the typed land two clauses back, with the `Untap it`
+/// (`ParentTarget`) clause in between. The scan walks back, skipping
+/// `ParentTarget`-carrier clauses (they continue the same chosen referent), and
+/// succeeds at the originating typed clause. It stops at the first clause that is
+/// conditional or is neither typed nor a `ParentTarget` carrier, so it never
+/// reaches across an unrelated referent.
+fn chain_has_prior_typed_referent(clauses: &[ClauseIr]) -> bool {
+    for prev in clauses.iter().rev() {
+        if prev.condition.is_some() {
+            return false;
+        }
+        if has_typed_target(&prev.parsed.effect) {
+            return true;
+        }
+        if matches!(
+            prev.parsed.effect.target_filter(),
+            Some(TargetFilter::ParentTarget)
+        ) {
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
 fn lower_subject_predicate_ast(
     subject: SubjectPhraseAst,
     predicate: PredicateAst,
@@ -11291,10 +11324,11 @@ pub(crate) fn parse_effect_chain_ir(
             replace_target_with_parent(&mut clause.effect);
         }
         // CR 608.2c: Pronoun clause following an unconditional targeted effect.
+        // Transitive across `ParentTarget`-carrier clauses so an intervening
+        // anaphor ("Untap it.") doesn't hide the originating typed target
+        // (Nissa, Who Shakes the World).
         if condition.is_none()
-            && clauses.last().is_some_and(|prev| {
-                prev.condition.is_none() && has_typed_target(&prev.parsed.effect)
-            })
+            && chain_has_prior_typed_referent(&clauses)
             && has_anaphoric_reference(&text_lower)
             && !typed_trigger_subject
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
@@ -29035,6 +29069,69 @@ mod tests {
             "expected sub_ability PutCounter with ParentTarget, got: {:?}",
             sub.effect
         );
+    }
+
+    /// CR 608.2c (#548): Nissa, Who Shakes the World — "Put three +1/+1 counters
+    /// on up to one target noncreature land you control. Untap it. It becomes a
+    /// 0/0 Elemental creature …". The "It becomes" clause is two clauses after
+    /// the typed land, with the `Untap it` (ParentTarget) clause in between. Its
+    /// GenericEffect static `affected` must bind to the chosen land (ParentTarget),
+    /// not SelfRef — SelfRef would animate Nissa herself.
+    #[test]
+    fn nissa_chained_it_becomes_binds_to_parent_target() {
+        let def = parse_effect_chain(
+            "Put three +1/+1 counters on up to one target noncreature land you control. Untap it. It becomes a 0/0 Elemental creature with vigilance and haste that's still a land.",
+            crate::types::ability::AbilityKind::Activated,
+        );
+        let clause2 = def.sub_ability.as_ref().expect("clause 2 (Untap it)");
+        let clause3 = clause2.sub_ability.as_ref().expect("clause 3 (It becomes)");
+        match clause3.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                assert!(
+                    !static_abilities
+                        .iter()
+                        .any(|s| matches!(s.affected, Some(TargetFilter::SelfRef))),
+                    "no static may stay SelfRef (would animate Nissa, not the land): {static_abilities:?}"
+                );
+                assert!(
+                    static_abilities
+                        .iter()
+                        .any(|s| matches!(s.affected, Some(TargetFilter::ParentTarget))),
+                    "the becomes-creature static must affect the chosen land (ParentTarget): {static_abilities:?}"
+                );
+            }
+            other => panic!("expected clause 3 GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c (#548): Building-block transitivity — an intervening
+    /// `ParentTarget` clause ("Untap it.") must not hide the originating typed
+    /// target for a later anaphoric subject. Distinct from the Tyrite Sanctum
+    /// case above, where the typed clause is *immediately* prior.
+    #[test]
+    fn anaphor_threads_through_intervening_parent_target_clause() {
+        let def = parse_effect_chain(
+            "Target creature you control becomes a God in addition to its other types. Untap it. It gains haste until end of turn.",
+            crate::types::ability::AbilityKind::Activated,
+        );
+        let clause2 = def.sub_ability.as_ref().expect("clause 2 (Untap it)");
+        let clause3 = clause2
+            .sub_ability
+            .as_ref()
+            .expect("clause 3 (It gains haste)");
+        match clause3.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => assert!(
+                static_abilities
+                    .iter()
+                    .all(|s| !matches!(s.affected, Some(TargetFilter::SelfRef))),
+                "intervening ParentTarget clause must not block the rewrite: {static_abilities:?}"
+            ),
+            other => panic!("expected clause 3 GenericEffect, got {other:?}"),
+        }
     }
 
     /// CR 608.2k: Predicate guard — the anaphor-rebinding gate must NOT fire when the
