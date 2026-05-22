@@ -1445,8 +1445,19 @@ fn effect_uses_implicit_tracked_set_targets(effect: &Effect) -> bool {
     )
 }
 
-fn affected_objects_from_events(effect: &Effect, events: &[GameEvent]) -> Vec<ObjectId> {
+fn affected_objects_from_events(
+    effect: &Effect,
+    events: &[GameEvent],
+    fallback_targets: &[TargetRef],
+) -> Vec<ObjectId> {
     match effect {
+        Effect::GainControl { .. } => fallback_targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect(),
         Effect::Destroy { .. } | Effect::DestroyAll { .. } => events
             .iter()
             .filter_map(|event| match event {
@@ -2309,7 +2320,11 @@ fn resolve_chain_body(
         }
         let affected_ids = if next_sub_needs_tracked_set(ability) || after_scope_needs_linked_exile
         {
-            affected_objects_from_events(&scoped_template.effect, scoped_events)
+            affected_objects_from_events(
+                &scoped_template.effect,
+                scoped_events,
+                &scoped_template.targets,
+            )
         } else {
             Vec::new()
         };
@@ -2945,7 +2960,11 @@ fn resolve_chain_body(
     //     creatures" after a mass counter instruction means the permanents that
     //     actually received counters.
     if next_sub_needs_tracked_set(ability) {
-        let affected_ids = affected_objects_from_events(&ability.effect, &events[events_before..]);
+        let affected_ids = affected_objects_from_events(
+            &ability.effect,
+            &events[events_before..],
+            &ability.targets,
+        );
         publish_tracked_set(state, affected_ids);
     }
 

@@ -221,6 +221,22 @@ fn register_transient_effect(
                 );
             }
         }
+        Some(TargetFilter::ParentTarget) if ability.targets.is_empty() => {
+            let tracked = state
+                .chain_tracked_set_id
+                .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+                .unwrap_or_default();
+            for obj_id in tracked {
+                state.add_transient_continuous_effect(
+                    ability.source_id,
+                    ability.controller,
+                    duration.clone(),
+                    TargetFilter::SpecificObject { id: obj_id },
+                    modifications.clone(),
+                    static_def.condition.clone(),
+                );
+            }
+        }
         Some(filter) => {
             let filter = crate::game::effects::resolved_object_filter(ability, filter);
             let filter = crate::game::targeting::resolve_tracked_set_sentinel(state, filter);

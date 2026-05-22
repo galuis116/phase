@@ -11458,7 +11458,7 @@ pub(crate) fn parse_effect_chain_ir(
         }
 
         let (text_no_temporal, delayed_condition) = strip_temporal_suffix(&text);
-        let (text_no_qty, multi_target) = strip_any_number_quantifier(text_no_temporal);
+        let (text_no_qty, mut multi_target) = strip_any_number_quantifier(text_no_temporal);
         // CR 121.1 + CR 609.3: "draw cards equal to the difference" — anaphoric draw
         // count. When a leading QuantityCheck condition establishes two operands (e.g.
         // "if you have fewer than seven cards in hand"), "the difference" draws the
@@ -11489,6 +11489,17 @@ pub(crate) fn parse_effect_chain_ir(
                 && matches!(stripped_clause.effect, Effect::CopySpell { .. })
             {
                 (stripped_clause, repeat_for.or(suffix_repeat_for))
+            } else if let Some((fanout_clause, fanout_spec, fanout_ctx)) =
+                parse_for_each_opponent_target_fanout_clause(
+                    &text_no_qty,
+                    repeat_for.as_ref(),
+                    multi_target.as_ref(),
+                    ctx,
+                )
+            {
+                *ctx = fanout_ctx;
+                multi_target = Some(fanout_spec);
+                (fanout_clause, None)
             } else {
                 (parse_effect_clause(&text_no_qty, ctx), repeat_for)
             }
@@ -13334,6 +13345,93 @@ fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
         }
     }
     (None, text.to_string())
+}
+
+fn parse_for_each_opponent_target_fanout_clause(
+    text: &str,
+    repeat_for: Option<&QuantityExpr>,
+    stripped_multi_target: Option<&MultiTargetSpec>,
+    ctx: &ParseContext,
+) -> Option<(ParsedEffectClause, MultiTargetSpec, ParseContext)> {
+    if !matches!(
+        repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::Opponent
+            }
+        })
+    ) {
+        return None;
+    }
+
+    let mut scoped_ctx = ctx.clone();
+    scoped_ctx.relative_player_scope = Some(ControllerRef::TargetPlayer);
+    let clause = parse_effect_clause(text, &mut scoped_ctx);
+    if !is_per_opponent_target_fanout_clause(&clause) {
+        return None;
+    }
+
+    Some((
+        clause,
+        MultiTargetSpec::bounded(
+            stripped_multi_target
+                .map(|spec| spec.min)
+                .unwrap_or_else(|| per_opponent_target_fanout_min(text)),
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+            },
+        ),
+        scoped_ctx,
+    ))
+}
+
+fn is_per_opponent_target_fanout_clause(clause: &ParsedEffectClause) -> bool {
+    if matches!(
+        clause.effect,
+        Effect::Choose { .. }
+            | Effect::ChooseCard { .. }
+            | Effect::CopyTokenOf { .. }
+            | Effect::TargetOnly { .. }
+    ) {
+        return false;
+    }
+    clause.effect.target_filter().is_some_and(|filter| {
+        target_filter_controller_ref(filter) == Some(ControllerRef::TargetPlayer)
+            && target_filter_is_single_object_target(filter)
+    })
+}
+
+fn target_filter_is_single_object_target(filter: &TargetFilter) -> bool {
+    let zones = filter.extract_zones();
+    if !zones.is_empty() && zones.iter().any(|zone| *zone != Zone::Battlefield) {
+        return false;
+    }
+
+    match filter {
+        TargetFilter::Typed(tf) => !tf.type_filters.is_empty(),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().all(target_filter_is_single_object_target)
+        }
+        TargetFilter::Not { filter } => target_filter_is_single_object_target(filter),
+        _ => false,
+    }
+}
+
+fn per_opponent_target_fanout_min(text: &str) -> usize {
+    let lower = text.to_ascii_lowercase();
+    let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
+        value((), tag("gain control of ")).parse(input)
+    }) else {
+        return 1;
+    };
+    let (_, spec) = strip_optional_target_prefix(rest);
+    if spec.is_some_and(|spec| spec.min == 0) {
+        0
+    } else {
+        1
+    }
 }
 
 /// CR 609.3: Strip trailing "for each [quantity]" repeat suffixes whose base
@@ -29675,6 +29773,139 @@ mod tests {
                 player: GainLifePlayer::Controller,
             },
         );
+    }
+
+    #[test]
+    fn effect_for_each_opponent_gain_control_uses_per_opponent_target_fanout() {
+        let def = parse_effect_chain(
+            "For each opponent, gain control of target permanent that player controls.",
+            AbilityKind::Spell,
+        );
+
+        assert!(def.repeat_for.is_none());
+        assert!(!def.optional_targeting);
+        assert_eq!(
+            def.multi_target,
+            Some(MultiTargetSpec::bounded(
+                1,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::Opponent,
+                    },
+                },
+            ))
+        );
+        match &*def.effect {
+            Effect::GainControl {
+                target: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::TargetPlayer));
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|filter| matches!(filter, TypeFilter::Permanent)));
+            }
+            other => panic!("expected GainControl TargetPlayer permanent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_for_each_opponent_up_to_one_gain_control_has_optional_fanout_slots() {
+        let def = parse_effect_chain(
+            "For each opponent, gain control of up to one target creature that player controls.",
+            AbilityKind::Spell,
+        );
+
+        assert!(def.repeat_for.is_none());
+        assert_eq!(
+            def.multi_target,
+            Some(MultiTargetSpec::bounded(
+                0,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::Opponent,
+                    },
+                },
+            ))
+        );
+        match &*def.effect {
+            Effect::GainControl {
+                target: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::TargetPlayer));
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|filter| matches!(filter, TypeFilter::Creature)));
+            }
+            other => panic!("expected GainControl TargetPlayer creature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_for_each_opponent_draw_stays_repeat_for_count() {
+        let def = parse_effect_chain("For each opponent, you draw a card.", AbilityKind::Spell);
+
+        assert_eq!(
+            def.repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+            })
+        );
+        assert!(def.multi_target.is_none());
+        assert!(matches!(&*def.effect, Effect::Draw { .. }));
+    }
+
+    #[test]
+    fn per_opponent_fanout_excludes_non_battlefield_zone_targets() {
+        let filter = TargetFilter::Typed(
+            TypedFilter::card()
+                .controller(ControllerRef::TargetPlayer)
+                .properties(vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }]),
+        );
+
+        assert!(
+            !target_filter_is_single_object_target(&filter),
+            "zone-card targets such as that player's graveyard must not use battlefield target fanout"
+        );
+    }
+
+    #[test]
+    fn effect_for_each_opponent_exile_up_to_one_preserves_optional_fanout_slots() {
+        let def = parse_effect_chain(
+            "For each opponent, exile up to one target permanent that player controls.",
+            AbilityKind::Spell,
+        );
+
+        assert!(def.repeat_for.is_none());
+        assert_eq!(
+            def.multi_target,
+            Some(MultiTargetSpec::bounded(
+                0,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::Opponent,
+                    },
+                },
+            ))
+        );
+        match &*def.effect {
+            Effect::ChangeZone {
+                target: TargetFilter::Typed(tf),
+                ..
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::TargetPlayer));
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|filter| matches!(filter, TypeFilter::Permanent)));
+            }
+            other => panic!("expected ChangeZone TargetPlayer permanent, got {other:?}"),
+        }
     }
 
     #[test]

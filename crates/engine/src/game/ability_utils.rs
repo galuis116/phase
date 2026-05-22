@@ -1,8 +1,8 @@
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ControllerRef, Effect, GameRestriction, ModalChoice,
-    ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr, QuantityRef, ResolvedAbility,
-    RestrictionPlayerScope, SpellContext, TargetChoiceTiming, TargetFilter, TargetRef, TypeFilter,
-    TypedFilter,
+    ModalSelectionCondition, ModalSelectionConstraint, PlayerFilter, QuantityExpr, QuantityRef,
+    ResolvedAbility, RestrictionPlayerScope, SpellContext, TargetChoiceTiming, TargetFilter,
+    TargetRef, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -13,6 +13,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
 use super::engine::EngineError;
+use super::players;
 use super::quantity::resolve_quantity_with_targets;
 use super::targeting;
 use super::triggers;
@@ -563,6 +564,15 @@ pub fn auto_select_targets_for_ability(
         Some(2),
     );
     match assignments.as_slice() {
+        [] if has_legal_target_assignment_for_ability(
+            state,
+            ability,
+            target_slots,
+            constraints,
+        ) =>
+        {
+            Ok(None)
+        }
         [] => Err(EngineError::ActionNotAllowed(
             "No legal target combinations available".to_string(),
         )),
@@ -736,6 +746,10 @@ pub fn assign_targets_in_chain(
     ability: &mut ResolvedAbility,
     targets: &[TargetRef],
 ) -> Result<(), EngineError> {
+    if is_per_opponent_target_fanout(ability) {
+        ability.targets = targets.to_vec();
+        return Ok(());
+    }
     if !chain_has_target_sink(ability) {
         ability.targets = targets.to_vec();
         return Ok(());
@@ -755,6 +769,10 @@ pub fn assign_selected_slots_in_chain(
     ability: &mut ResolvedAbility,
     selected_slots: &[Option<TargetRef>],
 ) -> Result<(), EngineError> {
+    if is_per_opponent_target_fanout(ability) {
+        ability.targets = selected_slots.iter().flatten().cloned().collect();
+        return Ok(());
+    }
     if !chain_has_target_sink(ability) {
         ability.targets = selected_slots.iter().flatten().cloned().collect();
         return Ok(());
@@ -770,7 +788,11 @@ pub fn assign_selected_slots_in_chain(
 }
 
 pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
-    let mut targets = ability.targets.clone();
+    let mut targets = if is_per_opponent_target_fanout(ability) {
+        object_targets_only(&ability.targets)
+    } else {
+        ability.targets.clone()
+    };
     if let Some(sub_ability) = ability.sub_ability.as_deref() {
         targets.extend(flatten_targets_in_chain(sub_ability));
     }
@@ -783,7 +805,9 @@ pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
 /// CR 608.2b: Re-validate targets on resolution — remove any that are no longer legal.
 pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> ResolvedAbility {
     let mut validated = ability.clone();
-    validated.targets = if let Effect::MoveCounters { source, target, .. } = &validated.effect {
+    validated.targets = if is_per_opponent_target_fanout(&validated) {
+        validate_per_opponent_target_fanout_targets(state, &validated)
+    } else if let Effect::MoveCounters { source, target, .. } = &validated.effect {
         [source, target]
             .iter()
             .filter(|filter| !filter.is_context_ref())
@@ -952,6 +976,15 @@ fn collect_target_slots(
             });
         }
     } else {
+        if is_per_opponent_target_fanout(ability) {
+            collect_per_opponent_target_fanout_slots(state, ability, slots)?;
+            if let Some(sub_ability) = ability.sub_ability.as_deref() {
+                if !defers_conditional_target_selection(sub_ability) {
+                    collect_target_slots(state, sub_ability, slots)?;
+                }
+            }
+            return Ok(());
+        }
         // CR 109.4 + CR 115.1: If the effect contains a filter referencing
         // `ControllerRef::TargetPlayer` (e.g. "each creature target player controls"
         // on `PutCounterAll`), surface a companion `TargetFilter::Player` slot
@@ -1311,6 +1344,15 @@ fn collect_target_slot_specs(
             }
         }
     } else {
+        if is_per_opponent_target_fanout(ability) {
+            collect_per_opponent_target_fanout_specs(state, ability, specs);
+            if let Some(sub_ability) = ability.sub_ability.as_deref() {
+                if !defers_conditional_target_selection(sub_ability) {
+                    collect_target_slot_specs(state, sub_ability, specs);
+                }
+            }
+            return;
+        }
         // CR 109.4 + CR 115.1: Companion TargetFilter::Player slot surfaced by
         // `collect_target_slots` must have a matching spec here so subsequent
         // slot recomputation treats it correctly.
@@ -1439,6 +1481,155 @@ fn relative_controller_kind(filter: &TargetFilter) -> Option<crate::types::abili
     }
 }
 
+fn is_per_opponent_target_fanout(ability: &ResolvedAbility) -> bool {
+    if ability.target_choice_timing != TargetChoiceTiming::Stack {
+        return false;
+    }
+    if ability
+        .effect
+        .target_filter()
+        .and_then(relative_controller_kind)
+        != Some(ControllerRef::TargetPlayer)
+    {
+        return false;
+    }
+    matches!(
+        ability
+            .multi_target
+            .as_ref()
+            .and_then(|spec| spec.max.as_ref()),
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::Opponent
+            }
+        })
+    )
+}
+
+fn per_opponent_fanout_players(state: &GameState, controller: PlayerId) -> Vec<PlayerId> {
+    players::apnap_order_from(state, None, controller)
+        .into_iter()
+        .filter(|id| {
+            *id != controller
+                && state.players.iter().any(|player| {
+                    player.id == *id && !player.is_eliminated && !player.is_phased_out()
+                })
+        })
+        .collect()
+}
+
+fn per_opponent_fanout_constraint_targets(
+    state: &GameState,
+    controller: PlayerId,
+    opponent: PlayerId,
+) -> Vec<TargetRef> {
+    if per_opponent_fanout_players(state, controller).contains(&opponent) {
+        vec![TargetRef::Player(opponent)]
+    } else {
+        Vec::new()
+    }
+}
+
+fn per_opponent_fanout_object_filter(ability: &ResolvedAbility) -> Option<TargetFilter> {
+    ability.effect.target_filter().map(|filter| {
+        rewrite_relative_controller(filter, ControllerRef::TargetPlayer, ControllerRef::You)
+    })
+}
+
+fn collect_per_opponent_target_fanout_slots(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    slots: &mut Vec<TargetSelectionSlot>,
+) -> Result<(), EngineError> {
+    let Some(object_filter) = per_opponent_fanout_object_filter(ability) else {
+        return Ok(());
+    };
+
+    for opponent in per_opponent_fanout_players(state, ability.controller) {
+        let player_targets =
+            per_opponent_fanout_constraint_targets(state, ability.controller, opponent);
+        slots.push(TargetSelectionSlot {
+            legal_targets: player_targets,
+            optional: false,
+        });
+
+        let legal_targets =
+            targeting::find_legal_targets(state, &object_filter, opponent, ability.source_id);
+        if legal_targets.is_empty() && !ability.targeting_is_optional() {
+            return Err(EngineError::ActionNotAllowed(
+                "No legal targets available".to_string(),
+            ));
+        }
+        slots.push(TargetSelectionSlot {
+            legal_targets,
+            optional: ability.targeting_is_optional(),
+        });
+    }
+
+    Ok(())
+}
+
+fn collect_per_opponent_target_fanout_specs(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    specs: &mut Vec<TargetSlotSpec>,
+) {
+    let Some(object_filter) = per_opponent_fanout_object_filter(ability) else {
+        return;
+    };
+
+    for opponent in per_opponent_fanout_players(state, ability.controller) {
+        specs.push(TargetSlotSpec {
+            filter: TargetFilter::SpecificPlayer { id: opponent },
+            optional: false,
+        });
+        specs.push(TargetSlotSpec {
+            filter: object_filter.clone(),
+            optional: ability.targeting_is_optional(),
+        });
+    }
+}
+
+fn validate_per_opponent_target_fanout_targets(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<TargetRef> {
+    let Some(object_filter) = per_opponent_fanout_object_filter(ability) else {
+        return Vec::new();
+    };
+
+    let mut current_player = None;
+    let mut legal = Vec::new();
+    for target in &ability.targets {
+        match target {
+            TargetRef::Player(player_id) => current_player = Some(*player_id),
+            TargetRef::Object(object_id) => {
+                let Some(player_id) = current_player else {
+                    continue;
+                };
+                let legal_targets = targeting::find_legal_targets(
+                    state,
+                    &object_filter,
+                    player_id,
+                    ability.source_id,
+                );
+                if legal_targets.contains(target) {
+                    legal.push(TargetRef::Object(*object_id));
+                }
+            }
+        }
+    }
+    legal
+}
+
+fn object_targets_only(targets: &[TargetRef]) -> Vec<TargetRef> {
+    targets
+        .iter()
+        .filter(|target| matches!(target, TargetRef::Object(_)))
+        .cloned()
+        .collect()
+}
+
 /// True iff `filter` carries a `ControllerRef::You` binding requiring per-
 /// player rebinding at target-resolution time. Thin wrapper over
 /// `relative_controller_kind` for the `You`-specific call sites.
@@ -1514,6 +1705,12 @@ fn legal_targets_for_selected_slot(
 
     if let Some(targets) = damage_any_target_legal_targets(state, ability, &spec.filter) {
         return targets;
+    }
+
+    if is_per_opponent_target_fanout(ability) {
+        if let TargetFilter::SpecificPlayer { id } = spec.filter {
+            return per_opponent_fanout_constraint_targets(state, ability.controller, id);
+        }
     }
 
     let controller = if uses_relative_controller_you(&spec.filter) {
@@ -2852,11 +3049,11 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityKind, CounterTransferMode, Duration, Effect, FilterProp,
-        GameRestriction, LibraryPosition, ModalChoice, ModalSelectionConstraint, MultiTargetSpec,
-        ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, RestrictionExpiry,
-        RestrictionPlayerScope, SearchSelectionConstraint, TargetFilter, TargetRef, TypeFilter,
-        TypedFilter, UnlessPayModifier,
+        AbilityCost, AbilityKind, ContinuousModification, CounterTransferMode, Duration, Effect,
+        FilterProp, GameRestriction, LibraryPosition, ModalChoice, ModalSelectionConstraint,
+        MultiTargetSpec, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, RestrictionExpiry,
+        RestrictionPlayerScope, SearchSelectionConstraint, StaticDefinition, TargetFilter,
+        TargetRef, TypeFilter, TypedFilter, UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
@@ -4441,6 +4638,340 @@ mod tests {
             Some(TargetRef::Object(opponent_two_creature)),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn per_opponent_gain_control_fanout_recomputes_each_object_slot_from_prior_player() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let caster_creature = create_creature(&mut state, PlayerId(0), CardId(1), "Caster");
+        let opponent_one_creature = create_creature(&mut state, PlayerId(1), CardId(2), "Opp One");
+        let opponent_two_creature = create_creature(&mut state, PlayerId(2), CardId(3), "Opp Two");
+        let ability = per_opponent_gain_control_ability();
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots.len(), 4);
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(1))]);
+        assert_eq!(
+            slots[1].legal_targets,
+            vec![TargetRef::Object(opponent_one_creature)]
+        );
+        assert_eq!(slots[2].legal_targets, vec![TargetRef::Player(PlayerId(2))]);
+        assert_eq!(
+            slots[3].legal_targets,
+            vec![TargetRef::Object(opponent_two_creature)]
+        );
+        assert!(!slots[1]
+            .legal_targets
+            .contains(&TargetRef::Object(caster_creature)));
+        assert!(!slots[3]
+            .legal_targets
+            .contains(&TargetRef::Object(caster_creature)));
+
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+        assert_eq!(
+            progress.current_legal_targets,
+            vec![TargetRef::Player(PlayerId(1))]
+        );
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            &progress,
+            Some(TargetRef::Player(PlayerId(1))),
+        )
+        .expect("forced first player target should be accepted") else {
+            panic!("expected first object slot");
+        };
+        assert_eq!(
+            progress.current_legal_targets,
+            vec![TargetRef::Object(opponent_one_creature)]
+        );
+    }
+
+    #[test]
+    fn per_opponent_gain_control_hidden_player_constraint_ignores_player_protection() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let protection_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Protection Source".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent_creature = create_creature(&mut state, PlayerId(1), CardId(2), "Opp One");
+        create_creature(&mut state, PlayerId(2), CardId(3), "Opp Two");
+        state.add_transient_continuous_effect(
+            protection_source,
+            PlayerId(1),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: PlayerId(1) },
+            vec![ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Protection(
+                    crate::types::keywords::ProtectionTarget::Everything,
+                ),
+            }],
+            None,
+        );
+        let ability = per_opponent_gain_control_ability();
+
+        assert!(
+            targeting::find_legal_targets(
+                &state,
+                &TargetFilter::SpecificPlayer { id: PlayerId(1) },
+                PlayerId(0),
+                ability.source_id,
+            )
+            .is_empty(),
+            "the same player remains illegal when they are an actual target"
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(1))]);
+
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            &progress,
+            Some(TargetRef::Player(PlayerId(1))),
+        )
+        .expect("hidden player constraint should bypass player targeting protection") else {
+            panic!("expected first object slot");
+        };
+        assert_eq!(
+            progress.current_legal_targets,
+            vec![TargetRef::Object(opponent_creature)]
+        );
+    }
+
+    #[test]
+    fn per_opponent_gain_control_auto_select_defers_when_optional_skip_needs_slot_position() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        create_creature(&mut state, PlayerId(2), CardId(1), "Opp Two");
+        let mut ability = per_opponent_gain_control_ability();
+        ability.multi_target = Some(MultiTargetSpec::bounded(
+            0,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+            },
+        ));
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+
+        assert_eq!(slots.len(), 4);
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(1))]);
+        assert!(slots[1].legal_targets.is_empty());
+        assert!(slots[1].optional);
+        assert_eq!(slots[2].legal_targets, vec![TargetRef::Player(PlayerId(2))]);
+
+        assert_eq!(
+            auto_select_targets_for_ability(&state, &ability, &slots, &[])
+                .expect("legal skip-plus-target assignment should not be rejected"),
+            None
+        );
+        assert!(has_legal_target_assignment_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn per_opponent_gain_control_assignment_preserves_constraint_players_until_validation() {
+        let state = GameState::new(FormatConfig::standard(), 3, 42);
+        let mut ability = per_opponent_gain_control_ability();
+        let first = TargetRef::Object(ObjectId(1));
+        let second = TargetRef::Object(ObjectId(2));
+
+        assign_targets_in_chain(
+            &state,
+            &mut ability,
+            &[
+                TargetRef::Player(PlayerId(1)),
+                first.clone(),
+                TargetRef::Player(PlayerId(2)),
+                second.clone(),
+            ],
+        )
+        .expect("assignment should preserve fan-out slots");
+
+        assert_eq!(
+            ability.targets,
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                first.clone(),
+                TargetRef::Player(PlayerId(2)),
+                second.clone()
+            ]
+        );
+        assert_eq!(flatten_targets_in_chain(&ability), vec![first, second]);
+    }
+
+    #[test]
+    fn per_opponent_gain_control_validation_collapses_only_legal_objects() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let opponent_one_creature = create_creature(&mut state, PlayerId(1), CardId(1), "Opp One");
+        let opponent_two_creature = create_creature(&mut state, PlayerId(2), CardId(2), "Opp Two");
+        let mut ability = per_opponent_gain_control_ability();
+        assign_targets_in_chain(
+            &state,
+            &mut ability,
+            &[
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Object(opponent_one_creature),
+                TargetRef::Player(PlayerId(2)),
+                TargetRef::Object(opponent_two_creature),
+            ],
+        )
+        .expect("assignment should preserve pair structure");
+
+        let validated = validate_targets_in_chain(&state, &ability);
+        assert_eq!(
+            validated.targets,
+            vec![
+                TargetRef::Object(opponent_one_creature),
+                TargetRef::Object(opponent_two_creature)
+            ]
+        );
+
+        state
+            .objects
+            .get_mut(&opponent_two_creature)
+            .expect("creature exists")
+            .controller = PlayerId(1);
+        let validated = validate_targets_in_chain(&state, &ability);
+        assert_eq!(
+            validated.targets,
+            vec![TargetRef::Object(opponent_one_creature)],
+            "second target is no longer controlled by its paired opponent"
+        );
+    }
+
+    #[test]
+    fn per_opponent_gain_control_runtime_transfers_all_objects_and_preserves_tail() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let opponent_one_creature = create_creature(&mut state, PlayerId(1), CardId(1), "Opp One");
+        let opponent_two_creature = create_creature(&mut state, PlayerId(2), CardId(2), "Opp Two");
+        state
+            .objects
+            .get_mut(&opponent_one_creature)
+            .unwrap()
+            .tapped = true;
+        state
+            .objects
+            .get_mut(&opponent_two_creature)
+            .unwrap()
+            .tapped = true;
+        let mut ability = per_opponent_gain_control_ability().sub_ability(
+            ResolvedAbility::new(
+                Effect::Untap {
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                },
+                vec![],
+                ObjectId(900),
+                PlayerId(0),
+            )
+            .sub_ability(ResolvedAbility::new(
+                Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(TargetFilter::ParentTarget)
+                        .modifications(vec![ContinuousModification::AddKeyword {
+                            keyword: crate::types::keywords::Keyword::Haste,
+                        }])],
+                    duration: Some(Duration::UntilEndOfTurn),
+                    target: None,
+                },
+                vec![],
+                ObjectId(900),
+                PlayerId(0),
+            )),
+        );
+        assign_targets_in_chain(
+            &state,
+            &mut ability,
+            &[
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Object(opponent_one_creature),
+                TargetRef::Player(PlayerId(2)),
+                TargetRef::Object(opponent_two_creature),
+            ],
+        )
+        .expect("assignment should preserve pair structure");
+
+        let ability = validate_targets_in_chain(&state, &ability);
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+            .expect("fanout gain-control chain should resolve");
+        crate::game::layers::evaluate_layers(&mut state);
+
+        for id in [opponent_one_creature, opponent_two_creature] {
+            let object = state.objects.get(&id).expect("object exists");
+            assert_eq!(object.controller, PlayerId(0));
+            assert!(
+                !object.tapped,
+                "Mass Mutiny tail should untap each gained creature"
+            );
+            assert!(
+                object
+                    .keywords
+                    .contains(&crate::types::keywords::Keyword::Haste),
+                "Mass Mutiny tail should grant haste to each gained creature"
+            );
+        }
+    }
+
+    fn create_creature(
+        state: &mut GameState,
+        controller: PlayerId,
+        card_id: CardId,
+        name: &str,
+    ) -> ObjectId {
+        let object = create_object(
+            state,
+            card_id,
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&object)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        object
+    }
+
+    fn per_opponent_gain_control_ability() -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::GainControl {
+                target: TargetFilter::Typed(
+                    TypedFilter::permanent().controller(ControllerRef::TargetPlayer),
+                ),
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::bounded(
+            1,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+            },
+        ));
+        ability
     }
 
     #[test]
