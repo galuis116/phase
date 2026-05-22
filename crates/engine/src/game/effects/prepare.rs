@@ -693,7 +693,7 @@ mod tests {
             "stack entry must not seed a target"
         );
 
-        let legal_actions = legal_actions(&state).actions;
+        let legal_actions = legal_actions(&state);
         assert!(
             !legal_actions
                 .iter()
