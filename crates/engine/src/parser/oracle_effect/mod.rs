@@ -8736,6 +8736,23 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
     // Detection: a "from among them" / "from among those cards" anchor
     // anywhere in `rest` (post-"cast " prefix) is structurally diagnostic of
     // the per-resolution exile-set anaphor.
+    if scan_contains_phrase(rest, "from among those nonland cards") {
+        return Some(Effect::CastFromZone {
+            target: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ExiledBySource,
+                    TargetFilter::Typed(
+                        TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+                    ),
+                ],
+            },
+            without_paying_mana_cost: without_paying,
+            mode,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint,
+        });
+    }
     if scan_contains_phrase(rest, "from among them")
         || scan_contains_phrase(rest, "from among those cards")
         || scan_contains_phrase(rest, "from among those exiled cards")
@@ -33453,6 +33470,46 @@ mod tests {
         };
         assert!(without_paying_mana_cost);
         assert_eq!(target, TargetFilter::ExiledBySource);
+    }
+
+    #[test]
+    fn cast_from_among_those_nonland_cards_binds_to_exiled_by_source_and_nonland() {
+        let e = parse_effect(
+            "cast any number of spells from among those nonland cards without paying their mana costs",
+        );
+        let Effect::CastFromZone {
+            target,
+            without_paying_mana_cost,
+            ..
+        } = e
+        else {
+            panic!("expected CastFromZone, got {:?}", e);
+        };
+        assert!(without_paying_mana_cost);
+        let TargetFilter::And { filters } = target else {
+            panic!("expected AND target filter, got {:?}", target);
+        };
+        assert!(
+            filters
+                .iter()
+                .any(|filter| matches!(filter, TargetFilter::ExiledBySource)),
+            "expected ExiledBySource leg in {:?}",
+            filters
+        );
+        let typed = filters
+            .iter()
+            .find_map(|filter| match filter {
+                TargetFilter::Typed(typed) => Some(typed),
+                _ => None,
+            })
+            .expect("expected typed-filter leg");
+        assert!(
+            typed.type_filters.iter().any(
+                |filter| matches!(filter, TypeFilter::Non(inner) if **inner == TypeFilter::Land)
+            ),
+            "expected Non(Land), got {:?}",
+            typed.type_filters
+        );
     }
 
     /// CR 406.6 + CR 603.10a: Jeleva, Nephalia's Scourge attack-trigger
