@@ -10578,6 +10578,117 @@ fn collapse_ephemeral_color_choice_mana(def: &mut AbilityDefinition) {
     }
 }
 
+fn parse_that_type_mana_count(text: &str) -> Option<QuantityExpr> {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |input| {
+        let (input, _) = tag("add ").parse(input)?;
+        let (input, count) = nom_quantity::parse_quantity(input)?;
+        let (input, _) = tag(" mana of that type").parse(input)?;
+        let (input, _) = opt(tag(" instead")).parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        eof(input)?;
+        Ok((input, count))
+    })
+    .map(|(count, _)| count)
+}
+
+fn mana_production_with_count(
+    produced: &ManaProduction,
+    count: QuantityExpr,
+) -> Option<ManaProduction> {
+    match produced {
+        ManaProduction::Colorless { .. } => Some(ManaProduction::Colorless { count }),
+        ManaProduction::AnyOneColor {
+            color_options,
+            contribution,
+            ..
+        } => Some(ManaProduction::AnyOneColor {
+            count,
+            color_options: color_options.clone(),
+            contribution: *contribution,
+        }),
+        ManaProduction::AnyCombination { color_options, .. } => {
+            Some(ManaProduction::AnyCombination {
+                count,
+                color_options: color_options.clone(),
+            })
+        }
+        ManaProduction::ChosenColor {
+            contribution,
+            fixed_alternative,
+            ..
+        } => Some(ManaProduction::ChosenColor {
+            count,
+            contribution: *contribution,
+            fixed_alternative: *fixed_alternative,
+        }),
+        ManaProduction::OpponentLandColors { .. } => {
+            Some(ManaProduction::OpponentLandColors { count })
+        }
+        ManaProduction::AnyTypeProduceableBy { land_filter, .. } => {
+            Some(ManaProduction::AnyTypeProduceableBy {
+                count,
+                land_filter: land_filter.clone(),
+            })
+        }
+        ManaProduction::AnyInCommandersColorIdentity { contribution, .. } => {
+            Some(ManaProduction::AnyInCommandersColorIdentity {
+                count,
+                contribution: *contribution,
+            })
+        }
+        ManaProduction::Fixed { .. }
+        | ManaProduction::Mixed { .. }
+        | ManaProduction::ChoiceAmongExiledColors { .. }
+        | ManaProduction::ChoiceAmongCombinations { .. }
+        | ManaProduction::DistinctColorsAmongPermanents { .. }
+        | ManaProduction::TriggerEventManaType => None,
+    }
+}
+
+fn rewrite_that_type_mana_instead(def: &mut AbilityDefinition) {
+    let replacement = match (&*def.effect, def.sub_ability.as_deref()) {
+        (
+            Effect::Mana {
+                produced,
+                restrictions,
+                grants,
+                expiry,
+                target,
+            },
+            Some(sub),
+        ) => match sub.effect.as_ref() {
+            Effect::Unimplemented {
+                name,
+                description: Some(description),
+            } if name == "add" => parse_that_type_mana_count(description).and_then(|count| {
+                Some(Effect::Mana {
+                    produced: mana_production_with_count(produced, count)?,
+                    restrictions: restrictions.clone(),
+                    grants: grants.clone(),
+                    expiry: *expiry,
+                    target: target.clone(),
+                })
+            }),
+            _ => None,
+        },
+        _ => None,
+    };
+
+    if let Some(effect) = replacement {
+        if let Some(sub) = def.sub_ability.as_mut() {
+            *sub.effect = effect;
+        }
+    }
+
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_that_type_mana_instead(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_that_type_mana_instead(else_branch);
+    }
+}
+
 fn wire_optional_cast_decline_fallback(def: &mut AbilityDefinition) {
     if def.optional
         && matches!(
@@ -13191,6 +13302,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     }
 
     collapse_ephemeral_color_choice_mana(&mut result);
+    rewrite_that_type_mana_instead(&mut result);
 
     // CR 303.4f + CR 301.5b + CR 603.7d: Wire `forward_result: true` on a
     // parent zone-change to Battlefield when the chained sub-ability is an
@@ -23712,6 +23824,52 @@ mod tests {
             Effect::Mana { produced: ManaProduction::AnyOneColor { count: QuantityExpr::Fixed { value: 1 }, ref color_options, contribution: ManaContribution::Base, .. }, .. }
             if color_options == &vec![ManaColor::White, ManaColor::Blue, ManaColor::Black, ManaColor::Red, ManaColor::Green]
         ));
+    }
+
+    #[test]
+    fn effect_add_mana_of_that_type_instead_reuses_parent_production() {
+        let def = parse_effect_chain(
+            "Add one mana of any type that a land you control could produce. If ~ has a +1/+1 counter on it, add three mana of that type instead.",
+            AbilityKind::Activated,
+        );
+        match def.effect.as_ref() {
+            Effect::Mana {
+                produced:
+                    ManaProduction::AnyTypeProduceableBy {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        land_filter,
+                    },
+                ..
+            } => {
+                let tf = typed_leg(land_filter).expect("land filter should be typed");
+                assert!(has_type(tf, TypeFilter::Land));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected base AnyTypeProduceableBy mana, got {other:?}"),
+        }
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("conditional instead mana should be chained");
+        assert!(matches!(
+            sub.condition,
+            Some(AbilityCondition::ConditionInstead { .. })
+        ));
+        match sub.effect.as_ref() {
+            Effect::Mana {
+                produced:
+                    ManaProduction::AnyTypeProduceableBy {
+                        count: QuantityExpr::Fixed { value: 3 },
+                        land_filter,
+                    },
+                ..
+            } => {
+                let tf = typed_leg(land_filter).expect("land filter should be typed");
+                assert!(has_type(tf, TypeFilter::Land));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected replacement AnyTypeProduceableBy mana, got {other:?}"),
+        }
     }
 
     #[test]
