@@ -4772,6 +4772,13 @@ pub enum SpeedDelta {
 
 /// The typed effect enum. Each variant corresponds to an effect handler.
 /// Zero HashMap<String, String> fields.
+// clippy::large_enum_variant: `Effect` is the engine's central 100+ variant
+// dispatch enum, so the largest/smallest spread is inherent. The current
+// largest variant is `Token`, which inlines two `PtValue` fields that can each
+// carry a `QuantityExpr`; the right remedy is to box `PtValue::Quantity` (used
+// in 70+ sites), not to box individual `Effect` variants. Allow the spread here
+// until that boxing lands.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type")]
 pub enum Effect {
