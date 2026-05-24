@@ -2732,6 +2732,16 @@ pub(crate) fn parse_oracle_ir(
                 result.triggers.extend(triggers);
                 continue;
             }
+            // Try as keyword — the ability-word prefix ("Void Shields —") was
+            // stripped, so the remainder may be a keyword line that Priority 1b
+            // missed because it ran on the unprefixed original line.
+            if let Some(kw) = parse_keyword_from_oracle(&effect_lower) {
+                if !matches!(kw, Keyword::Unknown(_)) {
+                    result.extracted_keywords.push(kw);
+                    i += 1;
+                    continue;
+                }
+            }
             // Try as static
             if is_static_pattern(&effect_lower) {
                 let effect_static = normalize_self_refs_for_static(&effect_text, card_name);
@@ -6474,6 +6484,36 @@ mod tests {
         assert!(matches!(
             &r.extracted_keywords[0],
             Keyword::Protection(ProtectionTarget::Multicolored)
+        ));
+    }
+
+    #[test]
+    fn extracts_keyword_after_ability_word_prefix() {
+        use crate::types::ability::{Comparator, FilterProp, QuantityExpr, TargetFilter};
+        use crate::types::keywords::ProtectionTarget;
+
+        let r = parse_with_keyword_names(
+            "Void Shields — Protection from mana value 3 or less",
+            "Reaver Titan",
+            &["protection"],
+            &["Artifact", "Creature"],
+            &["Vehicle"],
+        );
+        assert_eq!(r.extracted_keywords.len(), 1);
+        let Keyword::Protection(ProtectionTarget::Filter(TargetFilter::Typed(tf))) =
+            &r.extracted_keywords[0]
+        else {
+            panic!(
+                "expected filter-based protection, got {:?}",
+                r.extracted_keywords
+            );
+        };
+        assert!(matches!(
+            tf.properties.as_slice(),
+            [FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 3 },
+            }]
         ));
     }
 
