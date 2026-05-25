@@ -238,4 +238,150 @@ mod tests {
         );
         assert!(legal_new_targets.contains(&TargetRef::Object(host_a)));
     }
+
+    /// CR 608.2b + CR 115.7 + CR 303.4a: End-to-end regression for Bolt Bend
+    /// retargeting an Aura spell, driving the real `stack::resolve_top` pipeline.
+    /// Guards two stacked bugs:
+    ///   1. `Effect::ChangeTargets` was absent from `Effect::target_filter()`, so
+    ///      resolution-time re-validation (CR 608.2b) fell to the battlefield-only
+    ///      default and dropped the stack-spell target → Bolt Bend always fizzled
+    ///      before its effect ran (no `RetargetChoice`).
+    ///   2. Once it stopped fizzling, the Aura's hosts had to be enumerated via
+    ///      its `Keyword::Enchant` filter (CR 303.4a), not its placeholder effect.
+    /// Pre-fix, `resolve_top` left `waiting_for == Priority` with Bolt Bend in the
+    /// graveyard and the Aura untouched. Post-fix it pauses on `RetargetChoice`
+    /// offering every other enchantable creature.
+    #[test]
+    fn bolt_bend_retargets_aura_spell_via_resolve_top() {
+        use crate::types::ability::{FilterProp, TypedFilter};
+
+        let mut state = GameState::new_two_player(42);
+
+        // Current host + an alternative host on the battlefield.
+        let host_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear A".into(),
+            Zone::Battlefield,
+        );
+        let host_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Bear B".into(),
+            Zone::Battlefield,
+        );
+        for id in [host_a, host_b] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        // Aura spell on the stack, targeting host_a, with the placeholder spell
+        // ability the cast path synthesizes for Auras.
+        let aura_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Test Aura".into(),
+            Zone::Stack,
+        );
+        {
+            let aura = state.objects.get_mut(&aura_id).unwrap();
+            aura.card_types.core_types = vec![CoreType::Enchantment];
+            aura.card_types.subtypes = vec!["Aura".to_string()];
+            aura.keywords = vec![Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature(),
+            ))];
+        }
+        let aura_spell_ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: String::new(),
+                description: None,
+            },
+            vec![TargetRef::Object(host_a)],
+            aura_id,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: aura_id,
+            source_id: aura_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(3),
+                ability: Some(aura_spell_ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        // Bolt Bend on top of the stack, targeting the Aura spell, with its real
+        // filter: (StackSpell & HasSingleTarget) | (StackAbility & HasSingleTarget).
+        let single = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![],
+            controller: None,
+            properties: vec![FilterProp::HasSingleTarget],
+        });
+        let bb_filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::And {
+                    filters: vec![TargetFilter::StackSpell, single.clone()],
+                },
+                TargetFilter::And {
+                    filters: vec![TargetFilter::StackAbility { controller: None }, single],
+                },
+            ],
+        };
+        let bolt_bend = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Bolt Bend".into(),
+            Zone::Stack,
+        );
+        let bb_ability = ResolvedAbility::new(
+            Effect::ChangeTargets {
+                target: bb_filter,
+                scope: RetargetScope::Single,
+                forced_to: None,
+            },
+            vec![TargetRef::Object(aura_id)],
+            bolt_bend,
+            PlayerId(0),
+        );
+        state.stack.push_back(StackEntry {
+            id: bolt_bend,
+            source_id: bolt_bend,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(4),
+                ability: Some(bb_ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        // Bolt Bend must NOT fizzle: it pauses on RetargetChoice (the aura spell
+        // stays on the stack awaiting the new host), rather than going to the
+        // graveyard with waiting_for == Priority.
+        let WaitingFor::RetargetChoice {
+            current_targets,
+            legal_new_targets,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "expected RetargetChoice (Bolt Bend fizzled instead), got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(current_targets, &vec![TargetRef::Object(host_a)]);
+        assert!(
+            legal_new_targets.contains(&TargetRef::Object(host_b)),
+            "alternative enchantable host must be offered, got {legal_new_targets:?}"
+        );
+        assert!(state.stack.iter().any(|e| e.id == aura_id));
+    }
 }
