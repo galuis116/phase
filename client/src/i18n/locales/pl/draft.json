@@ -39,7 +39,9 @@
     "overrideResult": "Zmień wynik",
     "versusPair": "{{a}} v {{b}}",
     "kickReplace": "Wyrzuć i zastąp",
-    "replaceWithBot": "Zastąp gracza {{name}} botem"
+    "replaceWithBot": "Zastąp gracza {{name}} botem",
+    "endDraft": "Zakoncz draft",
+    "endDraftConfirm": "Zakonczyc ten draft dla wszystkich? Tej akcji nie mozna cofnac."
   },
   "manaCurve": {
     "title": "Krzywa many"

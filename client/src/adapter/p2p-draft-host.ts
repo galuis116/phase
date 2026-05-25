@@ -115,6 +115,14 @@ function deckPayload(mainDeck: string[], sideboard: string[]): DraftDeckPayload 
   return { main_deck: mainDeck, sideboard, commander: [] };
 }
 
+function hashStringToSeed(value: string): number {
+  let hash = 5381;
+  for (let i = 0; i < value.length; i++) {
+    hash = ((hash * 33) ^ value.charCodeAt(i)) | 0;
+  }
+  return hash >>> 0;
+}
+
 function sideboardFromPool(
   session: ExportedDraftSession,
   seat: number,
@@ -153,6 +161,7 @@ export class P2PDraftHost {
 
   private draftStarted = false;
   private draftCode = "";
+  private draftSeed: number | null = null;
   private activePodSize: number;
   private hostConnectionUnsub: (() => void) | null = null;
   private paused = false;
@@ -429,6 +438,7 @@ export class P2PDraftHost {
     if (this.draftStarted) return;
 
     const seed = Math.floor(Math.random() * 0xffffffff);
+    this.draftSeed = seed;
     const draftCode = `draft-${seed.toString(16).padStart(8, "0")}`;
     const seats: MultiplayerSeatDescriptor[] = [];
     for (let i = 0; i < this.podSize; i++) {
@@ -784,7 +794,7 @@ export class P2PDraftHost {
   }
 
   private botNameForSeat(seat: number, seed: number): string {
-    return assignAvatarForSeat(this.podSize, seat, seed)?.name ?? `AI player ${seat + 1}`;
+    return assignAvatarForSeat(this.podSize, seat, seed)?.name ?? `Seat ${seat + 1}`;
   }
 
   // ── Match coordination ────────────────────────────────────────────────
@@ -796,12 +806,32 @@ export class P2PDraftHost {
   async generatePairings(round: number): Promise<void> {
     try {
       const view = await this.adapter.generatePairings(round);
+      const launchablePairings = view.pairings.filter((pairing) =>
+        pairing.round === round &&
+        (pairing.status === "Pending" || pairing.status === "InProgress")
+      );
 
-      for (const pairing of view.pairings) {
+      for (const pairing of launchablePairings) {
+        if (
+          this.isBotSeatFromView(view, pairing.seat_a) &&
+          this.isBotSeatFromView(view, pairing.seat_b)
+        ) {
+          await this.dispatchMatchLaunch(pairing, view);
+        }
+      }
+
+      const postBotView = await this.adapter.getViewForSeat(0);
+      for (const pairing of postBotView.pairings) {
         if (pairing.round !== round) continue;
         if (pairing.status !== "Pending" && pairing.status !== "InProgress") continue;
+        if (
+          this.isBotSeatFromView(postBotView, pairing.seat_a) &&
+          this.isBotSeatFromView(postBotView, pairing.seat_b)
+        ) {
+          continue;
+        }
 
-        await this.dispatchMatchLaunch(pairing, view);
+        await this.dispatchMatchLaunch(pairing, postBotView);
       }
 
       const latestView = await this.adapter.getViewForSeat(0);
@@ -1000,7 +1030,8 @@ export class P2PDraftHost {
    */
   async replaceSeatWithBot(seat: number): Promise<void> {
     try {
-      await this.adapter.replaceSeatWithBot(seat);
+      const seed = this.draftSeed ?? hashStringToSeed(this.draftCode || this.roomCode || "draft");
+      await this.adapter.replaceSeatWithBot(seat, this.botNameForSeat(seat, seed));
       await this.broadcastViews();
       this.persistSession();
     } catch (err) {
@@ -1339,6 +1370,7 @@ export class P2PDraftHost {
     }
     this.draftStarted = session.draftStarted;
     this.draftCode = session.draftCode;
+    this.draftSeed = hashStringToSeed(session.draftCode || this.roomCode || "draft");
 
     if (session.draftSessionJson) {
       const view = await this.adapter.importSession(session.draftSessionJson, 2);

@@ -39,7 +39,9 @@
     "overrideResult": "Anular resultado",
     "versusPair": "{{a}} contra {{b}}",
     "kickReplace": "Expulsar + reemplazar",
-    "replaceWithBot": "Reemplazar a {{name}} con un bot"
+    "replaceWithBot": "Reemplazar a {{name}} con un bot",
+    "endDraft": "Terminar draft",
+    "endDraftConfirm": "¿Terminar este draft para todos? Esta acción no se puede deshacer."
   },
   "manaCurve": {
     "title": "Curva de maná"

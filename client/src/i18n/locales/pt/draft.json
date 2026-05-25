@@ -39,7 +39,9 @@
     "overrideResult": "Substituir Resultado",
     "versusPair": "{{a}} v {{b}}",
     "kickReplace": "Expulsar + Substituir",
-    "replaceWithBot": "Substituir {{name}} por Bot"
+    "replaceWithBot": "Substituir {{name}} por Bot",
+    "endDraft": "Encerrar Draft",
+    "endDraftConfirm": "Encerrar este draft para todos? Isso nao pode ser desfeito."
   },
   "manaCurve": {
     "title": "Curva de Mana"
