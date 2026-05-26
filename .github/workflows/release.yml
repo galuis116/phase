@@ -538,11 +538,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # Need the repo checked out so we can inject the Cloudflare-only
+      # _headers file alongside the prebuilt frontend artifact. The file
+      # is held outside client/public/ so the GitHub Pages preview deploy
+      # (deploy.yml) never serves it at /_headers.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download frontend artifact
         uses: actions/download-artifact@v4
         with:
           name: frontend-dist
           path: dist
+
+      - name: Inject Cloudflare Pages _headers
+        run: cp client/deploy/cloudflare-pages/_headers dist/_headers
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v4
