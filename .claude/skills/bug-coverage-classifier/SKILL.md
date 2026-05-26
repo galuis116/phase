@@ -80,6 +80,35 @@ If the AST looks faithful and you still believe the bug is real, the verdict is 
 }
 ```
 
+## Posting back to a GitHub issue
+
+When the classifier output corresponds to an existing GH issue (the publish path filed it with `classifier:pending`), the operator/skill caller also:
+
+1. Posts the reasoning as a comment with body:
+   ```
+   ## Classifier analysis
+
+   **Verdict**: `<verdict>`
+
+   **Matched clause**: `<source_text or "(none)">`  (supported: <true|false>)
+
+   **Reasoning**: <as above>
+
+   ---
+   _Posted by bug-coverage-classifier skill._
+   ```
+2. Swaps the `classifier:pending` label for one of:
+   - `classifier:supported-aspect-defect` (the actionable bucket — red)
+   - `classifier:unsupported-aspect` (known gap — grey)
+   - `classifier:not-card-data` (wrong subsystem — blue)
+   - `classifier:cannot-determine` (needs reporter follow-up — yellow)
+
+   ```bash
+   gh issue edit <num> --remove-label classifier:pending --add-label classifier:<verdict-slug>
+   ```
+
+The backlog of unannotated issues is greppable as `gh issue list -l classifier:pending`.
+
 ## Why this matters
 
 The backlog is already overwhelmingly known gaps. Filing more `unsupported_aspect` reports just adds noise on top of work the maintainer already has tracked. The reports that move the project forward are the ones where the engine is *lying* about supporting a clause — those go on the floor unnoticed unless someone reads the AST against the Oracle text. That comparison is exactly this skill's job.
