@@ -2164,6 +2164,77 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
         });
     }
 
+    // CR 701.17c + CR 608.2c: "return a card milled this way to your hand"
+    // is the same tracked-set continuation as "from among the milled cards",
+    // but its filter appears before the "milled this way" marker rather than
+    // before "from among".
+    if let Ok((_, before_milled)) = alt((
+        take_until::<_, _, OracleError<'_>>("that was milled this way"),
+        take_until("milled this way"),
+    ))
+    .parse(lower)
+    {
+        let before_milled = before_milled.trim();
+        let (after_put, prefix_optional) = if let Ok((rest, _)) = alt((
+            tag::<_, _, OracleError<'_>>("you may put "),
+            tag("you may reveal "),
+            tag("you may return "),
+        ))
+        .parse(before_milled)
+        {
+            (rest, true)
+        } else if let Ok((rest, _)) = alt((
+            tag::<_, _, OracleError<'_>>("put "),
+            tag("reveal "),
+            tag("return "),
+        ))
+        .parse(before_milled)
+        {
+            (rest, false)
+        } else {
+            (before_milled, false)
+        };
+
+        let (count, up_to, filter_text) =
+            if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
+                if let Ok((remainder, n)) = nom_primitives::parse_number.parse(rest) {
+                    (n, true, remainder.trim())
+                } else {
+                    (1, true, rest)
+                }
+            } else if let Ok((rest, _)) =
+                tag::<_, _, OracleError<'_>>("any number of ").parse(after_put)
+            {
+                (255, true, rest)
+            } else if let Ok((rest, _)) = nom_primitives::parse_article.parse(after_put) {
+                (1, prefix_optional, rest)
+            } else if let Ok((remainder, n)) = nom_primitives::parse_number.parse(after_put) {
+                (n, prefix_optional, remainder.trim())
+            } else {
+                (1, prefix_optional, after_put)
+            };
+
+        let filter = if filter_text.is_empty()
+            || filter_text == "card"
+            || filter_text == "cards"
+            || filter_text == "of them"
+        {
+            TargetFilter::Any
+        } else {
+            let (parsed_filter, _) = parse_target(filter_text);
+            parsed_filter
+        };
+        let filter = apply_where_x_to_filter(filter, where_x_expression.as_deref());
+
+        return Some(ContinuationAst::DigFromAmong {
+            count,
+            up_to,
+            filter,
+            destination,
+            rest_destination: None,
+        });
+    }
+
     // Find "from among" to split the text into count+filter vs destination
     let (_, before_from) = take_until::<_, _, OracleError<'_>>("from among")
         .parse(lower)
@@ -2274,7 +2345,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // cards" continuation is transparent — the continuation patches the
         // `Dig`, and the sacrificed creature feeds the continuation's filter
         // via `ObjectScope::CostPaidObject`.
-        Effect::Sacrifice { .. } => true,
+        Effect::Sacrifice { .. } | Effect::PayCost { .. } => true,
         Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
@@ -2369,7 +2440,6 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::GrantNextSpellAbility { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::CreateEmblem { .. }
-        | Effect::PayCost { .. }
         | Effect::CastFromZone { .. }
         | Effect::PreventDamage { .. }
         | Effect::CreateDamageReplacement { .. }
@@ -2906,6 +2976,7 @@ pub(super) fn parse_followup_continuation_ast(
             if (nom_primitives::scan_contains(&lower, "from among them")
                 || nom_primitives::scan_contains(&lower, "from among those cards")
                 || nom_primitives::scan_contains(&lower, "from among the milled cards")
+                || nom_primitives::scan_contains(&lower, "milled this way")
                 || nom_primitives::scan_contains(&lower, "of them"))
                 && (nom_primitives::scan_contains(&lower, "onto the battlefield")
                     || nom_primitives::scan_contains(&lower, "into your hand")
@@ -4030,6 +4101,41 @@ mod tests {
         assert!(matches!(filter, TargetFilter::Typed(_)), "got {filter:?}");
     }
 
+    /// CR 701.17c + CR 608.2c: Ripples of Undeath uses "a card milled this
+    /// way" instead of "from among the milled cards". It must still bind the
+    /// follow-up return to the cards moved by the preceding `Mill`.
+    #[test]
+    fn mill_return_card_milled_this_way_to_hand_emits_dig_from_among() {
+        let mill = Effect::Mill {
+            count: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
+        };
+        let result = parse_followup_continuation_ast(
+            "Return a card milled this way to your hand.",
+            &mill,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            count,
+            up_to,
+            filter,
+            destination,
+            rest_destination,
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(count, 1);
+        assert!(
+            !up_to,
+            "after the optional payment is made, returning a card is not optional"
+        );
+        assert_eq!(filter, TargetFilter::Any);
+        assert_eq!(destination, Some(Zone::Hand));
+        assert_eq!(rest_destination, None);
+    }
+
     /// CR 701.17c: `apply_clause_continuation` must PUSH a `ChangeZone`
     /// sub-ability targeting `TrackedSetFiltered` when the preceding def is a
     /// `Mill` — scoping the zone-change to the milled cards rather than the
@@ -4081,6 +4187,45 @@ mod tests {
             TargetFilter::TrackedSetFiltered { id, filter } => {
                 assert_eq!(id.0, 0, "sentinel TrackedSetId(0) — resolved at runtime");
                 assert_eq!(**filter, or_filter, "inner filter preserved");
+            }
+            other => panic!("expected TrackedSetFiltered target, got {other:?}"),
+        }
+    }
+
+    /// CR 118.3 + CR 608.2c: A payment clause between the mill and "milled this
+    /// way" return is lookback-transparent. The return must patch the earlier
+    /// `Mill`, not bind `ParentTarget` to the payment/current source.
+    #[test]
+    fn mill_pay_then_return_milled_this_way_uses_tracked_set() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "Mill three cards. Then you may pay {1} and 3 life. If you do, return a card milled this way to your hand.",
+            AbilityKind::Spell,
+        );
+
+        let mut effects: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            effects.push(d);
+            node = d.sub_ability.as_deref();
+        }
+
+        assert!(matches!(&*effects[0].effect, Effect::Mill { .. }));
+        assert!(matches!(&*effects[1].effect, Effect::PayCost { .. }));
+        let Effect::ChangeZone {
+            destination,
+            target,
+            ..
+        } = &*effects[2].effect
+        else {
+            panic!("expected ChangeZone return, got {:?}", effects[2].effect);
+        };
+        assert_eq!(*destination, Zone::Hand);
+        match target {
+            TargetFilter::TrackedSetFiltered { id, filter } => {
+                assert_eq!(id.0, 0);
+                assert_eq!(**filter, TargetFilter::Any);
             }
             other => panic!("expected TrackedSetFiltered target, got {other:?}"),
         }
