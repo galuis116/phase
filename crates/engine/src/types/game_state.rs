@@ -372,6 +372,20 @@ pub struct ZoneChangeRecord {
     /// snapshot rather than current combat state.
     #[serde(default)]
     pub combat_status: ZoneChangeCombatStatus,
+    /// CR 603.10a: ObjectIds that left the battlefield in the SAME simultaneous
+    /// event as this object (every permanent destroyed by one board wipe, every
+    /// creature destroyed together by a single state-based-action check, etc.),
+    /// excluding this object. Populated only by producers of a simultaneous
+    /// departure batch via `zones::mark_simultaneous_departures`; empty for a
+    /// lone departure or for departures that are separate sequential instructions
+    /// of one resolution. A leaves-the-battlefield / dies observer listed here
+    /// observes this departure via last-known information (CR 603.10a's worked
+    /// example); a creature that left in an earlier, separate event is not listed
+    /// and therefore does not cross-observe. This is the authority for
+    /// simultaneity — trigger collection must not infer it from the shape of the
+    /// accumulated event vector.
+    #[serde(default)]
+    pub co_departed: Vec<ObjectId>,
 }
 
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
@@ -438,6 +452,7 @@ impl ZoneChangeRecord {
             linked_exile_snapshot: Vec::new(),
             is_token: false,
             combat_status: ZoneChangeCombatStatus::default(),
+            co_departed: Vec::new(),
         }
     }
 }

@@ -746,24 +746,6 @@ fn collect_pending_triggers(
     // CR 603.2c: Track which batched triggers (source_id, trig_idx) have already
     // fired in this pass so "one or more" triggers fire at most once per batch.
     let mut batched_this_pass: HashSet<(ObjectId, usize)> = HashSet::new();
-    // CR 603.10a: Objects that leave the battlefield together (one board wipe, a
-    // batch of simultaneous lethal state-based actions) must be able to observe
-    // each other's departure via last-known information. Capture every object
-    // leaving the battlefield in this event batch up front so the
-    // leaves-the-battlefield look-back below can scan co-departing observers
-    // (e.g. a Blood Artist killed by the same Wrath of God that kills the
-    // creatures it counts), not just each event's own object.
-    let departed_this_batch: Vec<ObjectId> = events
-        .iter()
-        .filter_map(|e| match e {
-            GameEvent::ZoneChanged {
-                object_id,
-                from: Some(Zone::Battlefield),
-                ..
-            } => Some(*object_id),
-            _ => None,
-        })
-        .collect();
 
     for event in events {
         // CR 603.2 / CR 603.3: Per-event dedup. A single printed trigger definition
@@ -1284,20 +1266,26 @@ fn collect_pending_triggers(
             }
         }
 
-        // CR 603.10a (continued): An observer that ALSO left the battlefield in
-        // this same simultaneous batch must still see every OTHER departure. The
-        // `moved_id` block above lets an object observe its own departure, and the
-        // live battlefield scan covers surviving observers; this block covers the
-        // remaining case — a leaves-the-battlefield observer (Blood Artist,
-        // Zulaport Cutthroat, Elas il-Kor) destroyed by the same board wipe still
-        // triggers once for each co-dying creature (CR 603.10a's worked example).
+        // CR 603.10a (continued): an observer that left the battlefield in the
+        // SAME simultaneous event as this departure observes it via last-known
+        // information. The producer stamps that group onto `record.co_departed`
+        // (see `zones::mark_simultaneous_departures`); this is the authority for
+        // simultaneity. The `moved_id` block above handles an object observing
+        // its own departure, and the live battlefield scan covers surviving
+        // observers — so this covers the remaining case: a leaves-the-battlefield
+        // observer (Blood Artist, Zulaport Cutthroat, Elas il-Kor) destroyed by
+        // the same board wipe triggers once for each co-dying creature
+        // (CR 603.10a's worked example). Because the group comes from the
+        // producer rather than the shape of the accumulated event vector,
+        // sequential departures within one resolution never cross-observe.
         if let GameEvent::ZoneChanged {
             object_id: moved_id,
             from: Some(Zone::Battlefield),
+            record,
             ..
         } = event
         {
-            for observer_id in departed_this_batch.iter().copied() {
+            for observer_id in record.co_departed.iter().copied() {
                 // The departing object itself is handled by the `moved_id` block
                 // above; observers still on the battlefield are handled by the
                 // live scan. Only co-departed observers remain.
@@ -14548,21 +14536,9 @@ pub mod tests {
         );
     }
 
-    /// CR 603.10a: a dies-observer (Blood Artist) destroyed by the same board
-    /// wipe as other creatures still triggers once per creature that died,
-    /// including itself. Before the fix the observer fired only for its own
-    /// departure (the `moved_id` look-back) and missed every co-dying creature,
-    /// because it had already left the battlefield when triggers were collected.
-    #[test]
-    fn dies_observer_killed_in_same_batch_fires_for_each_simultaneous_death() {
-        let mut state = setup();
-        state.active_player = PlayerId(0);
-
-        let observer = make_creature(&mut state, PlayerId(0), "Blood Artist Stand-In", 0, 1);
-        let bear_a = make_creature(&mut state, PlayerId(0), "Bear A", 2, 2);
-        let bear_b = make_creature(&mut state, PlayerId(1), "Bear B", 2, 2);
-
-        // "Whenever a creature dies, ..." — any creature, including itself.
+    /// A "whenever a creature dies" observer (Blood Artist class) for tests.
+    fn add_dies_observer(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let observer = make_creature(state, owner, "Blood Artist Stand-In", 0, 1);
         let observer_trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
             .origin(Zone::Battlefield)
             .destination(Zone::Graveyard)
@@ -14576,29 +14552,79 @@ pub mod tests {
                     player: GainLifePlayer::Controller,
                 },
             ));
-        {
-            let obj = state.objects.get_mut(&observer).unwrap();
-            obj.trigger_definitions.push(observer_trigger.clone());
-            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(observer_trigger);
-        }
+        let obj = state.objects.get_mut(&observer).unwrap();
+        obj.trigger_definitions.push(observer_trigger.clone());
+        std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(observer_trigger);
+        observer
+    }
 
-        // Simulate a board wipe (Wrath of God) that moves all three creatures to
-        // the graveyard simultaneously, accumulating one ZoneChanged event each.
+    /// CR 603.10a: a dies-observer (Blood Artist) that dies in the SAME
+    /// simultaneous event as other creatures triggers once per creature that
+    /// died, including itself. This drives the real producer authority — a
+    /// single state-based-action check destroying every creature with lethal
+    /// damage at once (CR 704.7) — which stamps the simultaneity group onto each
+    /// `ZoneChangeRecord.co_departed`. Before the fix the observer fired only for
+    /// its own departure and missed the co-dying creatures.
+    #[test]
+    fn dies_observer_killed_in_same_sba_batch_fires_for_each_simultaneous_death() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let observer = add_dies_observer(&mut state, PlayerId(0));
+        let bear_a = make_creature(&mut state, PlayerId(0), "Bear A", 2, 2);
+        let bear_b = make_creature(&mut state, PlayerId(1), "Bear B", 2, 2);
+
+        // Lethal damage marked on all three (as a board sweeper like Pyroclasm
+        // would) so one SBA check destroys them simultaneously.
+        state.objects.get_mut(&observer).unwrap().damage_marked = 1;
+        state.objects.get_mut(&bear_a).unwrap().damage_marked = 2;
+        state.objects.get_mut(&bear_b).unwrap().damage_marked = 2;
+
         let mut events = Vec::new();
-        for id in [observer, bear_a, bear_b] {
-            crate::game::zones::move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
-        }
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
 
         let pending = collect_pending_triggers(&mut state, &events);
-
         let observer_fires = pending
             .iter()
             .filter(|p| p.pending.source_id == observer)
             .count();
         assert_eq!(
             observer_fires, 3,
-            "dies-observer must fire once per creature that died in the batch \
-             (itself + 2 others); pre-fix it fired only for its own death"
+            "dies-observer must fire once per creature that died simultaneously \
+             (itself + 2 others)"
+        );
+    }
+
+    /// CR 603.10a regression guard (PR #1449 review): a dies-observer that leaves
+    /// the battlefield in one instruction must NOT observe a creature that leaves
+    /// in a SEPARATE, sequential instruction of the same resolution. Simultaneity
+    /// is established by the producer (`co_departed`), not by two ZoneChanged
+    /// events happening to share the accumulated event vector — so without a
+    /// producer grouping them, the observer fires only for its own death.
+    #[test]
+    fn dies_observer_does_not_observe_sequential_departure() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let observer = add_dies_observer(&mut state, PlayerId(0));
+        let later = make_creature(&mut state, PlayerId(0), "Later Bear", 2, 2);
+
+        // Two separate, sequential departures (e.g. "sacrifice ~, then destroy
+        // target creature"): no producer marks them simultaneous, so co_departed
+        // stays empty on both events.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, observer, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, later, Zone::Graveyard, &mut events);
+
+        let pending = collect_pending_triggers(&mut state, &events);
+        let observer_fires = pending
+            .iter()
+            .filter(|p| p.pending.source_id == observer)
+            .count();
+        assert_eq!(
+            observer_fires, 1,
+            "observer that left earlier must NOT observe a later, non-simultaneous \
+             departure — only its own death fires"
         );
     }
 

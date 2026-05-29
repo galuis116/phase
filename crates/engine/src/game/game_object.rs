@@ -712,6 +712,7 @@ impl GameObject {
             // "whenever a creature token dies").
             is_token: self.is_token,
             combat_status: Default::default(),
+            co_departed: Vec::new(),
         }
     }
 
