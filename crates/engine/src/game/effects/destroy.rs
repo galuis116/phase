@@ -220,7 +220,7 @@ pub fn resolve_all(
         .copied()
         .collect();
 
-    for obj_id in matching {
+    for &obj_id in &matching {
         let proposed = ProposedEvent::Destroy {
             object_id: obj_id,
             source: Some(ability.source_id),
@@ -241,6 +241,12 @@ pub fn resolve_all(
             }
         }
     }
+
+    // CR 603.10a + CR 704.7: every creature destroyed by this effect left the
+    // battlefield simultaneously, so co-departing leaves-the-battlefield/dies
+    // observers (Blood Artist, Zulaport Cutthroat) must observe each other.
+    // Regenerated members stay on the battlefield and are skipped downstream.
+    crate::game::zones::mark_simultaneous_departures(events, &matching);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),

@@ -422,6 +422,43 @@ pub fn move_to_zone(
     });
 }
 
+/// CR 603.10a: Record that every member of `group` left the battlefield in the
+/// SAME simultaneous event, so leaves-the-battlefield / dies observers that are
+/// themselves in the group observe each other via last-known information (the
+/// CR 603.10a worked example: a Blood Artist destroyed by the same Wrath of God
+/// as the creatures it counts triggers once per co-dying creature).
+///
+/// Producers of a simultaneous departure batch — one board wipe (`DestroyAll`),
+/// one state-based-action destruction pass (CR 704.7), one mass bounce/exile —
+/// call this on the events they just produced, AFTER moving every member. This
+/// is the authority for simultaneity: it is established here at the
+/// event-production layer rather than inferred downstream from the shape of the
+/// accumulated event vector, so sequential departures within a single
+/// resolution are never grouped (a member only appears in another member's
+/// `co_departed` when they truly left together).
+pub fn mark_simultaneous_departures(events: &mut [GameEvent], group: &[ObjectId]) {
+    if group.len() < 2 {
+        return;
+    }
+    for event in events.iter_mut() {
+        if let GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            record,
+            ..
+        } = event
+        {
+            if group.contains(object_id) {
+                record.co_departed = group
+                    .iter()
+                    .copied()
+                    .filter(|&member| member != *object_id)
+                    .collect();
+            }
+        }
+    }
+}
+
 fn capture_linked_exile_snapshot(
     state: &GameState,
     source_id: ObjectId,
