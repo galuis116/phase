@@ -4,9 +4,21 @@ use crate::game::effects::{append_to_pending_continuation, mark_pending_continua
 use crate::types::ability::{
     Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
 };
+use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
+use crate::types::zones::Zone;
+
+/// CR 701.14b: A creature can fight only while it is still on the battlefield and
+/// still a creature. A permanent that leaves the battlefield keeps its entry in
+/// `state.objects` with `zone` updated (so a stale lookup still succeeds), and a
+/// creature can be turned into a noncreature in place — both must be checked.
+fn fight_eligible(state: &GameState, id: ObjectId) -> bool {
+    state.objects.get(&id).is_some_and(|obj| {
+        obj.zone == Zone::Battlefield && obj.card_types.core_types.contains(&CoreType::Creature)
+    })
+}
 
 /// CR 701.14a: Resolve the subject creature for a fight effect.
 /// - `SelfRef` → the ability's source object (default: "~ fights").
@@ -71,6 +83,60 @@ pub fn resolve(
             }
         })
         .ok_or_else(|| EffectError::MissingParam("Fight target".to_string()))?;
+
+    // CR 701.14b: If one or both creatures instructed to fight are no longer on
+    // the battlefield or are no longer creatures, neither of them fights or deals
+    // damage. Target validation (`targeting::check_fizzle`) fizzles a fight only
+    // when *every* target is illegal, so this gate is what enforces 701.14b for
+    // the non-targeted subject — "~ fights target creature" where ~ has left the
+    // battlefield or been turned into a noncreature before the fight resolves —
+    // and for the partial case where only one of two fight participants is illegal.
+    if !fight_eligible(state, source_id) || !fight_eligible(state, target_id) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
+    // CR 701.14c: A creature that fights itself deals damage to itself equal to
+    // twice its power, as a single damage event (not two separate instances).
+    if source_id == target_id {
+        let (power, controller) = {
+            let obj = state
+                .objects
+                .get(&source_id)
+                .ok_or(EffectError::ObjectNotFound(source_id))?;
+            (obj.power.unwrap_or(0), obj.controller)
+        };
+        if power > 0 {
+            let ctx = DamageContext::from_source(state, source_id)
+                .unwrap_or_else(|| DamageContext::fallback(source_id, controller));
+            if let DamageResult::NeedsChoice = apply_damage_to_target(
+                state,
+                &ctx,
+                TargetRef::Object(source_id),
+                (power as u32).saturating_mul(2),
+                false,
+                events,
+            )? {
+                // A self-fight is a single direction — there is no second direction
+                // to stash. Propagate any follow-up sub-ability and tag the parent
+                // kind so the replacement drain re-emits the Fight event (mirrors the
+                // two-direction pause paths below).
+                if let Some(sub) = ability.sub_ability.as_ref() {
+                    append_to_pending_continuation(state, Some(Box::new(sub.as_ref().clone())));
+                }
+                mark_pending_continuation_parent(state, EffectKind::Fight);
+                return Ok(());
+            }
+        }
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
 
     // Read power and controller for both creatures before mutable damage phase.
     let (source_power, source_controller) = {
@@ -362,6 +428,98 @@ mod tests {
         assert_eq!(state.objects[&bear].damage_marked, 0);
         // Bear has 2 power, deals 2 damage to Wall
         assert_eq!(state.objects[&wall].damage_marked, 2);
+    }
+
+    /// CR 701.14b: a fighter that left the battlefield before the fight resolves
+    /// causes neither creature to fight or deal damage. The object entry persists
+    /// with `zone` updated, so the old code read stale power and dealt damage.
+    #[test]
+    fn fight_no_damage_when_source_left_battlefield() {
+        let mut state = GameState::new_two_player(42);
+        let bear = make_creature(&mut state, PlayerId(0), "Bear", 3, 3);
+        let wolf = make_creature(&mut state, PlayerId(1), "Wolf", 2, 2);
+        // Bear leaves the battlefield (e.g. destroyed in response to the fight).
+        state.objects.get_mut(&bear).unwrap().zone = Zone::Graveyard;
+
+        let ability = make_fight_ability(bear, wolf);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&wolf].damage_marked, 0,
+            "wolf takes no damage"
+        );
+        assert_eq!(
+            state.objects[&bear].damage_marked, 0,
+            "bear deals no damage"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::EffectResolved { .. })),
+            "the fight still resolves (with no damage)"
+        );
+    }
+
+    /// CR 701.14b: a fighter turned into a noncreature in place (e.g. Song of the
+    /// Dryads) is "no longer a creature" — neither creature deals damage.
+    #[test]
+    fn fight_no_damage_when_source_is_no_longer_creature() {
+        let mut state = GameState::new_two_player(42);
+        let bear = make_creature(&mut state, PlayerId(0), "Bear", 3, 3);
+        let wolf = make_creature(&mut state, PlayerId(1), "Wolf", 2, 2);
+        // Bear is still on the battlefield but is no longer a creature.
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .card_types
+            .core_types
+            .clear();
+
+        let ability = make_fight_ability(bear, wolf);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&wolf].damage_marked, 0);
+        assert_eq!(state.objects[&bear].damage_marked, 0);
+    }
+
+    /// CR 701.14b: symmetric to the source case — an illegal *target* also
+    /// suppresses both directions at resolution.
+    #[test]
+    fn fight_no_damage_when_target_left_battlefield() {
+        let mut state = GameState::new_two_player(42);
+        let bear = make_creature(&mut state, PlayerId(0), "Bear", 3, 3);
+        let wolf = make_creature(&mut state, PlayerId(1), "Wolf", 2, 2);
+        state.objects.get_mut(&wolf).unwrap().zone = Zone::Exile;
+
+        let ability = make_fight_ability(bear, wolf);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&bear].damage_marked, 0);
+        assert_eq!(state.objects[&wolf].damage_marked, 0);
+    }
+
+    /// CR 701.14c: a creature that fights itself deals twice its power to itself,
+    /// as a single damage event.
+    #[test]
+    fn fight_self_deals_twice_power() {
+        let mut state = GameState::new_two_player(42);
+        let bear = make_creature(&mut state, PlayerId(0), "Bear", 3, 3);
+
+        let ability = make_fight_ability(bear, bear);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // 2 × 3 power = 6 damage, dealt as one instance.
+        assert_eq!(state.objects[&bear].damage_marked, 6);
+        let damage_events = events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::DamageDealt { .. }))
+            .count();
+        assert_eq!(damage_events, 1, "self-fight is a single damage event");
     }
 
     #[test]
