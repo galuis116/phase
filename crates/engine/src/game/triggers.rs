@@ -746,6 +746,24 @@ fn collect_pending_triggers(
     // CR 603.2c: Track which batched triggers (source_id, trig_idx) have already
     // fired in this pass so "one or more" triggers fire at most once per batch.
     let mut batched_this_pass: HashSet<(ObjectId, usize)> = HashSet::new();
+    // CR 603.10a: Objects that leave the battlefield together (one board wipe, a
+    // batch of simultaneous lethal state-based actions) must be able to observe
+    // each other's departure via last-known information. Capture every object
+    // leaving the battlefield in this event batch up front so the
+    // leaves-the-battlefield look-back below can scan co-departing observers
+    // (e.g. a Blood Artist killed by the same Wrath of God that kills the
+    // creatures it counts), not just each event's own object.
+    let departed_this_batch: Vec<ObjectId> = events
+        .iter()
+        .filter_map(|e| match e {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                ..
+            } => Some(*object_id),
+            _ => None,
+        })
+        .collect();
 
     for event in events {
         // CR 603.2 / CR 603.3: Per-event dedup. A single printed trigger definition
@@ -1258,6 +1276,67 @@ fn collect_pending_triggers(
                         batched_this_pass.insert((*moved_id, matched.trig_idx));
                     }
                     registered_this_event.insert((*moved_id, matched.trig_idx));
+                    pending.push(PendingTriggerContext::batched(
+                        matched.pending,
+                        matched.trigger_events,
+                    ));
+                }
+            }
+        }
+
+        // CR 603.10a (continued): An observer that ALSO left the battlefield in
+        // this same simultaneous batch must still see every OTHER departure. The
+        // `moved_id` block above lets an object observe its own departure, and the
+        // live battlefield scan covers surviving observers; this block covers the
+        // remaining case — a leaves-the-battlefield observer (Blood Artist,
+        // Zulaport Cutthroat, Elas il-Kor) destroyed by the same board wipe still
+        // triggers once for each co-dying creature (CR 603.10a's worked example).
+        if let GameEvent::ZoneChanged {
+            object_id: moved_id,
+            from: Some(Zone::Battlefield),
+            ..
+        } = event
+        {
+            for observer_id in departed_this_batch.iter().copied() {
+                // The departing object itself is handled by the `moved_id` block
+                // above; observers still on the battlefield are handled by the
+                // live scan. Only co-departed observers remain.
+                if observer_id == *moved_id {
+                    continue;
+                }
+                if !state
+                    .objects
+                    .get(&observer_id)
+                    .is_some_and(|o| o.zone != Zone::Battlefield)
+                {
+                    continue;
+                }
+                let matched_triggers = {
+                    let Some(obj) = state.objects.get(&observer_id) else {
+                        continue;
+                    };
+                    collect_matching_triggers(
+                        state,
+                        event,
+                        events,
+                        obj,
+                        obj.entered_battlefield_turn.unwrap_or(0),
+                        Some(Zone::Battlefield),
+                        &mut batched_this_pass,
+                        &mut registered_this_event,
+                    )
+                };
+                for matched in matched_triggers {
+                    record_trigger_fired(
+                        state,
+                        matched.constraint.as_ref(),
+                        observer_id,
+                        matched.trig_idx,
+                    );
+                    if matched.batched {
+                        batched_this_pass.insert((observer_id, matched.trig_idx));
+                    }
+                    registered_this_event.insert((observer_id, matched.trig_idx));
                     pending.push(PendingTriggerContext::batched(
                         matched.pending,
                         matched.trigger_events,
@@ -14466,6 +14545,60 @@ pub mod tests {
             state.players[0].life, 21,
             "the Blood Artist-class dies-observer must resolve from the \
              deferred-trigger flush (issue #423)"
+        );
+    }
+
+    /// CR 603.10a: a dies-observer (Blood Artist) destroyed by the same board
+    /// wipe as other creatures still triggers once per creature that died,
+    /// including itself. Before the fix the observer fired only for its own
+    /// departure (the `moved_id` look-back) and missed every co-dying creature,
+    /// because it had already left the battlefield when triggers were collected.
+    #[test]
+    fn dies_observer_killed_in_same_batch_fires_for_each_simultaneous_death() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let observer = make_creature(&mut state, PlayerId(0), "Blood Artist Stand-In", 0, 1);
+        let bear_a = make_creature(&mut state, PlayerId(0), "Bear A", 2, 2);
+        let bear_b = make_creature(&mut state, PlayerId(1), "Bear B", 2, 2);
+
+        // "Whenever a creature dies, ..." — any creature, including itself.
+        let observer_trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .origin(Zone::Battlefield)
+            .destination(Zone::Graveyard)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::default().with_type(TypeFilter::Creature),
+            ))
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: GainLifePlayer::Controller,
+                },
+            ));
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.trigger_definitions.push(observer_trigger.clone());
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(observer_trigger);
+        }
+
+        // Simulate a board wipe (Wrath of God) that moves all three creatures to
+        // the graveyard simultaneously, accumulating one ZoneChanged event each.
+        let mut events = Vec::new();
+        for id in [observer, bear_a, bear_b] {
+            crate::game::zones::move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+        }
+
+        let pending = collect_pending_triggers(&mut state, &events);
+
+        let observer_fires = pending
+            .iter()
+            .filter(|p| p.pending.source_id == observer)
+            .count();
+        assert_eq!(
+            observer_fires, 3,
+            "dies-observer must fire once per creature that died in the batch \
+             (itself + 2 others); pre-fix it fired only for its own death"
         );
     }
 
