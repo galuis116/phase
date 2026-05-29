@@ -568,8 +568,11 @@ mod tests {
             );
 
             // Nom path: `{SYMBOL}` parses to the same shard with no remainder.
-            let (rest, shard) = parse_mana_symbol(&format!("{{{symbol}}}"))
-                .unwrap_or_else(|_| panic!("nom parser must accept {{{symbol}}}"));
+            // Bind the braced string to a local so `rest` (which borrows from
+            // the input) outlives the `format!` temporary.
+            let braced = format!("{{{symbol}}}");
+            let (rest, shard) = parse_mana_symbol(&braced)
+                .unwrap_or_else(|_| panic!("nom parser must accept {braced}"));
             assert!(rest.is_empty(), "nom left remainder {rest:?} for {symbol}");
             assert_eq!(shard, expected, "nom disagrees with from_str for {symbol}");
         }
