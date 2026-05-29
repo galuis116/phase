@@ -2242,7 +2242,7 @@ fn apply_action(
                 if super::pairing::is_unpaired_creature_you_control(state, *source_id, *player)
                     && super::pairing::is_unpaired_creature_you_control(state, partner_id, *player)
                 {
-                    super::pairing::pair_objects(state, *source_id, partner_id);
+                    super::pairing::pair_objects(state, *source_id, partner_id, *player);
                 }
             }
             events.push(GameEvent::EffectResolved {
