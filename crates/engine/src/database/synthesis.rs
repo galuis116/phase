@@ -3,6 +3,7 @@ use std::str::FromStr;
 use crate::database::mtgjson::{parse_mtgjson_mana_cost, AtomicCard};
 use crate::game::printed_cards::derive_colors_from_mana_cost;
 use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
+use crate::parser::oracle_util::{apply_bracket_mode, BracketMode};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost,
     AdditionalCostPaymentSource, AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType,
@@ -14,7 +15,7 @@ use crate::types::ability::{
     RuntimeHandler, SearchSelectionConstraint, StaticDefinition, TargetChoiceTiming, TargetFilter,
     TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
-use crate::types::card::{CardFace, CardLayout};
+use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::{BloodthirstValue, BuybackCost, CyclingCost, Keyword, PartnerType};
@@ -27,6 +28,60 @@ use crate::types::zones::Zone;
 // ---------------------------------------------------------------------------
 // Shared helpers for building card faces from MTGJSON data
 // ---------------------------------------------------------------------------
+
+/// CR 702.148a-b + CR 612: Parse a face's Oracle text under Cleave's
+/// text-changing semantics, returning the printed-cost parse and (when the face
+/// has Cleave) the bracket-removed cleave variant.
+///
+/// Single authority for the cleave bracket prep so the real card-data build
+/// pipeline (`build_oracle_face_inner`) and the test scenario harness
+/// (`scenario::build_face_from_oracle`) cannot silently diverge:
+///   * The base parse keeps the bracketed clause but drops the bracket
+///     characters (`BracketMode::KeepContent`) so the printed-cost spell parses
+///     correctly. For non-cleave faces the strip is a no-op (the text never
+///     enters the strip), preserving every other parse — and the strip is GATED
+///     on the face having Cleave so the ~362 planeswalkers using `[+N]`/`[−N]`
+///     loyalty brackets are never corrupted.
+///   * When the face has Cleave, a SECOND parse over the bracket-removed text
+///     (`BracketMode::RemoveSpan`) is stashed in the returned `CleaveVariant`.
+///     The casting flow swaps this onto the stack object when the spell is cast
+///     for its cleave cost. This is a leaf parse — never re-projected, so there
+///     is no cleave recursion.
+pub(crate) fn parse_oracle_with_cleave_brackets(
+    raw_oracle_text: &str,
+    card_name: &str,
+    keyword_names: &[String],
+    types: &[String],
+    subtypes: &[String],
+) -> (
+    crate::parser::oracle::ParsedAbilities,
+    Option<CleaveVariant>,
+) {
+    let has_cleave = keyword_names.iter().any(|n| n == "cleave");
+
+    let base_oracle_text = if has_cleave {
+        apply_bracket_mode(raw_oracle_text, BracketMode::KeepContent)
+    } else {
+        raw_oracle_text.to_string()
+    };
+    let parsed = parse_oracle_text(&base_oracle_text, card_name, keyword_names, types, subtypes);
+
+    let cleave_variant = if has_cleave {
+        let cleave_text = apply_bracket_mode(raw_oracle_text, BracketMode::RemoveSpan);
+        let cleave_parsed =
+            parse_oracle_text(&cleave_text, card_name, keyword_names, types, subtypes);
+        Some(CleaveVariant {
+            abilities: cleave_parsed.abilities,
+            triggers: cleave_parsed.triggers,
+            static_abilities: cleave_parsed.statics,
+            replacements: cleave_parsed.replacements,
+        })
+    } else {
+        None
+    };
+
+    (parsed, cleave_variant)
+}
 
 /// Internal layout classification from MTGJSON layout strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1263,6 +1318,65 @@ pub fn synthesize_outlast(face: &mut CardFace) {
         .collect();
 
     face.abilities.extend(outlast_abilities);
+}
+
+/// CR 702.77a: Synthesize the Reinforce activated ability from `Keyword::Reinforce { count, cost }`.
+/// "Reinforce N—[cost]" means "[Cost], Discard this card: Put N +1/+1 counters on target creature."
+pub fn synthesize_reinforce(face: &mut CardFace) {
+    let reinforce_abilities: Vec<AbilityDefinition> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| {
+            let Keyword::Reinforce { count, cost } = kw else {
+                return None;
+            };
+            // CR 702.77a: Composite cost — pay mana, then discard this card.
+            let composite_cost = AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana { cost: cost.clone() },
+                    // CR 702.77a: "Discard this card" — self_ref=true so the
+                    // engine auto-discards the source card.
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: None,
+                        random: false,
+                        self_ref: true,
+                    },
+                ],
+            };
+            // CR 702.77a: "Put N +1/+1 counters on target creature."
+            // When count == 0, this is Reinforce X — use Variable("X") which
+            // resolves to chosen_x at runtime (the X in the mana cost).
+            let counter_count = if *count == 0 {
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                }
+            } else {
+                QuantityExpr::Fixed {
+                    value: *count as i32,
+                }
+            };
+            let effect = Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: counter_count,
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+            };
+            let def = AbilityDefinition::new(AbilityKind::Activated, effect).cost(composite_cost);
+            // CR 702.77a: Reinforce is activated from hand (discard as cost).
+            // No zone restriction needed — the discard cost implicitly requires the card
+            // to be in hand. The default activation zone (battlefield) won't apply since
+            // the card is never on the battlefield when this ability is relevant.
+            // Actually, per CR 702.77b: "A creature card with reinforce may also be cast
+            // as a spell." The ability functions from hand, so we set activation_zone.
+            let mut def = def;
+            def.activation_zone = Some(Zone::Hand);
+            Some(def)
+        })
+        .collect();
+
+    face.abilities.extend(reinforce_abilities);
 }
 
 /// Convert a typecycling subtype string to a `TargetFilter` for library search.
@@ -3851,6 +3965,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_cycling(face);
     synthesize_scavenge(face);
     synthesize_outlast(face);
+    synthesize_reinforce(face);
     synthesize_casualty(face);
     synthesize_entwine(face);
     synthesize_madness_intrinsics(face);
@@ -4168,14 +4283,18 @@ fn build_oracle_face_inner(
             .unwrap_or_default()
     };
 
-    let oracle_text = mtgjson.text.as_deref().unwrap_or("");
+    let raw_oracle_text = mtgjson.text.as_deref().unwrap_or("");
     let face_name = mtgjson.face_name.as_deref().unwrap_or(&mtgjson.name);
 
     let types: Vec<String> = mtgjson.types.clone();
     let subtypes: Vec<String> = mtgjson.subtypes.clone();
 
-    let parsed = parse_oracle_text(
-        oracle_text,
+    // CR 702.148a-b + CR 612: Cleave's text-changing effect removes every
+    // square-bracketed span from the spell's rules text. `parse_oracle_with_cleave_brackets`
+    // is the single authority for the dual (printed-cost / cleave-cost) parse,
+    // shared with the test scenario harness so the two pipelines cannot diverge.
+    let (parsed, cleave_variant) = parse_oracle_with_cleave_brackets(
+        raw_oracle_text,
         face_name,
         &parser_keyword_names,
         &types,
@@ -4201,7 +4320,7 @@ fn build_oracle_face_inner(
     // MTGJSON sends both "Partner" and "Partner with" keywords; the former produces
     // Partner(Generic) via FromStr. Scan Oracle text for the actual partner name.
     if mtgjson_keyword_names.contains(&"partner with".to_string()) {
-        let lower_oracle = oracle_text.to_lowercase();
+        let lower_oracle = raw_oracle_text.to_lowercase();
         if let Some(line) = lower_oracle
             .lines()
             .find(|l| l.starts_with("partner with "))
@@ -4253,11 +4372,19 @@ fn build_oracle_face_inner(
         keywords.retain(|kw| !matches!(kw, Keyword::Hexproof));
     }
 
+    // CR 202.1b: A card with no `manaCost` (lands, and suspend-only cards like
+    // Inevitable Betrayal / Ancestral Vision) has *no* mana cost where its cost
+    // would appear — not a payable {0} cost.
+    // CR 118.6: no mana cost is an unpayable cost. Map an absent manaCost to
+    // `NoCost`; `unwrap_or_default()` previously collapsed it to `Cost{0}`, which
+    // made such cards castable for free from hand (issue #827). Real `{0}` cards
+    // (Ornithopter, Mox) carry an explicit `"{0}"` manaCost and stay
+    // `Cost{ generic: 0 }` via `parse_mtgjson_mana_cost`.
     let mana_cost = mtgjson
         .mana_cost
         .as_deref()
         .map(parse_mtgjson_mana_cost)
-        .unwrap_or_default();
+        .unwrap_or(ManaCost::NoCost);
 
     let mana_derived_colors = derive_colors_from_mana_cost(&mana_cost);
     let mtgjson_colors: Vec<ManaColor> = mtgjson
@@ -4287,6 +4414,7 @@ fn build_oracle_face_inner(
         triggers: parsed.triggers,
         static_abilities: parsed.statics,
         replacements: parsed.replacements,
+        cleave_variant,
         color_override,
         color_identity: mtgjson
             .color_identity
@@ -12079,5 +12207,149 @@ mod for_mirrodin_synthesis_tests {
         synthesize_for_mirrodin(&mut face);
         let trigger = &face.triggers[0];
         assert_eq!(trigger.trigger_zones, vec![Zone::Battlefield]);
+    }
+}
+
+#[cfg(test)]
+mod reinforce_synthesis_tests {
+    use super::*;
+    use crate::types::mana::{ManaCost, ManaCostShard};
+
+    fn face_with_reinforce(count: u32, cost: ManaCost) -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Reinforce { count, cost });
+        face
+    }
+
+    /// CR 702.77a: Reinforce synthesis produces exactly one activated ability whose
+    /// shape matches the reminder text — hand activation, composite cost of mana +
+    /// self-discard, +1/+1 counters on target creature scaled by the fixed count.
+    #[test]
+    fn synthesize_reinforce_builds_activated_ability_with_correct_shape() {
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        };
+        let mut face = face_with_reinforce(3, cost.clone());
+        synthesize_reinforce(&mut face);
+
+        assert_eq!(face.abilities.len(), 1, "exactly one reinforce ability");
+        let def = &face.abilities[0];
+        assert_eq!(def.kind, AbilityKind::Activated);
+        assert_eq!(def.activation_zone, Some(Zone::Hand));
+        // Reinforce is instant-speed (no sorcery restriction).
+        assert!(!def.sorcery_speed);
+
+        // CR 118.3: Composite cost — mana + discard-self.
+        match def.cost.as_ref().expect("reinforce must have a cost") {
+            AbilityCost::Composite { costs } => {
+                assert_eq!(costs.len(), 2);
+                assert!(matches!(&costs[0], AbilityCost::Mana { cost: c } if *c == cost));
+                assert!(matches!(
+                    &costs[1],
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: None,
+                        random: false,
+                        self_ref: true,
+                    }
+                ));
+            }
+            other => panic!("expected Composite cost, got {:?}", other),
+        }
+
+        // CR 702.77a: Effect is N +1/+1 counters on target creature.
+        match def.effect.as_ref() {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
+                assert_eq!(count, &QuantityExpr::Fixed { value: 3 });
+                assert!(
+                    matches!(target, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature))
+                );
+            }
+            other => panic!("expected PutCounter effect, got {:?}", other),
+        }
+    }
+
+    /// Reinforce with zero-cost mana (e.g., {0}) still produces a well-formed ability.
+    #[test]
+    fn synthesize_reinforce_handles_zero_cost() {
+        let cost = ManaCost::zero();
+        let mut face = face_with_reinforce(2, cost);
+        synthesize_reinforce(&mut face);
+        assert_eq!(face.abilities.len(), 1);
+    }
+
+    /// Cards without Reinforce are unaffected.
+    #[test]
+    fn synthesize_reinforce_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_reinforce(&mut face);
+        assert!(face.abilities.is_empty());
+    }
+
+    /// Idempotent: calling synthesize_reinforce twice doubles the abilities
+    /// (synthesis is additive, caller is responsible for single invocation).
+    #[test]
+    fn synthesize_reinforce_is_additive() {
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 2,
+        };
+        let mut face = face_with_reinforce(1, cost);
+        synthesize_reinforce(&mut face);
+        synthesize_reinforce(&mut face);
+        assert_eq!(face.abilities.len(), 2);
+    }
+
+    /// CR 702.77a: Reinforce X (count=0) uses Variable("X") for counter quantity,
+    /// resolved at runtime via chosen_x from the X in the mana cost.
+    #[test]
+    fn synthesize_reinforce_x_uses_variable_quantity() {
+        // Swell of Courage: Reinforce X—{X}{W}{W}
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::White, ManaCostShard::White],
+            generic: 0,
+        };
+        let mut face = face_with_reinforce(0, cost.clone());
+        synthesize_reinforce(&mut face);
+        assert_eq!(face.abilities.len(), 1, "exactly one reinforce ability");
+        let def = &face.abilities[0];
+        assert_eq!(def.kind, AbilityKind::Activated);
+        assert_eq!(def.activation_zone, Some(Zone::Hand));
+        // Verify the counter count is Variable("X"), not Fixed(0).
+        match def.effect.as_ref() {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(counter_type, &CounterType::Plus1Plus1);
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string()
+                        }
+                    }
+                );
+                assert!(
+                    matches!(target, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature))
+                );
+            }
+            other => panic!("expected PutCounter effect, got {:?}", other),
+        }
+        // Verify the mana cost contains X shard (triggers ChooseXValue at runtime).
+        match def.cost.as_ref().expect("reinforce must have a cost") {
+            AbilityCost::Composite { costs } => {
+                assert!(matches!(&costs[0], AbilityCost::Mana { cost: c } if *c == cost));
+            }
+            other => panic!("expected Composite cost, got {:?}", other),
+        }
     }
 }

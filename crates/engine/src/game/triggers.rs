@@ -448,6 +448,16 @@ fn collect_matching_triggers(
                     .into_iter()
                     .map(|trigger_event| vec![trigger_event])
                     .collect()
+            } else if matches!(trig_def.mode, TriggerMode::DamageDoneOnceByController) {
+                // CR 603.2c: One aggregate combat-damage event may satisfy this
+                // trigger once, while CR 608.2c makes the filtered source set
+                // available to later "those creatures" instructions.
+                super::trigger_matchers::matching_damage_done_once_by_controller_event(
+                    event, trig_def, obj_id, state,
+                )
+                .into_iter()
+                .map(|trigger_event| vec![trigger_event])
+                .collect()
             } else {
                 vec![vec![event.clone()]]
             };
@@ -1258,6 +1268,73 @@ fn collect_pending_triggers(
                         batched_this_pass.insert((*moved_id, matched.trig_idx));
                     }
                     registered_this_event.insert((*moved_id, matched.trig_idx));
+                    pending.push(PendingTriggerContext::batched(
+                        matched.pending,
+                        matched.trigger_events,
+                    ));
+                }
+            }
+        }
+
+        // CR 603.10a (continued): an observer that left the battlefield in the
+        // SAME simultaneous event as this departure observes it via last-known
+        // information. The producer stamps that group onto `record.co_departed`
+        // (see `zones::mark_simultaneous_departures`); this is the authority for
+        // simultaneity. The `moved_id` block above handles an object observing
+        // its own departure, and the live battlefield scan covers surviving
+        // observers — so this covers the remaining case: a leaves-the-battlefield
+        // observer (Blood Artist, Zulaport Cutthroat, Elas il-Kor) destroyed by
+        // the same board wipe triggers once for each co-dying creature
+        // (CR 603.10a's worked example). Because the group comes from the
+        // producer rather than the shape of the accumulated event vector,
+        // sequential departures within one resolution never cross-observe.
+        if let GameEvent::ZoneChanged {
+            object_id: moved_id,
+            from: Some(Zone::Battlefield),
+            record,
+            ..
+        } = event
+        {
+            for observer_id in record.co_departed.iter().copied() {
+                // The departing object itself is handled by the `moved_id` block
+                // above; observers still on the battlefield are handled by the
+                // live scan. Only co-departed observers remain.
+                if observer_id == *moved_id {
+                    continue;
+                }
+                if !state
+                    .objects
+                    .get(&observer_id)
+                    .is_some_and(|o| o.zone != Zone::Battlefield)
+                {
+                    continue;
+                }
+                let matched_triggers = {
+                    let Some(obj) = state.objects.get(&observer_id) else {
+                        continue;
+                    };
+                    collect_matching_triggers(
+                        state,
+                        event,
+                        events,
+                        obj,
+                        obj.entered_battlefield_turn.unwrap_or(0),
+                        Some(Zone::Battlefield),
+                        &mut batched_this_pass,
+                        &mut registered_this_event,
+                    )
+                };
+                for matched in matched_triggers {
+                    record_trigger_fired(
+                        state,
+                        matched.constraint.as_ref(),
+                        observer_id,
+                        matched.trig_idx,
+                    );
+                    if matched.batched {
+                        batched_this_pass.insert((observer_id, matched.trig_idx));
+                    }
+                    registered_this_event.insert((observer_id, matched.trig_idx));
                     pending.push(PendingTriggerContext::batched(
                         matched.pending,
                         matched.trigger_events,
@@ -5113,7 +5190,7 @@ pub mod tests {
         let mut state = setup();
         let a = make_creature(&mut state, PlayerId(0), "A", 2, 2);
         let b = make_creature(&mut state, PlayerId(0), "B", 2, 2);
-        crate::game::pairing::pair_objects(&mut state, a, b);
+        crate::game::pairing::pair_objects(&mut state, a, b, PlayerId(0));
 
         let mut events = Vec::new();
         crate::game::zones::move_to_zone(&mut state, a, Zone::Graveyard, &mut events);
@@ -5121,7 +5198,7 @@ pub mod tests {
 
         let c = make_creature(&mut state, PlayerId(0), "C", 2, 2);
         let d = make_creature(&mut state, PlayerId(0), "D", 2, 2);
-        crate::game::pairing::pair_objects(&mut state, c, d);
+        crate::game::pairing::pair_objects(&mut state, c, d, PlayerId(0));
         state.add_transient_continuous_effect(
             ObjectId(9000),
             PlayerId(1),
@@ -5136,7 +5213,7 @@ pub mod tests {
 
         let e = make_creature(&mut state, PlayerId(0), "E", 2, 2);
         let f = make_creature(&mut state, PlayerId(0), "F", 2, 2);
-        crate::game::pairing::pair_objects(&mut state, e, f);
+        crate::game::pairing::pair_objects(&mut state, e, f, PlayerId(0));
         state
             .objects
             .get_mut(&f)
@@ -5147,6 +5224,22 @@ pub mod tests {
         crate::game::pairing::cleanup_invalid_pairs(&mut state);
         assert_eq!(state.objects[&e].paired_with, None);
         assert_eq!(state.objects[&f].paired_with, None);
+
+        // CR 702.95e: a single effect gains control of BOTH halves of the pair.
+        // The two creatures still share a controller, so the old
+        // `obj.controller == partner.controller` check kept the pair alive; per
+        // the rules the pair must break because another player gained control.
+        let g = make_creature(&mut state, PlayerId(0), "G", 2, 2);
+        let h = make_creature(&mut state, PlayerId(0), "H", 2, 2);
+        crate::game::pairing::pair_objects(&mut state, g, h, PlayerId(0));
+        state.objects.get_mut(&g).unwrap().controller = PlayerId(1);
+        state.objects.get_mut(&h).unwrap().controller = PlayerId(1);
+        crate::game::pairing::cleanup_invalid_pairs(&mut state);
+        assert_eq!(
+            state.objects[&g].paired_with, None,
+            "both halves stolen by one player must unpair (CR 702.95e)"
+        );
+        assert_eq!(state.objects[&h].paired_with, None);
 
         let low = make_creature(&mut state, PlayerId(0), "Low", 2, 2);
         let high = make_creature(&mut state, PlayerId(0), "High", 2, 2);
@@ -6553,6 +6646,77 @@ pub mod tests {
             ability.scoped_player,
             Some(PlayerId(1)),
             "Phase trigger must bind scoped_player to the active player so 'that player draws' resolves correctly on opponent's turn"
+        );
+    }
+
+    /// Issue #1304 — RUNTIME: Keeper of the Accord's intervening-if must compare
+    /// the active player's creatures to the source controller's at opponent end
+    /// step, not fail closed because the condition was never hoisted/parsed.
+    #[test]
+    fn keeper_of_the_accord_creature_intervening_if_true_when_opponent_ahead() {
+        let def = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player controls more creatures than you, create a 1/1 white Soldier creature token.",
+            "Keeper of the Accord",
+        );
+        let condition = def
+            .condition
+            .expect("creature trigger must hoist intervening-if to def.condition");
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        state.active_player = opponent;
+
+        let keeper = make_creature(&mut state, controller, "Keeper of the Accord", 3, 4);
+        let _opp_creature_a = make_creature(&mut state, opponent, "Opp A", 1, 1);
+        let _opp_creature_b = make_creature(&mut state, opponent, "Opp B", 1, 1);
+        let _opp_creature_c = make_creature(&mut state, opponent, "Opp C", 1, 1);
+
+        let phase_event = GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::End,
+        };
+        assert!(
+            check_trigger_condition(
+                &state,
+                &condition,
+                controller,
+                Some(keeper),
+                Some(&phase_event),
+            ),
+            "opponent with three creatures vs controller with one (keeper) must satisfy intervening-if",
+        );
+    }
+
+    #[test]
+    fn keeper_of_the_accord_creature_intervening_if_false_when_tied() {
+        let def = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player controls more creatures than you, create a 1/1 white Soldier creature token.",
+            "Keeper of the Accord",
+        );
+        let condition = def.condition.unwrap();
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        state.active_player = opponent;
+
+        let keeper = make_creature(&mut state, controller, "Keeper of the Accord", 3, 4);
+        let _self_b = make_creature(&mut state, controller, "Self B", 1, 1);
+        let _opp_a = make_creature(&mut state, opponent, "Opp A", 1, 1);
+        let _opp_b = make_creature(&mut state, opponent, "Opp B", 1, 1);
+
+        let phase_event = GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::End,
+        };
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &condition,
+                controller,
+                Some(keeper),
+                Some(&phase_event),
+            ),
+            "two creatures each must not satisfy 'more creatures than you'",
         );
     }
 
@@ -13240,6 +13404,353 @@ pub mod tests {
         );
     }
 
+    /// RUNTIME REGRESSION — issue #886 (Raph & Mikey, Troublemakers).
+    /// CR 508.4: "Put that card onto the battlefield tapped and attacking."
+    /// Drives the real `Attacks` trigger end-to-end and asserts the revealed
+    /// creature joins combat as an attacker and deals its combat damage. Also
+    /// covers the class member Fireflux Squad (same RevealUntil → attacking).
+    #[test]
+    fn raph_mikey_revealed_creature_enters_attacking_and_deals_damage() {
+        use crate::game::combat::AttackTarget;
+
+        let mut state = setup();
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.players[0].life = 20;
+        state.players[1].life = 20;
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![],
+            valid_attack_targets: vec![],
+        };
+
+        // Raph & Mikey on P0's battlefield, carrying its real Attacks trigger.
+        let raph = make_creature(&mut state, PlayerId(0), "Raph & Mikey, Troublemakers", 7, 7);
+        {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                "Trample, haste\nWhenever Raph & Mikey attack, reveal cards from the \
+                 top of your library until you reveal a creature card. Put that card \
+                 onto the battlefield tapped and attacking and the rest on the bottom \
+                 of your library in a random order.",
+                "Raph & Mikey, Troublemakers",
+                &[],
+                &[String::from("Creature")],
+                &[],
+            );
+            let obj = state.objects.get_mut(&raph).unwrap();
+            obj.entered_battlefield_turn = Some(1);
+            for trig in &parsed.triggers {
+                obj.trigger_definitions.push(trig.clone());
+            }
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).extend(parsed.triggers);
+        }
+
+        // Top of P0's library: a 6/6 creature (the reveal-until hit).
+        let revealed = create_object(
+            &mut state,
+            CardId(8001),
+            PlayerId(0),
+            "Colossal Dreadmaw".to_string(),
+            Zone::Library,
+        );
+        {
+            let o = state.objects.get_mut(&revealed).unwrap();
+            o.card_types.core_types.push(CoreType::Creature);
+            o.base_card_types = o.card_types.clone();
+            o.power = Some(6);
+            o.toughness = Some(6);
+            o.base_power = Some(6);
+            o.base_toughness = Some(6);
+        }
+        // Library filler so neither player decks out.
+        for player in [PlayerId(0), PlayerId(1)] {
+            for i in 0..10u64 {
+                create_object(
+                    &mut state,
+                    CardId(8100 + u64::from(player.0) * 100 + i),
+                    player,
+                    format!("Filler {}-{i}", player.0),
+                    Zone::Library,
+                );
+            }
+        }
+
+        // Declare Raph & Mikey attacking P1.
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DeclareAttackers {
+                attacks: vec![(raph, AttackTarget::Player(PlayerId(1)))],
+            },
+        )
+        .expect("declare attackers");
+
+        // Resolve the attack trigger by passing priority.
+        let mut safety = 40;
+        while !state.stack.is_empty() && safety > 0 {
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                .expect("pass priority to resolve Raph & Mikey trigger");
+            safety -= 1;
+        }
+
+        // FIX: the revealed creature is now an attacker (CR 508.4), tapped.
+        let combat = state.combat.as_ref().expect("combat in progress");
+        assert!(
+            combat.attackers.iter().any(|a| a.object_id == raph),
+            "Raph & Mikey itself attacks"
+        );
+        assert!(
+            combat.attackers.iter().any(|a| a.object_id == revealed),
+            "issue #886 FIX: the revealed creature must enter attacking"
+        );
+        assert!(
+            state.objects[&revealed].tapped,
+            "revealed creature is tapped"
+        );
+
+        // Drive combat to damage: P1 should lose 7 (Raph) + 6 (Dreadmaw) = 13.
+        let mut guard = 0;
+        while state.phase != Phase::PostCombatMain && guard < 60 {
+            guard += 1;
+            if !state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                    .expect("resolve stack");
+                continue;
+            }
+            match &state.waiting_for {
+                WaitingFor::Priority { .. } => {
+                    crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                        .expect("pass priority through combat");
+                }
+                WaitingFor::DeclareBlockers { .. } => {
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        },
+                    )
+                    .expect("declare no blockers");
+                }
+                _ => break,
+            }
+        }
+        assert_eq!(
+            state.players[1].life, 7,
+            "issue #886 FIX: P1 takes 7 (Raph) + 6 (revealed Dreadmaw) = 13 combat damage"
+        );
+    }
+
+    /// RUNTIME REGRESSION — multiple suspended cards (Jhoira of the Ghitu).
+    /// CR 603.3b + CR 702.62a: When 2+ cards are suspended (each granted Suspend
+    /// while in exile), the controller's upkeep fires one "remove a time counter"
+    /// trigger per card. Two-or-more simultaneous same-controller triggers require
+    /// the controller to ORDER them (CR 603.3b) before any player gets priority.
+    ///
+    /// This drives the scenario through the real `apply` pipeline (turn-roll →
+    /// `auto_advance` → upkeep). The bug: the Upkeep arm of `auto_advance` called
+    /// `process_phase_triggers` (which set `waiting_for = OrderTriggers` and
+    /// populated `pending_trigger_order`) and then unconditionally returned
+    /// `WaitingFor::Priority`. `apply` wrote that returned `Priority` back over
+    /// `state.waiting_for`, discarding the prompt and stranding all queued triggers
+    /// in `pending_trigger_order` forever — so NONE of the cards (including the
+    /// first) ticked. A single suspended card took the `NoChoiceNeeded` path (no
+    /// prompt to clobber), which is exactly why one card worked but several didn't.
+    ///
+    /// Discriminator: without the fix, the upkeep is reached with
+    /// `waiting_for == Priority`, the `OrderTriggers` submission below fails, both
+    /// counters stay at 3, and `pending_trigger_order` is left orphaned.
+    #[test]
+    fn multiple_suspended_cards_all_tick_on_upkeep() {
+        use crate::types::counter::CounterType;
+
+        let mut state = setup();
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![],
+            valid_attack_targets: vec![],
+        };
+
+        // CR 104.3c: stock both libraries so neither player decks out while the
+        // turn loop drives real turn progression to P0's next upkeep.
+        for player in [PlayerId(0), PlayerId(1)] {
+            for i in 0..12u64 {
+                create_object(
+                    &mut state,
+                    CardId(8100 + u64::from(player.0) * 100 + i),
+                    player,
+                    format!("Filler {}-{i}", player.0),
+                    Zone::Library,
+                );
+            }
+        }
+
+        // Jhoira of the Ghitu — the grant source on the battlefield. Each exiled
+        // card is granted Suspend via a permanent continuous effect affecting it
+        // specifically (mirrors the real `AddKeyword{Suspend}` transient effect
+        // Jhoira's activated ability installs per CR 604.1 + CR 702.62a).
+        let jhoira = make_creature(&mut state, PlayerId(0), "Jhoira of the Ghitu", 1, 3);
+
+        // Two suspended cards in exile, each with 3 time counters and empty
+        // base_keywords (so the off-zone synthesis path treats Suspend as
+        // *granted* and installs the companion upkeep triggers).
+        let mut suspended = Vec::new();
+        for (i, name) in ["Nezahal, Primal Tide", "Omniscience"].iter().enumerate() {
+            let card = create_object(
+                &mut state,
+                CardId(8200 + i as u64),
+                PlayerId(0),
+                (*name).to_string(),
+                Zone::Exile,
+            );
+            state
+                .objects
+                .get_mut(&card)
+                .unwrap()
+                .counters
+                .insert(CounterType::Time, 3);
+            // Grant Suspend to this specific exiled card via a permanent
+            // continuous effect sourced from Jhoira — exactly the
+            // `AddKeyword{Suspend}` transient effect Jhoira's activated ability
+            // installs in real play (CR 604.1 + CR 702.62a).
+            state.transient_continuous_effects.push_back(
+                crate::types::game_state::TransientContinuousEffect {
+                    id: 100 + i as u64,
+                    source_id: jhoira,
+                    controller: PlayerId(0),
+                    timestamp: 1 + i as u64,
+                    duration: Duration::Permanent,
+                    affected: TargetFilter::SpecificObject { id: card },
+                    modifications: vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Suspend {
+                            count: 0,
+                            cost: ManaCost::Cost {
+                                generic: 0,
+                                shards: vec![],
+                            },
+                        },
+                    }],
+                    condition: None,
+                    source_name: "Jhoira of the Ghitu".to_string(),
+                },
+            );
+            suspended.push(card);
+        }
+        state.layers_dirty = true;
+
+        // Sanity: both cards must carry granted Suspend off-zone before we drive
+        // the turn — otherwise the upkeep triggers never synthesize.
+        for &card in &suspended {
+            assert!(
+                crate::game::off_zone_characteristics::effective_off_zone_keywords(&state, card)
+                    .iter()
+                    .any(|k| k.kind() == KeywordKind::Suspend),
+                "exiled card {card:?} must have granted Suspend before the upkeep"
+            );
+        }
+
+        // Drive real turn progression (through `apply`, the clobber site) to
+        // PlayerId(0)'s NEXT upkeep.
+        let start_turn = state.turn_number;
+        let mut guard = 0;
+        loop {
+            guard += 1;
+            assert!(guard < 300, "turn progression stalled before P0's upkeep");
+            if state.phase == Phase::Upkeep
+                && state.active_player == PlayerId(0)
+                && state.turn_number > start_turn
+            {
+                break;
+            }
+            if !state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                    .expect("priority pass to resolve stack");
+                continue;
+            }
+            match &state.waiting_for {
+                WaitingFor::Priority { .. } => {
+                    crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                        .expect("priority pass to advance the turn");
+                }
+                WaitingFor::DeclareAttackers { .. } => {
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::DeclareAttackers { attacks: vec![] },
+                    )
+                    .expect("declare no attackers");
+                }
+                WaitingFor::DeclareBlockers { .. } => {
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        },
+                    )
+                    .expect("declare no blockers");
+                }
+                other => panic!("unexpected waiting state during turn progression: {other:?}"),
+            }
+        }
+
+        // CR 603.3b: at P0's upkeep the engine MUST surface the ordering prompt
+        // for the two suspend triggers — not a bare Priority. This is the
+        // assertion that fails without the `auto_advance` fix.
+        match &state.waiting_for {
+            WaitingFor::OrderTriggers { player, triggers } => {
+                assert_eq!(*player, PlayerId(0), "controller orders own triggers");
+                assert_eq!(
+                    triggers.len(),
+                    2,
+                    "both suspend upkeep triggers must be in the ordering prompt"
+                );
+            }
+            other => panic!(
+                "expected OrderTriggers prompt for the two suspend triggers, got {other:?} \
+                 (pending_trigger_order = {:?})",
+                state.pending_trigger_order.is_some()
+            ),
+        }
+
+        // Submit an order, then drain the two triggers off the stack.
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::OrderTriggers { order: vec![0, 1] },
+        )
+        .expect("submit suspend trigger order");
+        let mut guard = 0;
+        while !state.stack.is_empty() {
+            guard += 1;
+            assert!(guard < 20, "suspend upkeep-trigger stack failed to drain");
+            crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                .expect("resolve a suspend upkeep trigger");
+        }
+
+        // CR 702.62a: BOTH cards must have ticked 3 → 2, and the ordering queue
+        // must be fully consumed (no orphan).
+        for &card in &suspended {
+            assert_eq!(
+                state.objects[&card]
+                    .counters
+                    .get(&CounterType::Time)
+                    .copied()
+                    .unwrap_or(0),
+                2,
+                "suspended card {card:?} must tick 3 → 2 on P0's upkeep"
+            );
+        }
+        assert!(
+            state.pending_trigger_order.is_none(),
+            "pending_trigger_order must be cleared after the ordered triggers resolve"
+        );
+    }
+
     /// RUNTIME TEST — issue #411. Drives Syr Konrad's `{1}{B}: Each player mills
     /// a card.` activated ability through the real `apply` pipeline four times.
     /// Both libraries are stacked deterministically: the controller's library
@@ -14466,6 +14977,488 @@ pub mod tests {
             state.players[0].life, 21,
             "the Blood Artist-class dies-observer must resolve from the \
              deferred-trigger flush (issue #423)"
+        );
+    }
+
+    /// A "whenever a creature dies" observer (Blood Artist class) for tests.
+    fn add_dies_observer(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let observer = make_creature(state, owner, "Blood Artist Stand-In", 0, 1);
+        let observer_trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .origin(Zone::Battlefield)
+            .destination(Zone::Graveyard)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::default().with_type(TypeFilter::Creature),
+            ))
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: GainLifePlayer::Controller,
+                },
+            ));
+        let obj = state.objects.get_mut(&observer).unwrap();
+        obj.trigger_definitions.push(observer_trigger.clone());
+        std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(observer_trigger);
+        observer
+    }
+
+    /// CR 603.10a: a dies-observer (Blood Artist) that dies in the SAME
+    /// simultaneous event as other creatures triggers once per creature that
+    /// died, including itself. This drives the real producer authority — a
+    /// single state-based-action check destroying every creature with lethal
+    /// damage at once (CR 704.7) — which stamps the simultaneity group onto each
+    /// `ZoneChangeRecord.co_departed`. Before the fix the observer fired only for
+    /// its own departure and missed the co-dying creatures.
+    #[test]
+    fn dies_observer_killed_in_same_sba_batch_fires_for_each_simultaneous_death() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let observer = add_dies_observer(&mut state, PlayerId(0));
+        let bear_a = make_creature(&mut state, PlayerId(0), "Bear A", 2, 2);
+        let bear_b = make_creature(&mut state, PlayerId(1), "Bear B", 2, 2);
+
+        // Lethal damage marked on all three (as a board sweeper like Pyroclasm
+        // would) so one SBA check destroys them simultaneously.
+        state.objects.get_mut(&observer).unwrap().damage_marked = 1;
+        state.objects.get_mut(&bear_a).unwrap().damage_marked = 2;
+        state.objects.get_mut(&bear_b).unwrap().damage_marked = 2;
+
+        let mut events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+
+        let pending = collect_pending_triggers(&mut state, &events);
+        let observer_fires = pending
+            .iter()
+            .filter(|p| p.pending.source_id == observer)
+            .count();
+        assert_eq!(
+            observer_fires, 3,
+            "dies-observer must fire once per creature that died simultaneously \
+             (itself + 2 others)"
+        );
+    }
+
+    /// CR 603.10a regression guard (PR #1449 review): a dies-observer that leaves
+    /// the battlefield in one instruction must NOT observe a creature that leaves
+    /// in a SEPARATE, sequential instruction of the same resolution. Simultaneity
+    /// is established by the producer (`co_departed`), not by two ZoneChanged
+    /// events happening to share the accumulated event vector — so without a
+    /// producer grouping them, the observer fires only for its own death.
+    #[test]
+    fn dies_observer_does_not_observe_sequential_departure() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let observer = add_dies_observer(&mut state, PlayerId(0));
+        let later = make_creature(&mut state, PlayerId(0), "Later Bear", 2, 2);
+
+        // Two separate, sequential departures (e.g. "sacrifice ~, then destroy
+        // target creature"): no producer marks them simultaneous, so co_departed
+        // stays empty on both events.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, observer, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, later, Zone::Graveyard, &mut events);
+
+        let pending = collect_pending_triggers(&mut state, &events);
+        let observer_fires = pending
+            .iter()
+            .filter(|p| p.pending.source_id == observer)
+            .count();
+        assert_eq!(
+            observer_fires, 1,
+            "observer that left earlier must NOT observe a later, non-simultaneous \
+             departure — only its own death fires"
+        );
+    }
+
+    /// CR 603.10a: a generic "whenever a permanent you control leaves the
+    /// battlefield" observer (Blood Artist / Elas il-Kor class). Matches a
+    /// battlefield departure to ANY destination (no destination filter), so the
+    /// same observer covers bounce (to hand), exile, and graveyard alike.
+    fn add_ltb_observer(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let observer = make_creature(state, owner, "LTB Observer Stand-In", 0, 1);
+        let observer_trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .origin(Zone::Battlefield)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::default().with_type(TypeFilter::Creature),
+            ))
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: GainLifePlayer::Controller,
+                },
+            ));
+        let obj = state.objects.get_mut(&observer).unwrap();
+        obj.trigger_definitions.push(observer_trigger.clone());
+        std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(observer_trigger);
+        observer
+    }
+
+    /// Count how many times `observer`'s trigger fired against `events`.
+    fn observer_fire_count(
+        state: &mut GameState,
+        events: &[GameEvent],
+        observer: ObjectId,
+    ) -> usize {
+        collect_pending_triggers(state, events)
+            .iter()
+            .filter(|p| p.pending.source_id == observer)
+            .count()
+    }
+
+    /// CR 603.10a (STEP 1): `bounce::resolve_all` with no count clause. A
+    /// leaves-the-battlefield observer among the bounced group observes every
+    /// co-bounced creature (itself + the others). FAILS without the STEP 1 stamp.
+    #[test]
+    fn ltb_observer_fires_for_each_co_bounced_creature() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let observer = add_ltb_observer(&mut state, PlayerId(0));
+        let _b1 = make_creature(&mut state, PlayerId(0), "Bear 1", 2, 2);
+        let _b2 = make_creature(&mut state, PlayerId(1), "Bear 2", 2, 2);
+
+        let ability = ResolvedAbility::new(
+            Effect::BounceAll {
+                target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
+                destination: Some(Zone::Hand),
+                count: None,
+            },
+            Vec::new(),
+            ObjectId(9001),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::bounce::resolve_all(&mut state, &ability, &mut events)
+            .expect("mass bounce resolves");
+
+        assert_eq!(
+            observer_fire_count(&mut state, &events, observer),
+            3,
+            "LTB observer must fire once per co-bounced creature (itself + 2 others)"
+        );
+    }
+
+    /// CR 603.10a (STEP 2): `change_zone::resolve_all` exiling all creatures.
+    /// The LTB observer among the exiled group observes every co-exiled creature.
+    /// FAILS without the STEP 2 stamp.
+    #[test]
+    fn ltb_observer_fires_for_each_co_exiled_creature() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let observer = add_ltb_observer(&mut state, PlayerId(0));
+        let _b1 = make_creature(&mut state, PlayerId(0), "Bear 1", 2, 2);
+        let _b2 = make_creature(&mut state, PlayerId(1), "Bear 2", 2, 2);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
+                enter_tapped: false,
+            },
+            Vec::new(),
+            ObjectId(9002),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::change_zone::resolve_all(&mut state, &ability, &mut events)
+            .expect("mass exile resolves");
+
+        assert_eq!(
+            observer_fire_count(&mut state, &events, observer),
+            3,
+            "LTB observer must fire once per co-exiled creature (itself + 2 others)"
+        );
+    }
+
+    /// CR 603.10a + CR 701.19a/b (STEP 3): `destroy::resolve_all` (DestroyAll)
+    /// with a regeneration shield on one non-observer creature. The shielded
+    /// creature stays on the battlefield, so the observer fires N-1 times (once
+    /// per creature that actually died, including itself) and the regenerated
+    /// creature is excluded from `co_departed`. FAILS without the
+    /// `departed_subset` precision filter at the STEP 3 stamp.
+    #[test]
+    fn ltb_observer_skips_regenerated_creature_in_destroy_all() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let observer = add_ltb_observer(&mut state, PlayerId(0));
+        let _doomed = make_creature(&mut state, PlayerId(1), "Doomed Bear", 2, 2);
+
+        // A creature with a regeneration shield survives the board wipe.
+        let regen = make_creature(&mut state, PlayerId(0), "Regen Bear", 2, 2);
+        {
+            let shield = crate::types::ability::ReplacementDefinition::new(
+                crate::types::replacements::ReplacementEvent::Destroy,
+            )
+            .valid_card(TargetFilter::SelfRef)
+            .description("Regenerate".to_string())
+            .regeneration_shield();
+            state
+                .objects
+                .get_mut(&regen)
+                .unwrap()
+                .replacement_definitions
+                .push(shield);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::DestroyAll {
+                target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
+                cant_regenerate: false,
+            },
+            Vec::new(),
+            ObjectId(9003),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::destroy::resolve_all(&mut state, &ability, &mut events)
+            .expect("destroy all resolves");
+
+        // observer + doomed died (2); regen stayed on the battlefield.
+        assert_eq!(
+            observer_fire_count(&mut state, &events, observer),
+            2,
+            "LTB observer fires once per creature that actually died — the \
+             regenerated creature is excluded from co_departed"
+        );
+        assert_eq!(
+            state.objects.get(&regen).unwrap().zone,
+            Zone::Battlefield,
+            "regenerated creature must remain on the battlefield"
+        );
+        // The regenerated creature's own departure event must not exist, so its
+        // own LTB-style observation cannot fire (it never left).
+        let regen_departed = events.iter().any(|e| {
+            matches!(
+                e,
+                GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), .. }
+                    if *object_id == regen
+            )
+        });
+        assert!(
+            !regen_departed,
+            "regenerated creature must not have a battlefield-departure event"
+        );
+        // And it must not appear in any survivor's co_departed group.
+        let regen_in_codeparted = events.iter().any(|e| {
+            matches!(
+                e,
+                GameEvent::ZoneChanged { record, .. } if record.co_departed.contains(&regen)
+            )
+        });
+        assert!(
+            !regen_in_codeparted,
+            "regenerated creature must not appear in any co_departed group"
+        );
+    }
+
+    /// CR 701.21a + CR 603.10a (STEP 4): mandatory "each player sacrifices all
+    /// creatures" fast path. The LTB observer among the sacrificed group observes
+    /// every co-sacrificed creature; a CantBeSacrificed creature is excluded.
+    /// FAILS without the STEP 4 stamp.
+    #[test]
+    fn ltb_observer_fires_for_each_co_sacrificed_creature() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let observer = add_ltb_observer(&mut state, PlayerId(0));
+        // The mandatory-all sacrifice fast path scopes the eligible pool to the
+        // controller's own creatures (no controller-ref filter => "you sacrifice"
+        // default per CR 701.21a), so keep all members under PlayerId(0).
+        let _b1 = make_creature(&mut state, PlayerId(0), "Bear 1", 2, 2);
+        let _b2 = make_creature(&mut state, PlayerId(0), "Bear 2", 2, 2);
+
+        // A CantBeSacrificed creature must be excluded from the sacrificed group.
+        // `.affected(SelfRef)` scopes the prohibition to this object only (an
+        // unscoped `affected: None` would make it global and block all sacrifices).
+        let protected = make_creature(&mut state, PlayerId(0), "Sigarda Stand-In", 2, 2);
+        {
+            let def = crate::types::ability::StaticDefinition::new(
+                crate::types::statics::StaticMode::Other("CantBeSacrificed".to_string()),
+            )
+            .affected(TargetFilter::SelfRef);
+            state
+                .objects
+                .get_mut(&protected)
+                .unwrap()
+                .static_definitions
+                .push(def);
+        }
+
+        // "Each player sacrifices all creatures": count huge so the mandatory-all
+        // fast path runs (eligible.len() <= count).
+        let ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
+                count: QuantityExpr::Fixed { value: 99 },
+                min_count: 0,
+            },
+            Vec::new(),
+            ObjectId(9004),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::sacrifice::resolve(&mut state, &ability, &mut events)
+            .expect("mandatory-all sacrifice resolves");
+
+        // observer + 2 bears sacrificed (3); the protected creature is excluded.
+        assert_eq!(
+            observer_fire_count(&mut state, &events, observer),
+            3,
+            "LTB observer fires once per co-sacrificed creature (itself + 2 others)"
+        );
+        assert_eq!(
+            state.objects.get(&protected).unwrap().zone,
+            Zone::Battlefield,
+            "CantBeSacrificed creature must not be sacrificed"
+        );
+    }
+
+    /// CR 603.10a (STEP 4a): a Blood Artist-class LTB observer among a chosen
+    /// `EffectZoneChoice` sacrifice group observes every co-sacrificed creature.
+    /// Driven through `apply(SelectCards)` (the real resolution-choice handler)
+    /// so the observer's GainLife trigger reaches the stack and resolves; the
+    /// observed count is read from the controller's life total. FAILS without the
+    /// STEP 4a sub-slice stamp.
+    #[test]
+    fn ltb_observer_fires_per_co_sacrificed_in_effect_zone_choice() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.players[0].life = 20;
+
+        let source = make_artifact_source(&mut state, PlayerId(0), "Sacrifice Source");
+        let observer = add_ltb_observer(&mut state, PlayerId(0));
+        let b1 = make_creature(&mut state, PlayerId(0), "Bear 1", 2, 2);
+        let b2 = make_creature(&mut state, PlayerId(0), "Bear 2", 2, 2);
+
+        // Sacrifice exactly these three (count == pool) via the interactive
+        // selection handler.
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![observer, b1, b2],
+            count: 3,
+            min_count: 3,
+            up_to: false,
+            source_id: source,
+            effect_kind: crate::types::ability::EffectKind::Sacrifice,
+            zone: Zone::Battlefield,
+            destination: None,
+            enter_tapped: false,
+            enter_transformed: false,
+            enters_under_player: None,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            count_param: 0,
+        };
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![observer, b1, b2],
+            },
+        )
+        .expect("select all three to sacrifice");
+        // The three co-departed observer triggers (same controller) require an
+        // explicit ordering; drain the prompt with identity order, then resolve.
+        drain_order_triggers_with_identity(&mut state);
+        resolve_stack_until_paused(&mut state);
+
+        // The LTB observer gains 1 life once per co-sacrificed creature
+        // (itself + 2 others = 3).
+        assert_eq!(
+            state.players[0].life, 23,
+            "LTB observer must fire once per co-sacrificed creature in the \
+             EffectZoneChoice handler (20 + 3 = 23)"
+        );
+    }
+
+    /// CR 603.10a (STEP 6): a Blood Artist-class LTB observer among the
+    /// keep-one-sacrifice-rest group (Cataclysm / Tragic Arrogance) observes
+    /// every co-sacrificed permanent. Driven through
+    /// `apply(SelectCategoryPermanents)` keeping a non-observer, so the observer
+    /// (and the other unkept creature) are sacrificed together. FAILS without the
+    /// STEP 6a handler-slice stamp.
+    #[test]
+    fn ltb_observer_fires_per_co_sacrificed_in_choose_and_sacrifice_rest() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.players[0].life = 20;
+
+        let source = make_artifact_source(&mut state, PlayerId(0), "Cataclysm Source");
+        let observer = add_ltb_observer(&mut state, PlayerId(0));
+        let keeper = make_creature(&mut state, PlayerId(0), "Keeper Bear", 2, 2);
+        let other = make_creature(&mut state, PlayerId(0), "Other Bear", 2, 2);
+
+        // Single Creature category; eligible pool has all three. Keeping `keeper`
+        // sacrifices observer + other together as one event.
+        state.waiting_for = WaitingFor::CategoryChoice {
+            player: PlayerId(0),
+            target_player: PlayerId(0),
+            categories: vec![CoreType::Creature],
+            eligible_per_category: vec![vec![observer, keeper, other]],
+            source_id: source,
+            remaining_players: vec![],
+            all_kept: vec![],
+            scoped_players: vec![PlayerId(0)],
+        };
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCategoryPermanents {
+                choices: vec![Some(keeper)],
+            },
+        )
+        .expect("keep the keeper, sacrifice the rest");
+        // observer + other co-depart => two same-controller triggers need ordering.
+        drain_order_triggers_with_identity(&mut state);
+        resolve_stack_until_paused(&mut state);
+
+        // observer + other are co-sacrificed; the observer fires once per
+        // co-departed permanent (itself + other = 2), so 20 + 2 = 22.
+        assert_eq!(
+            state.players[0].life, 22,
+            "LTB observer must fire once per co-sacrificed permanent in \
+             ChooseAndSacrificeRest (20 + 2 = 22)"
+        );
+        assert_eq!(
+            state.objects.get(&keeper).unwrap().zone,
+            Zone::Battlefield,
+            "the kept creature must remain on the battlefield"
+        );
+    }
+
+    /// CR 603.10a (STEP 4b DEFERRED residual): the no-field resume-boundary
+    /// contingency. When an `EffectZoneChoice` ChangeZone batch pauses mid-batch
+    /// on a per-permanent replacement choice, the pre-pause-moved members and the
+    /// post-pause-moved members cannot be grouped into a single co-departed set
+    /// without a `co_departed_group` carrier field on `PendingChangeZoneIteration`.
+    /// Each pause segment is stamped independently (so an observer co-departing
+    /// WITHIN one segment is covered), but an observer that left in the pre-pause
+    /// segment will NOT observe a member that left in the post-pause segment.
+    /// Closing this requires the carrier field, which this change intentionally
+    /// does NOT add (NO new GameState/serde field). See plan STEP 4b.
+    #[test]
+    #[ignore = "DEFERRED (no-field): cross-pause co-departed observation needs a \
+                co_departed_group carrier field on PendingChangeZoneIteration — see plan STEP 4b"]
+    fn ltb_observer_cross_pause_co_departed_deferred() {
+        // Documents the desired behavior: an LTB observer moved in the pre-pause
+        // segment of a paused mass ChangeZone should observe a member moved in the
+        // post-pause segment. Without a carrier field across the
+        // PendingChangeZoneIteration boundary this is not achievable, so the
+        // expectation is recorded here as the deferred residual.
+        let pre_pause_observer_should_see_post_pause_member = true;
+        assert!(
+            pre_pause_observer_should_see_post_pause_member,
+            "DEFERRED: cross-pause co-departed observation requires a carrier field"
         );
     }
 

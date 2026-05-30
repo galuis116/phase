@@ -644,6 +644,15 @@
       "keepTapped": "Keep tapped",
       "keepTappedDescription": "{{name}} stays tapped this untap step."
     },
+    "exert": {
+      "creatureFallback": "Creature",
+      "title": "Exert {{name}}?",
+      "subtitle": "Choose whether to exert this attacker. An exerted creature won't untap during your next untap step.",
+      "exert": "Exert",
+      "exertDescription": "{{name}} won't untap next turn, triggering its exert ability.",
+      "decline": "Don't exert",
+      "declineDescription": "{{name}} attacks normally and untaps as usual."
+    },
     "cost": {
       "discardCard": "discard a card",
       "life": "{{amount}} life",
@@ -1096,6 +1105,10 @@
     "bestowNormalLabel": "Cast as Creature",
     "bestowAltLabel": "Cast with Bestow",
     "bestowSubtitle": "Cast {{name}} normally as a creature, or pay its Bestow cost to cast it as an Aura.",
+    "cleaveEyebrow": "Cleave",
+    "cleaveNormalLabel": "Cast Normally",
+    "cleaveAltLabel": "Cast with Cleave",
+    "cleaveSubtitle": "Cast {{name}} normally, or pay its Cleave cost to remove the bracketed text.",
     "additionalExile": "+ Exile a card",
     "additionalSacrifice": "+ Sacrifice a permanent",
     "additionalPayLife": "+ Pay life",

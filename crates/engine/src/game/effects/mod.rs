@@ -449,6 +449,14 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             duration,
             track_exiled_by_source,
         };
+        // CR 603.10a: scope this drain pass's battlefield-exit events so the
+        // members moved in THIS resume can be stamped as a co-departed group and
+        // their observer triggers collected. NOTE (no-field DEFERRED residual):
+        // members moved in a PRIOR pause segment (before this resume) cannot be
+        // grouped with these without a co_departed_group carrier field on
+        // PendingChangeZoneIteration — the cross-pause observation gap is
+        // documented by an ignored test. See plan STEP 4b.
+        let events_before_drain = events.len();
         let mut paused = false;
         for (i, obj_id) in remaining.iter().enumerate() {
             match crate::game::effects::change_zone::process_one_zone_move(
@@ -480,14 +488,50 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             }
         }
         if paused {
+            // CR 603.10a: paused again on a further replacement choice. Stamp the
+            // members this pass moved so any co-departing observer among them
+            // observes the rest, then B2-park their observer triggers: `waiting_for`
+            // is now a replacement choice (not Priority), so `run_post_action_pipeline`
+            // will not scan these events — deferring keeps issue #423 dies-triggers
+            // from being lost across the pause.
+            crate::game::zones::stamp_simultaneous_from_slice(
+                state,
+                &mut events[events_before_drain..],
+            );
+            let trigger_events: Vec<GameEvent> = events[events_before_drain..]
+                .iter()
+                .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                .cloned()
+                .collect();
+            crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
             break;
         }
-        // Loop completed — emit the trailing EffectResolved event that the
-        // non-pause path emits at the tail of `change_zone::resolve`.
+        // Loop completed — stamp the members this pass moved (CR 603.10a) so a
+        // co-departing observer among the resumed group observes the rest, then
+        // emit the trailing EffectResolved event that the non-pause path emits at
+        // the tail of `change_zone::resolve`.
+        crate::game::zones::stamp_simultaneous_from_slice(
+            state,
+            &mut events[events_before_drain..],
+        );
         events.push(GameEvent::EffectResolved {
             kind: effect_kind,
             source_id: ctx.source_id,
         });
+        // CR 603.2 + CR 603.3b: the resume settled the iteration. When the move
+        // landed us back at Priority (no further replacement choice), B1-drain the
+        // deferred observer triggers parked during earlier pause segments plus the
+        // ones this resume produced; otherwise leave them parked for the next drain.
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            crate::game::triggers::drain_deferred_trigger_queue(state, events);
+        } else {
+            let trigger_events: Vec<GameEvent> = events[events_before_drain..]
+                .iter()
+                .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                .cloned()
+                .collect();
+            crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
+        }
     }
 }
 
@@ -2178,6 +2222,22 @@ pub(crate) fn resolve_player_for_context_ref(
             return player;
         }
     }
+    // CR 115.1d + CR 608.2c: Parent-target controller/owner anaphors bind to
+    // targets inherited from the parent instruction when present (Assassin's
+    // Trophy, Amphin Mutineer). This must precede `resolve_event_context_target`:
+    // that helper's `ParentTargetController` arm resolves the *trigger event*
+    // source's controller (the entering permanent), not the parent ability's
+    // chosen target (the exiled creature).
+    if matches!(target_filter, TargetFilter::ParentTargetController) {
+        if let Some(player) = crate::game::ability_utils::parent_target_controller(ability, state) {
+            return player;
+        }
+    }
+    if matches!(target_filter, TargetFilter::ParentTargetOwner) {
+        if let Some(player) = crate::game::ability_utils::parent_target_owner(ability, state) {
+            return player;
+        }
+    }
     if let Some(target_ref) = crate::game::targeting::resolve_event_context_target(
         state,
         target_filter,
@@ -2205,31 +2265,9 @@ pub(crate) fn resolve_player_for_context_ref(
     if matches!(target_filter, TargetFilter::OriginalController) {
         return ability.original_controller.unwrap_or(ability.controller);
     }
-    // CR 115.1d: `ParentTargetController` resolves the controller of the parent
-    // ability's targeted object. In a spell-resolution chain (no
-    // `current_trigger_event` set, so `resolve_event_context_target` returns
-    // None for this filter), the parent's chosen Object lives in
-    // `ability.targets` from chain target propagation — read it here. This is
-    // the Assassin's Trophy-shape pattern: "Destroy target permanent. Its
-    // controller may search their library …" — the sub-ability's filter is
-    // `ParentTargetController`, and we resolve to the destroyed permanent's
-    // controller. Note we deliberately read AFTER the trigger-event path so
-    // an actual triggered context (where the helper at `targeting.rs:265`
-    // succeeds) wins over chain inheritance.
-    if matches!(target_filter, TargetFilter::ParentTargetController) {
-        if let Some(player) = crate::game::ability_utils::parent_target_controller(ability, state) {
-            return player;
-        }
-    }
-    // CR 108.3 + CR 608.2c: `ParentTargetOwner` mirrors `ParentTargetController`
-    // for the owner-axis ("its owner" anaphor). Resolves through
-    // `parent_target_owner` (parent target's owner), then via the unified
-    // event-context resolver (which falls back to the source's AttachedTo
-    // host for Aura phase triggers like Enslave).
+    // CR 108.3 + CR 608.2c: `ParentTargetOwner` AttachedTo fallback when no
+    // inherited targets and no trigger-event referent (Enslave phase trigger).
     if matches!(target_filter, TargetFilter::ParentTargetOwner) {
-        if let Some(player) = crate::game::ability_utils::parent_target_owner(ability, state) {
-            return player;
-        }
         if let Some(player) =
             crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
         {
@@ -5780,6 +5818,57 @@ mod tests {
         assert_eq!(state.players[1].life, 18);
         // Controller drew a card
         assert_eq!(state.players[0].hand.len(), 1);
+    }
+
+    /// CR 115.1d: With inherited object targets, `ParentTargetController` must
+    /// not resolve to the trigger-event source's controller (issue #935).
+    #[test]
+    fn parent_target_controller_prefers_inherited_targets_over_trigger_source() {
+        let mut state = GameState::new_two_player(42);
+        let prey = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Prey".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Token {
+                name: "Salamander Warrior".to_string(),
+                power: PtValue::Fixed(4),
+                toughness: PtValue::Fixed(3),
+                types: vec!["Salamander".to_string(), "Warrior".to_string()],
+                colors: vec![ManaColor::Blue],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::ParentTargetController,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Object(prey)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let trigger_source = ObjectId(100);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: trigger_source,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                trigger_source,
+                Some(Zone::Hand),
+                Zone::Battlefield,
+            )),
+        });
+
+        assert_eq!(
+            resolve_player_for_context_ref(&state, &ability, &TargetFilter::ParentTargetController,),
+            PlayerId(1),
+        );
     }
 
     #[test]
