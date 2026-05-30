@@ -46,14 +46,15 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, CombatDamageScope, Comparator, ConjureCard, ContinuousModification,
-    ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition, DoubleTarget,
-    Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, IterationKindBinding,
-    ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost,
-    PlayerFilter, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue,
-    QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope,
-    RoundingMode, StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
+    ControlPresence, ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition,
+    DoubleTarget, Duration, Effect, FilterProp, GainLifePlayer, GameRestriction,
+    IterationKindBinding, ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty,
+    ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount, PreventionScope,
+    ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition,
+    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
+    StepSkipTarget, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    UntilCondition,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -5557,12 +5558,15 @@ enum EqualizeVerb {
 fn balance_clause_effect(verb: EqualizeVerb, filter: TargetFilter) -> Effect {
     match verb {
         // CR 701.21a: battlefield clause — "lands they control" / "creatures
-        // they control". `filter` carries `controller: You`, rebound to the
-        // iterating player by the `player_scope` driver.
+        // they control". `filter` carries `controller: You`. The sacrifice
+        // `target` and the RIGHT `ControlledByEachPlayer` Min keep `You`; the
+        // LEFT per-player count is re-scoped to `ScopedPlayer` so it reads the
+        // iterating player at the `resolve_ref` seam (CR 109.5) rather than the
+        // caster. See `balance_filter_scoped_player`.
         EqualizeVerb::Sacrifice => {
             let left = QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCount {
-                    filter: filter.clone(),
+                    filter: balance_filter_scoped_player(&filter),
                 },
             };
             let right = QuantityExpr::Ref {
@@ -5624,6 +5628,30 @@ fn balance_filter_you_control(filter: TargetFilter) -> TargetFilter {
             ..tf
         }),
         other => other,
+    }
+}
+
+/// CR 109.5 + CR 608.2c: Re-scope a Balance battlefield filter's controller to
+/// `ScopedPlayer` for the per-player LEFT count operand. "Lands/creatures they
+/// control" names the iterating player, but a quantity sub-expression is read
+/// against the *printed* controller at the `resolve_ref` seam (CR 109.5) — so a
+/// `controller: You` LEFT operand counts the caster's permanents, not the
+/// iterating player's. `ScopedPlayer` resolves via `scoped_player_or_controller`
+/// (reads `ability.scoped_player`, bound per-iteration by the `player_scope`
+/// driver) and is immune to that seam, mirroring the hand clause's already-
+/// correct `HandSize { ScopedPlayer }`. Only the LEFT operand is re-scoped: the
+/// sacrifice `target` keeps `You` (its scope follows `ability.controller`, which
+/// the driver rebinds per player) and the RIGHT `ControlledByEachPlayer` Min
+/// operand keeps `You` (it builds its own per-player context and gates on
+/// `obj.controller == p.id` — `ScopedPlayer` there would collapse to the
+/// iterating player and zero the minimum).
+fn balance_filter_scoped_player(filter: &TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(tf) => TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::ScopedPlayer),
+            ..tf.clone()
+        }),
+        other => other.clone(),
     }
 }
 
@@ -10736,6 +10764,66 @@ fn refine_damage_target_remainder(target: TargetFilter, remainder: &str) -> (Tar
     (target, remainder)
 }
 
+/// Split a post-"choose" clause into the card-description phrase and any trailing
+/// restriction suffix after `"from it"` (e.g. `"with mana value 2 or less"`).
+/// CR 702.148a: cleave brackets are removed at build time, so the suffix here is
+/// plain text — `combine_choose_filter_parts` merges it and relies on
+/// `parse_search_filter`'s self-bounding terminator to drop any trailing sentence.
+fn choose_filter_parts(text: &str) -> (&str, &str) {
+    if let Ok((_, (before, suffix))) = nom_primitives::split_once_on(text, " card from among those")
+    {
+        return (before.trim(), suffix.trim());
+    }
+    if let Ok((_, (before, suffix))) = nom_primitives::split_once_on(text, " card from among them")
+    {
+        return (before.trim(), suffix.trim());
+    }
+    if let Ok((_, (before, suffix))) = nom_primitives::split_once_on(text, " card from it") {
+        return (before.trim(), suffix.trim());
+    }
+    (text.trim(), "")
+}
+
+fn parse_choose_filter_leading_body(input: &str) -> &str {
+    type E<'a> = OracleError<'a>;
+    preceded(opt(alt((tag::<_, _, E>("a "), tag("an ")))), rest::<_, E>)
+        .parse(input.trim())
+        .map(|(_, body)| body.trim())
+        .unwrap_or(input.trim())
+}
+
+fn trailing_bare_article_only(input: &str) -> bool {
+    type E<'a> = OracleError<'a>;
+    opt(alt((
+        all_consuming(terminated(take_until::<_, _, E>(" an"), tag(" an"))),
+        all_consuming(terminated(take_until::<_, _, E>(" a"), tag(" a"))),
+    )))
+    .parse(input.trim())
+    .is_ok()
+}
+
+/// Merge the pre-`from it` card phrase with the plain trailing restriction
+/// suffix that follows `"card from it"` (e.g. `"with mana value 2 or less"`).
+///
+/// CR 702.148a: Cleave's bracketed text is removed at build time before this
+/// parse runs (the base parse sees the bracket *content* without the bracket
+/// characters; the cleave-cost parse sees it removed entirely). So the suffix
+/// here is plain text, not a bracketed span. The merged string is handed to
+/// `parse_search_filter`, whose `search_filter_region` self-bounds at the first
+/// `". "`/`"."`, so any trailing sentence (Dread Fugue's "That player discards
+/// that card.") is naturally dropped without bracket-specific extraction.
+fn combine_choose_filter_parts(filter_part: &str, suffix_part: &str) -> String {
+    let filter_part = parse_choose_filter_leading_body(filter_part);
+    let suffix = suffix_part.trim();
+    if suffix.is_empty() {
+        filter_part.to_string()
+    } else if filter_part.is_empty() {
+        suffix.to_string()
+    } else {
+        format!("{filter_part} {suffix}")
+    }
+}
+
 fn parse_choose_filter(lower: &str, ctx: &mut ParseContext) -> TargetFilter {
     // Extract type info between "choose" and "card from it"
     // Handle both "choose X" and "you choose X" forms
@@ -10756,17 +10844,22 @@ fn parse_choose_filter(lower: &str, ctx: &mut ParseContext) -> TargetFilter {
         return TargetFilter::ParentTarget;
     }
 
-    let before_card = after_choose.split("card").next().unwrap_or("");
-    let cleaned = before_card
-        .trim()
-        .trim_start_matches("a ")
-        .trim_start_matches("an ")
-        .trim();
+    let (filter_part, suffix_part) = choose_filter_parts(after_choose);
+    let combined = combine_choose_filter_parts(filter_part, suffix_part);
 
     // Intentional: bare article "a [card]" or empty string means any card — not a parse failure
-    if cleaned.is_empty() || cleaned == "a" {
+    if combined.is_empty() || combined == "a" {
         return TargetFilter::Any;
     }
+
+    // CR 202.3: Delegate full card restrictions (type + mana value bounds, etc.) to the
+    // shared search-filter parser — cleave bracket suffixes after "from it" are merged above.
+    let search_filter = parse_search_filter(&combined, ctx);
+    if !is_unrestricted_card_filter(&search_filter) {
+        return search_filter;
+    }
+
+    let cleaned = filter_part;
 
     // structural: not dispatch — segmenting pre-extracted type string on comma separator
     // Comma-separated negation: "noncreature, nonland" → intersection of negations
@@ -10926,6 +11019,60 @@ fn type_str_to_target_filter(s: &str) -> Option<TargetFilter> {
     None
 }
 
+/// True when a filter imposes no restriction beyond "any card" (including empty `Typed`).
+fn is_unrestricted_card_filter(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any => true,
+        TargetFilter::Typed(tf) => {
+            tf.type_filters.is_empty() && tf.properties.is_empty() && tf.controller.is_none()
+        }
+        _ => false,
+    }
+}
+
+fn parse_article_type_phrase_suffix<'a>(
+    input: &'a str,
+) -> nom::IResult<&'a str, &'a str, OracleError<'a>> {
+    alt((
+        preceded(tag::<_, _, OracleError<'_>>(" an "), rest),
+        preceded(tag(" a "), rest),
+    ))
+    .parse(input)
+}
+
+/// Type phrase after the last article in text that precedes `"card from"` (e.g. `"nonland"`,
+/// `"creature with mana value 3 or less"`, or empty for bare `"a card from it"`).
+fn type_phrase_before_card_from(before_card: &str) -> &str {
+    let trimmed = before_card.trim();
+
+    if trailing_bare_article_only(trimmed) {
+        return "";
+    }
+
+    let mut last = trimmed;
+    let mut cursor = 0;
+    while cursor < trimmed.len() {
+        let slice = &trimmed[cursor..];
+        if let Some((_rel_before, phrase, _rest)) =
+            nom_primitives::scan_preceded(slice, parse_article_type_phrase_suffix)
+        {
+            last = phrase.trim();
+            cursor += 1;
+        } else {
+            break;
+        }
+    }
+    last
+}
+
+fn choose_filter_search_text(phrase: &str) -> String {
+    if nom_primitives::scan_contains(phrase, "card") {
+        phrase.to_string()
+    } else {
+        format!("{phrase} card")
+    }
+}
+
 /// Extract card type filter from a sub-ability sentence containing "card from it/among".
 /// Handles forms like "exile a nonland card from it", "discard a creature card from it".
 fn parse_choose_filter_from_sentence(lower: &str, ctx: &mut ParseContext) -> TargetFilter {
@@ -10943,11 +11090,19 @@ fn parse_choose_filter_from_sentence(lower: &str, ctx: &mut ParseContext) -> Tar
             return TargetFilter::Any;
         }
     };
-    // The word immediately before "card from" is the type descriptor
-    let word = before_card.trim().rsplit(' ').next().unwrap_or("");
-    if word.is_empty() || matches!(word, "a" | "an") {
+    // Use the full type phrase before "card from" (e.g. "nonland", "creature with mana
+    // value 3 or less"), not only the last word.
+    let phrase = type_phrase_before_card_from(before_card);
+    if phrase.is_empty() || phrase == "a" {
         return TargetFilter::Any;
     }
+    let search_text = choose_filter_search_text(phrase);
+    let filter = parse_search_filter(&search_text, ctx);
+    if !is_unrestricted_card_filter(&filter) {
+        return filter;
+    }
+    // Legacy single-word fallback for short descriptors ("nonland", "creature").
+    let word = phrase.rsplit(' ').next().unwrap_or(phrase);
     if let Some(negated) = word.strip_prefix("non") {
         if let Some(TargetFilter::Typed(tf)) = type_str_to_target_filter(negated) {
             if let Some(primary) = tf.get_primary_type().cloned() {
@@ -10960,7 +11115,7 @@ fn parse_choose_filter_from_sentence(lower: &str, ctx: &mut ParseContext) -> Tar
     type_str_to_target_filter(word).unwrap_or_else(|| {
         ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
             context: "unrecognized choose-from-sentence type".into(),
-            text: word.into(),
+            text: phrase.into(),
             line_index: 0,
         });
         TargetFilter::Any
@@ -15748,19 +15903,67 @@ fn rebind_decline_body_recipients(clause: &mut ParsedEffectClause) {
     }
 }
 
-/// CR 109.4 + CR 700.1: Strip a "who [doesn't] control [type-phrase]" relative
-/// clause that follows an "each opponent"/"each player" subject. Returns the
+/// CR 109.4: Parse the shared "who [doesn't] control [type-phrase]" control
+/// predicate — the present/absent axis plus the controlled-permanent filter.
+/// Returns `(ControlPresence, TargetFilter, remainder)` where `remainder` is the
+/// text after the consumed object sub-phrase, or `None` when no control predicate
+/// is present (or the object resolves to the everything-matching
+/// `TargetFilter::Any`, which must not silently match every permanent).
+///
+/// The object sub-phrase ("an Elf", "a creature with power 4 or greater")
+/// delegates to the shared `parse_type_phrase_with_ctx` combinator — no bespoke
+/// string matching. This is the DRY core shared by the "each opponent who
+/// controls …" subject path (`strip_controls_permanent_clause`) and the "the
+/// number of opponents who control …" quantity path (`oracle_quantity.rs`).
+pub(crate) fn parse_controls_permanent_object<'a>(
+    rest: &'a str,
+    ctx: &mut ParseContext,
+) -> Option<(ControlPresence, TargetFilter, &'a str)> {
+    let lower = rest.to_lowercase();
+    // "who controls " / "who doesn't control " — one alt() arm per presence axis.
+    // Both singular ("each opponent who controls") and plural ("opponents who
+    // control") subject-verb agreement forms are accepted: the present/absent
+    // axis is identical regardless of grammatical number. Negative forms are
+    // longest-match-first so "doesn't/does not/don't/do not control" win before
+    // the bare affirmative; "controls " precedes "control " so the singular form
+    // is not split.
+    let (presence, after_verb) = nom_on_lower(rest, &lower, |i| {
+        preceded(
+            tag("who "),
+            alt((
+                value(ControlPresence::ControlsNone, tag("doesn't control ")),
+                value(ControlPresence::ControlsNone, tag("does not control ")),
+                value(ControlPresence::ControlsNone, tag("don't control ")),
+                value(ControlPresence::ControlsNone, tag("do not control ")),
+                value(ControlPresence::Controls, tag("controls ")),
+                value(ControlPresence::Controls, tag("control ")),
+            )),
+        )
+        .parse(i)
+    })?;
+    // The object sub-phrase is consumed by the shared type-phrase combinator.
+    let (filter, remainder) = super::oracle_target::parse_type_phrase_with_ctx(after_verb, ctx);
+    if matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    Some((presence, filter, remainder))
+}
+
+/// CR 109.4: Strip a "who [doesn't] control [type-phrase]" relative clause that
+/// follows an "each opponent"/"each player" subject. Returns the
 /// `PlayerFilter::ControlsPermanent` scope (carrying the base subject's
 /// relation, the present/absent axis, and the controlled-permanent filter) and
 /// the verb-phrase remainder. Returns `None` when no control clause is present.
 ///
-/// The object sub-phrase ("an Elf") delegates to the shared `parse_type_phrase`
-/// combinator — no bespoke string matching.
+/// Delegates the control predicate to the shared
+/// `parse_controls_permanent_object` core; this function adds the subject-path
+/// concerns: deriving the relation from the base subject and enforcing a
+/// non-empty verb-phrase residual.
 fn strip_controls_permanent_clause(
     base: &PlayerFilter,
     rest: &str,
 ) -> Option<(PlayerFilter, String)> {
-    use crate::types::ability::{ControlPresence, PlayerRelation};
+    use crate::types::ability::PlayerRelation;
     // The base subject only contributes its player relation; HighestSpeed and
     // any non-relational base are out of scope for a controls qualifier.
     let relation = match base {
@@ -15768,24 +15971,9 @@ fn strip_controls_permanent_clause(
         PlayerFilter::All => PlayerRelation::All,
         _ => return None,
     };
-    let lower = rest.to_lowercase();
-    // "who controls " / "who doesn't control " — one alt() arm per presence axis.
-    let (presence, after_verb) = nom_on_lower(rest, &lower, |i| {
-        preceded(
-            tag("who "),
-            alt((
-                value(ControlPresence::ControlsNone, tag("doesn't control ")),
-                value(ControlPresence::ControlsNone, tag("does not control ")),
-                value(ControlPresence::Controls, tag("controls ")),
-            )),
-        )
-        .parse(i)
-    })?;
-    // The object sub-phrase is consumed by the shared type-phrase combinator.
-    let (filter, remainder) = super::oracle_target::parse_type_phrase(after_verb);
-    if matches!(filter, TargetFilter::Any) {
-        return None;
-    }
+    // Match today's no-ctx behaviour for the subject path.
+    let mut ctx = ParseContext::default();
+    let (presence, filter, remainder) = parse_controls_permanent_object(rest, &mut ctx)?;
     let verb_phrase = remainder.trim_start();
     if verb_phrase.is_empty() {
         return None;
@@ -17225,7 +17413,17 @@ fn try_parse_damage_with_remainder<'a>(
             .parse(amount_lower.as_str())
             .ok()?;
         let qty_text = amount_text[..before_to.len()].trim();
+        // CR 120.1: The amount of a "deals damage equal to <qty>" clause may be a
+        // dynamic count ("the number of creatures you control" — Ajani, Nacatl
+        // Avenger). Mirror the sibling "damage to <target> equal to <amount>"
+        // branch: try the event-context refs first, then fall back to the general
+        // CDA quantity parser (`the number of … you control`, `your life total`,
+        // …). Without this fallback the phrase degrades to a raw `Variable`, which
+        // resolves to 0 at runtime — the damage silently no-ops.
         let qty = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
+            .or_else(|| {
+                crate::parser::oracle_quantity::parse_cda_quantity_with_context(qty_text, ctx)
+            })
             .unwrap_or_else(|| QuantityExpr::Ref {
                 qty: QuantityRef::Variable {
                     name: qty_text.to_string(),
@@ -17859,6 +18057,9 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
         }
         | Effect::Incubate { count: amount } => {
             *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
+        }
+        Effect::Scry { count, .. } => {
+            *count = apply_where_x_quantity_expression(count.clone(), where_x_expression);
         }
         Effect::Pump {
             power, toughness, ..
@@ -20043,6 +20244,58 @@ mod tests {
         }
     }
 
+    /// Issue #1424 — The Scarab God upkeep: opponent life loss and scry share
+    /// the zombie-count binding from the trailing where-X clause.
+    #[test]
+    fn scarab_god_upkeep_where_x_binds_zombie_count_to_life_loss_and_scry() {
+        use crate::parser::oracle_trigger::parse_trigger_line;
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, each opponent loses X life and you scry X, where X is the number of Zombies you control.",
+            "The Scarab God",
+        );
+        let execute = def.execute.expect("upkeep execute");
+        assert_eq!(
+            execute.player_scope,
+            Some(PlayerFilter::Opponent),
+            "each opponent loses … must set player_scope=Opponent"
+        );
+        match &*execute.effect {
+            Effect::LoseLife { amount, .. } => match amount {
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(tf),
+                        },
+                } => {
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                    assert!(tf
+                        .type_filters
+                        .contains(&TypeFilter::Subtype("Zombie".to_string())));
+                }
+                other => panic!("expected ObjectCount Zombies, got {other:?}"),
+            },
+            other => panic!("expected LoseLife, got {other:?}"),
+        }
+        let scry = execute.sub_ability.expect("scry sibling");
+        match &*scry.effect {
+            Effect::Scry { count, .. } => match count {
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(tf),
+                        },
+                } => {
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                    assert!(tf
+                        .type_filters
+                        .contains(&TypeFilter::Subtype("Zombie".to_string())));
+                }
+                other => panic!("expected ObjectCount Zombies on Scry, got {other:?}"),
+            },
+            other => panic!("expected Scry, got {other:?}"),
+        }
+    }
+
     #[test]
     fn where_x_binds_siblings_in_same_sentence() {
         // CR 107.3i: "all instances of X on an object have the same value".
@@ -20660,6 +20913,36 @@ mod tests {
                 }
             ),
             "expected source-power DealDamage, got: {:?}",
+            clause.effect
+        );
+    }
+
+    /// CR 120.1: "deals damage equal to <count> to <target>" must resolve the
+    /// dynamic count via the CDA quantity parser, not degrade to a raw
+    /// `Variable` (which resolves to 0 — a silent no-op). Ajani, Nacatl
+    /// Avenger's reflexive trigger ("he deals damage equal to the number of
+    /// creatures you control to any target") is the repro; the "<count> to
+    /// <target>" word order previously skipped the CDA fallback that the
+    /// "<target> equal to <count>" word order already had.
+    #[test]
+    fn damage_equal_to_object_count_resolves_to_object_count_not_variable() {
+        let clause = parse_effect_clause(
+            "~ deals damage equal to the number of creatures you control to any target",
+            &mut ParseContext::default(),
+        );
+
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. },
+                    },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                }
+            ),
+            "expected ObjectCount-amount DealDamage to Any, got: {:?}",
             clause.effect
         );
     }
@@ -29335,6 +29618,44 @@ mod tests {
     }
 
     #[test]
+    fn dread_fugue_choose_from_revealed_hand_includes_cmc_leq_2() {
+        // CR 702.148a: Cleave's bracketed text is removed at build time, so the
+        // parser receives the bracket-stripped (KeepContent) base text — the
+        // brackets are gone, their inner restriction kept. This test exercises
+        // the base-mode retarget: the plain trailing "with mana value 2 or less"
+        // suffix after "card from it" must merge into the reveal-choice filter,
+        // with `parse_search_filter` self-bounding at the next sentence.
+        let def = parse_effect_chain(
+            "Target player reveals their hand. You choose a nonland card from it with mana value 2 or less. That player discards that card.",
+            AbilityKind::Spell,
+        );
+
+        fn reveal_hand_filter(def: &AbilityDefinition) -> Option<&TargetFilter> {
+            match def.effect.as_ref() {
+                Effect::RevealHand { card_filter, .. } => Some(card_filter),
+                _ => def.sub_ability.as_deref().and_then(reveal_hand_filter),
+            }
+        }
+
+        let card_filter = reveal_hand_filter(&def).expect("RevealHand in chain");
+        assert!(
+            matches!(
+                card_filter,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Non(inner) if **inner == TypeFilter::Land))
+                    && tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 2 }
+                        }
+                    ))
+            ),
+            "expected nonland + CMC<=2 reveal choice filter, got {card_filter:?}"
+        );
+    }
+
+    #[test]
     fn parse_optional_reveal_hand_choice_marks_choice_optional() {
         let def = parse_effect_chain(
             "Look at target player's hand. You may choose a nonland card from it. That player discards that card.",
@@ -30814,6 +31135,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_choose_filter_merges_trailing_cmc_suffix() {
+        // CR 702.148a: Dread Fugue's base-mode (KeepContent) text — brackets
+        // removed at build time, inner restriction kept. The plain "with mana
+        // value 2 or less" suffix after "card from it" must merge into the
+        // filter, with the trailing "That player discards that card." sentence
+        // dropped by `parse_search_filter`'s self-bounding terminator.
+        let mut ctx = ParseContext::default();
+        let lower =
+            "you choose a nonland card from it with mana value 2 or less. that player discards that card.";
+        let filter = parse_choose_filter(lower, &mut ctx);
+        assert!(
+            matches!(
+                &filter,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Non(inner) if **inner == TypeFilter::Land))
+                    && tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 2 }
+                        }
+                    ))
+            ),
+            "expected nonland + CMC<=2, got {filter:?}"
+        );
+    }
+
+    #[test]
     fn seek_from_among_top_cards_carries_library_limit() {
         let details = parse_seek_details(
             "seek an artifact card from among the top ten cards of your library, then shuffle",
@@ -31240,6 +31589,48 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// CR 109.4: building-block coverage for the shared control predicate
+    /// `parse_controls_permanent_object` — the present/absent presence axis, the
+    /// delegated object filter, the consumed-remainder shape, and the
+    /// `TargetFilter::Any` rejection. This is the core both the subject path
+    /// (`strip_controls_permanent_clause`) and the quantity path
+    /// (`oracle_quantity.rs` PlayerCount) compose over.
+    #[test]
+    fn parse_controls_permanent_object_core() {
+        use crate::types::ability::ControlPresence;
+
+        // Affirmative "who controls <object>" + remainder preserved.
+        let mut ctx = ParseContext::default();
+        let (presence, filter, remainder) =
+            parse_controls_permanent_object("who controls an artifact loses 1 life", &mut ctx)
+                .expect("affirmative control predicate must parse");
+        assert_eq!(presence, ControlPresence::Controls);
+        assert!(
+            !matches!(filter, TargetFilter::Any),
+            "artifact object must be captured, got {filter:?}"
+        );
+        assert_eq!(remainder.trim_start(), "loses 1 life");
+
+        // Negative "who doesn't control <object>".
+        let mut ctx = ParseContext::default();
+        let (presence, _filter, _) =
+            parse_controls_permanent_object("who doesn't control a creature", &mut ctx)
+                .expect("negative control predicate must parse");
+        assert_eq!(presence, ControlPresence::ControlsNone);
+
+        // No object after "control" → the all-matching `TargetFilter::Any` is
+        // rejected so callers never count every permanent/opponent.
+        let mut ctx = ParseContext::default();
+        assert!(
+            parse_controls_permanent_object("who controls", &mut ctx).is_none(),
+            "bare 'who controls' with no object must be rejected"
+        );
+
+        // Missing the "who …" lead → no predicate.
+        let mut ctx = ParseContext::default();
+        assert!(parse_controls_permanent_object("draws a card", &mut ctx).is_none());
     }
 
     #[test]
@@ -41349,21 +41740,37 @@ mod snapshot_tests {
         let QuantityExpr::Difference { left, right } = count else {
             panic!("sacrifice count must be a Difference, got {count:?}");
         };
-        assert!(matches!(
-            &**left,
-            QuantityExpr::Ref {
-                qty: QuantityRef::ObjectCount { .. }
-            }
-        ));
-        assert!(matches!(
-            &**right,
-            QuantityExpr::Ref {
-                qty: QuantityRef::ControlledByEachPlayer {
-                    aggregate: AggregateFunction::Min,
-                    ..
-                }
-            }
-        ));
+        // CR 109.5: the LEFT per-player count is re-scoped to `ScopedPlayer` so
+        // it reads the iterating player at the `resolve_ref` seam, not the
+        // caster. A `You` LEFT operand is the regression: every player would cut
+        // to the caster's count − min instead of their own.
+        assert!(
+            matches!(
+                &**left,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(tf)
+                    }
+                } if tf.controller == Some(ControllerRef::ScopedPlayer)
+            ),
+            "LEFT count operand must be ObjectCount scoped to ScopedPlayer, got {left:?}"
+        );
+        // CR 107.1 + CR 608.2e: the RIGHT minimum keeps `You` — it builds its own
+        // per-player context (`from_ability_with_controller(a, p.id)` + the
+        // `obj.controller == p.id` gate). `ScopedPlayer` here would collapse to
+        // the iterating player and zero the cross-player minimum.
+        assert!(
+            matches!(
+                &**right,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ControlledByEachPlayer {
+                        aggregate: AggregateFunction::Min,
+                        filter: TargetFilter::Typed(tf),
+                    }
+                } if tf.controller == Some(ControllerRef::You)
+            ),
+            "RIGHT minimum operand must be ControlledByEachPlayer(Min) scoped to You, got {right:?}"
+        );
     }
 
     /// Assert a `Difference { HandSize(ScopedPlayer), HandSize(AllPlayers Min) }`
