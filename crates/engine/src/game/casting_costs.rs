@@ -4822,6 +4822,31 @@ mod tests {
         }
     }
 
+    // DEFERRED: cost-paid co-departure is a separate seam — the cost-payment flow
+    // has multiple non-Priority intermediate returns (target/mode/kicker selection)
+    // before the cast lands, so wiring co-departed observation here is more than a
+    // stamp. Non-regressive (under-triggers today regardless). When a spell's
+    // additional cost sacrifices ≥2 permanents simultaneously (e.g. Casualty-style
+    // multi-sacrifice paying for a Blood Artist-class observer that is itself among
+    // the sacrificed group), each co-departed permanent should be observed once.
+    // `handle_sacrifice_for_cost` (this file, ~841) and `handle_return_to_hand_for_cost`
+    // (~884) are CONFIRMED-EXCLUDED from STEP-wiring; closing this requires routing
+    // the cost-payment events through the co-departed stamping seam after the cast
+    // resolves, not a one-line stamp at the cost site. CR 603.10a + CR 601.2b.
+    #[test]
+    #[ignore = "DEFERRED: cost-paid co-departure is a separate seam (CR 603.10a) — see comment"]
+    fn cost_paid_multi_sacrifice_blood_artist_co_departed() {
+        // Intentionally minimal: this documents the desired behavior for the
+        // deferred cost-payment co-departure seam. It is not wired, so the assertion
+        // is left as a placeholder that records the expectation.
+        let observed_per_co_sacrificed = 1;
+        assert_eq!(
+            observed_per_co_sacrificed, 1,
+            "each co-sacrificed permanent should be observed once by a co-departing \
+             leaves-the-battlefield observer paid as part of the same cost"
+        );
+    }
+
     #[test]
     fn stamp_controller_controlled_as_cast_uses_quantity_resolver_snapshot() {
         let mut state = GameState::new_two_player(42);

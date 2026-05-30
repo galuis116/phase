@@ -242,11 +242,16 @@ pub fn resolve_all(
         }
     }
 
-    // CR 603.10a + CR 704.7: every creature destroyed by this effect left the
+    // CR 603.10a + CR 704.3: every creature destroyed by this effect left the
     // battlefield simultaneously, so co-departing leaves-the-battlefield/dies
     // observers (Blood Artist, Zulaport Cutthroat) must observe each other.
-    // Regenerated members stay on the battlefield and are skipped downstream.
-    crate::game::zones::mark_simultaneous_departures(events, &matching);
+    // CR 701.19a/b: a regenerated member (and any other Prevented destruction)
+    // stays on the battlefield, so `departed_subset` excludes it from every
+    // survivor's co-departed group.
+    crate::game::zones::mark_simultaneous_departures(
+        events,
+        &crate::game::zones::departed_subset(state, &matching),
+    );
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),

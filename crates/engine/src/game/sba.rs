@@ -499,7 +499,7 @@ fn check_zero_toughness(
         zones::move_to_zone(state, id, Zone::Graveyard, events);
         *any_performed = true;
     }
-    // CR 603.10a + CR 704.7: state-based actions are performed simultaneously, so
+    // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
     // these permanents left the battlefield together — record the group so
     // co-departing leaves-the-battlefield/dies observers observe each other.
     zones::mark_simultaneous_departures(events, &to_destroy);
@@ -586,10 +586,12 @@ fn check_lethal_damage(
             }
         }
     }
-    // CR 603.10a + CR 704.7: creatures destroyed by lethal damage in this SBA
-    // check died simultaneously — record the group so co-departing dies/LTB
-    // observers (Blood Artist) observe each other.
-    zones::mark_simultaneous_departures(events, &to_destroy);
+    // CR 603.10a + CR 704.3: creatures destroyed by lethal damage in this SBA
+    // check died simultaneously as a single event — record the group so
+    // co-departing dies/LTB observers (Blood Artist) observe each other.
+    // CR 701.19a/b: a creature whose destruction was Prevented (regeneration)
+    // stays on the battlefield, so `departed_subset` excludes it from the group.
+    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &to_destroy));
 }
 
 /// CR 704.5j: A legendary permanent is exempt from the legend rule while an
@@ -948,7 +950,7 @@ fn check_zero_loyalty(
         zones::move_to_zone(state, id, Zone::Graveyard, events);
         *any_performed = true;
     }
-    // CR 603.10a + CR 704.7: state-based actions are performed simultaneously, so
+    // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
     // these permanents left the battlefield together — record the group so
     // co-departing leaves-the-battlefield/dies observers observe each other.
     zones::mark_simultaneous_departures(events, &to_destroy);
@@ -995,7 +997,7 @@ fn check_zero_defense(
         zones::move_to_zone(state, id, Zone::Graveyard, events);
         *any_performed = true;
     }
-    // CR 603.10a + CR 704.7: state-based actions are performed simultaneously, so
+    // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
     // these permanents left the battlefield together — record the group so
     // co-departing leaves-the-battlefield/dies observers observe each other.
     zones::mark_simultaneous_departures(events, &to_destroy);

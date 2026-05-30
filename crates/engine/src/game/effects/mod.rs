@@ -449,6 +449,14 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             duration,
             track_exiled_by_source,
         };
+        // CR 603.10a: scope this drain pass's battlefield-exit events so the
+        // members moved in THIS resume can be stamped as a co-departed group and
+        // their observer triggers collected. NOTE (no-field DEFERRED residual):
+        // members moved in a PRIOR pause segment (before this resume) cannot be
+        // grouped with these without a co_departed_group carrier field on
+        // PendingChangeZoneIteration — the cross-pause observation gap is
+        // documented by an ignored test. See plan STEP 4b.
+        let events_before_drain = events.len();
         let mut paused = false;
         for (i, obj_id) in remaining.iter().enumerate() {
             match crate::game::effects::change_zone::process_one_zone_move(
@@ -480,14 +488,50 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             }
         }
         if paused {
+            // CR 603.10a: paused again on a further replacement choice. Stamp the
+            // members this pass moved so any co-departing observer among them
+            // observes the rest, then B2-park their observer triggers: `waiting_for`
+            // is now a replacement choice (not Priority), so `run_post_action_pipeline`
+            // will not scan these events — deferring keeps issue #423 dies-triggers
+            // from being lost across the pause.
+            crate::game::zones::stamp_simultaneous_from_slice(
+                state,
+                &mut events[events_before_drain..],
+            );
+            let trigger_events: Vec<GameEvent> = events[events_before_drain..]
+                .iter()
+                .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                .cloned()
+                .collect();
+            crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
             break;
         }
-        // Loop completed — emit the trailing EffectResolved event that the
-        // non-pause path emits at the tail of `change_zone::resolve`.
+        // Loop completed — stamp the members this pass moved (CR 603.10a) so a
+        // co-departing observer among the resumed group observes the rest, then
+        // emit the trailing EffectResolved event that the non-pause path emits at
+        // the tail of `change_zone::resolve`.
+        crate::game::zones::stamp_simultaneous_from_slice(
+            state,
+            &mut events[events_before_drain..],
+        );
         events.push(GameEvent::EffectResolved {
             kind: effect_kind,
             source_id: ctx.source_id,
         });
+        // CR 603.2 + CR 603.3b: the resume settled the iteration. When the move
+        // landed us back at Priority (no further replacement choice), B1-drain the
+        // deferred observer triggers parked during earlier pause segments plus the
+        // ones this resume produced; otherwise leave them parked for the next drain.
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            crate::game::triggers::drain_deferred_trigger_queue(state, events);
+        } else {
+            let trigger_events: Vec<GameEvent> = events[events_before_drain..]
+                .iter()
+                .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                .cloned()
+                .collect();
+            crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
+        }
     }
 }
 
