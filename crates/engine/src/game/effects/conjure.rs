@@ -81,8 +81,8 @@ pub fn resolve(
                 // conjured object (escalates to Full if it sources effects/etc.).
                 crate::game::layers::mark_layers_entered(state, obj_id);
 
-                // CR 111.1 + CR 603.6a: Conjuring places a card from outside the
-                // game directly onto the battlefield — a zone change from `None`.
+                // CR 603.6a: Conjuring places a card from outside the game
+                // directly onto the battlefield — a zone change from `None`.
                 // Emit `ZoneChanged { from: None, to: Battlefield }` (in addition to
                 // `ObjectConjured`, which animation/logging consumers still read) so
                 // every enters-the-battlefield triggered ability fires through the
@@ -95,6 +95,9 @@ pub fn resolve(
                     .get(&obj_id)
                     .expect("conjured object was just created")
                     .snapshot_for_zone_change(obj_id, None, Zone::Battlefield);
+                state
+                    .zone_changes_this_turn
+                    .push(zone_change_record.clone());
                 events.push(GameEvent::ZoneChanged {
                     object_id: obj_id,
                     from: None,
@@ -116,4 +119,53 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ability::{ConjureCard, QuantityExpr};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+
+    #[test]
+    fn battlefield_conjure_records_zone_change_for_turn_history() {
+        let mut state = GameState::new_two_player(7);
+        let ability = ResolvedAbility::new(
+            Effect::Conjure {
+                cards: vec![ConjureCard {
+                    name: "Verdant Dread".to_string(),
+                    count: QuantityExpr::Fixed { value: 1 },
+                }],
+                destination: Zone::Battlefield,
+                tapped: false,
+            },
+            vec![],
+            ObjectId(99),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let zone_change = events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from,
+                    to,
+                    ..
+                } => Some((*object_id, *from, *to)),
+                _ => None,
+            })
+            .expect("conjuring onto the battlefield emits ZoneChanged");
+
+        assert_eq!(zone_change.1, None);
+        assert_eq!(zone_change.2, Zone::Battlefield);
+        assert_eq!(state.zone_changes_this_turn.len(), 1);
+        assert_eq!(state.zone_changes_this_turn[0].object_id, zone_change.0);
+        assert_eq!(state.zone_changes_this_turn[0].from_zone, None);
+        assert_eq!(state.zone_changes_this_turn[0].to_zone, Zone::Battlefield);
+    }
 }
