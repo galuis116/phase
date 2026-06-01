@@ -34,6 +34,12 @@ pub fn resolve(
         .map(|p| p.id)
         .collect();
 
+    // CR 701.30b: With no opponents there is no legal clash opponent. The
+    // effect does nothing; any result-gated rider remains unperformed.
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
     // CR 701.30b: With two or more opponents the choice is a genuine decision
     // made by the controller — pause for it. The chosen opponent (validated
     // against `candidates`) is fed back through `perform_clash`.
@@ -46,10 +52,9 @@ pub fn resolve(
         return Ok(());
     }
 
-    // CR 701.30b: Zero or one opponent — no decision to make. The single
-    // opponent (or, defensively, the seat after the controller) is used
-    // directly so two-player games never see an extra prompt.
-    let opponent = candidates.first().copied().unwrap_or(PlayerId(1));
+    // CR 701.30b: One opponent — no decision to make. The single opponent is
+    // used directly so two-player games never see an extra prompt.
+    let opponent = candidates[0];
     perform_clash(state, ability, opponent, events)
 }
 
