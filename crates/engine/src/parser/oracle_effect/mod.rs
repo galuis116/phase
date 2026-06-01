@@ -6592,9 +6592,9 @@ fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
         Effect::GainLife {
             amount,
             player: TargetFilter::Controller,
-        } if is_targeted && matches!(target, TargetFilter::Player) => Effect::GainLife {
+        } if is_targeted && target_filter_can_target_player(&target) => Effect::GainLife {
             amount,
-            player: TargetFilter::Player,
+            player: target,
         },
         other => other,
     }
@@ -10033,6 +10033,15 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
                     rewrite_quantity_controller(count, ControllerRef::ScopedPlayer, effective_ctrl);
                 }
             }
+        }
+        // CR 115.1c / CR 602.2b + CR 601.2c / CR 119.3: "Target player gains
+        // N life" / "target opponent gains N life" announces a player target;
+        // the chosen player, not the source controller, gains the life.
+        Effect::GainLife {
+            player: player @ TargetFilter::Controller,
+            ..
+        } if subject.target.is_some() && target_filter_can_target_player(&subject_filter) => {
+            *player = subject_filter;
         }
         // CR 119.3 + CR 115.1d: "they lose N life" — inject subject's player reference.
         // LoseLife.target is Option<TargetFilter>, unlike other effects' non-optional targets.
@@ -32953,6 +32962,58 @@ mod tests {
                     }),
                 },
                 player: TargetFilter::Player,
+            },
+        );
+    }
+
+    // CR 115.1c / CR 602.2b + CR 601.2c / CR 119.3: "Target player gains N life"
+    // announces a player target; the chosen player (not the controller) gains the life.
+    // Regression for issue #1508 — Kenrith's {2}{W} activated mode and any plain
+    // spell with the same shape (Healing Salve, Healing Leaves, Hope Charm modal)
+    // previously degraded to TargetFilter::Controller.
+    #[test]
+    fn effect_target_player_gains_fixed_life_uses_target_player() {
+        let e = parse_effect("target player gains 5 life");
+        assert_eq!(
+            e,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Player,
+            },
+        );
+    }
+
+    #[test]
+    fn effect_target_opponent_gains_fixed_life_uses_target_player() {
+        let e = parse_effect("target opponent gains 3 life");
+        assert_eq!(
+            e,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent)
+                ),
+            },
+        );
+    }
+
+    #[test]
+    fn effect_target_opponent_gains_life_for_each_creature_on_the_battlefield() {
+        let e = parse_effect("target opponent gains 2 life for each creature on the battlefield");
+        assert_eq!(
+            e,
+            Effect::GainLife {
+                amount: QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter::creature()),
+                        },
+                    }),
+                },
+                player: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent)
+                ),
             },
         );
     }
