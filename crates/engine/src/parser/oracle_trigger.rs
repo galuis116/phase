@@ -32,11 +32,12 @@ use super::oracle_util::{
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AttachmentKind, CastVariantPaid,
-    CoinFlipResult, Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter,
-    DestinationConstraint, Effect, FilterProp, OriginConstraint, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
+    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AttachmentKind, CastManaObjectScope,
+    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef,
+    CounterTriggerFilter, DamageKindFilter, DestinationConstraint, Effect, FilterProp, ObjectScope,
+    OriginConstraint, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
+    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::parse_counter_type;
@@ -2570,6 +2571,13 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         );
     }
 
+    // CR 603.4 + CR 601.2h: "if the amount of mana spent to cast it/that spell
+    // was less than/greater than its mana value" — intervening-if for mana-spent
+    // comparison triggers (Tokka & Rahzar, Liberator, Urza's Battlethopter).
+    if let Some(result) = try_extract_mana_spent_comparison_condition(&lower, text) {
+        return result;
+    }
+
     // CR 603.4 + CR 601.2h: "if no mana was spent to cast it/that spell" —
     // intervening-if for free-spell counter triggers (Lavinia / Vexing Bauble).
     if let Some(result) = try_extract_no_mana_spent_condition(&lower, text) {
@@ -3001,6 +3009,62 @@ fn parse_no_mana_spent_clause(i: &str) -> OracleResult<'_, &str> {
         )),
     ))
     .parse(i)
+}
+
+/// CR 603.4 + CR 601.2h: Extract "if the amount of mana spent to cast it/that spell
+/// was less than/greater than its mana value" — intervening-if for mana-spent
+/// comparison triggers (Tokka & Rahzar, Liberator, Urza's Battlethopter).
+fn try_extract_mana_spent_comparison_condition(
+    lower: &str,
+    text: &str,
+) -> Option<(String, Option<TriggerCondition>)> {
+    let (before, comparator, rest) = scan_preceded(lower, |i| {
+        preceded(tag("if "), parse_mana_spent_comparison_clause).parse(i)
+    })?;
+
+    let rest_trimmed = rest.trim_start();
+    if !(rest_trimmed.is_empty() || rest_trimmed.starts_with(',') || rest_trimmed.starts_with('.'))
+    {
+        return None;
+    }
+    let clause_start = before.len();
+    let clause_len = lower.len() - before.len() - rest.len();
+
+    // In a spell-cast trigger's intervening-if clause, "it"/"that spell"/
+    // "this spell" all refer to the spell object carried by the trigger event.
+    let lhs_qty = QuantityRef::ManaSpentToCast {
+        scope: CastManaObjectScope::TriggeringSpell,
+        metric: CastManaSpentMetric::Total,
+    };
+    let rhs_qty = QuantityRef::ObjectManaValue {
+        scope: ObjectScope::EventSource,
+    };
+
+    let cleaned = strip_condition_clause(text, clause_start, clause_len);
+    Some((
+        cleaned,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref { qty: lhs_qty },
+            comparator,
+            rhs: QuantityExpr::Ref { qty: rhs_qty },
+        }),
+    ))
+}
+
+fn parse_mana_spent_comparison_clause(i: &str) -> OracleResult<'_, Comparator> {
+    let (i, _) = (
+        tag("the amount of mana spent to cast "),
+        alt((tag("it"), tag("that spell"), tag("this spell"))),
+        alt((tag(" was "), tag(" is "))),
+    )
+        .parse(i)?;
+    let (i, comparator) = alt((
+        value(Comparator::LT, tag("less than")),
+        value(Comparator::GT, tag("greater than")),
+    ))
+    .parse(i)?;
+    let (i, _) = tag(" its mana value").parse(i)?;
+    Ok((i, comparator))
 }
 
 /// CR 603.4 + CR 102.1: Extract "if it's / it is / it isn't /
@@ -21599,6 +21663,56 @@ mod tests {
             cond,
             Some(TriggerCondition::ManaSpentCondition {
                 text: "no mana was spent to cast it".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn extract_mana_spent_comparison_condition_less_than() {
+        let (cleaned, cond) = extract_if_condition(
+            "if the amount of mana spent to cast it was less than its mana value, ~ deal 3 damage to that player",
+        );
+        assert_eq!(cleaned, "~ deal 3 damage to that player");
+        assert_eq!(
+            cond,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                        metric: crate::types::ability::CastManaSpentMetric::Total,
+                    },
+                },
+                comparator: Comparator::LT,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::EventSource,
+                    },
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn extract_mana_spent_comparison_condition_greater_than() {
+        let (cleaned, cond) = extract_if_condition(
+            "if the amount of mana spent to cast that spell was greater than its mana value, put a +1/+1 counter on ~",
+        );
+        assert_eq!(cleaned, "put a +1/+1 counter on ~");
+        assert_eq!(
+            cond,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                        metric: crate::types::ability::CastManaSpentMetric::Total,
+                    },
+                },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::EventSource,
+                    },
+                },
             })
         );
     }
