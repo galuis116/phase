@@ -136,7 +136,8 @@ fn cant_be_blocked_static_splits_from_keyword_grant() {
     );
     // The P/T grant is preserved (and remains a continuous modification).
     assert!(
-        defs.iter().any(|d| matches!(d.mode, StaticMode::Continuous)),
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
         "P/T grant must be preserved"
     );
 }
