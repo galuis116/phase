@@ -578,8 +578,17 @@ pub(crate) fn try_split_and_cant_be_blocked(text: &str) -> Option<Vec<StaticDefi
     type VE<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
 
+    // Match both the ASCII apostrophe and the typographic U+2019 form, mirroring
+    // the standalone evasion branches (`shared.rs` / the dispatch path); the
+    // static parse path does not universally normalize apostrophes. The matched
+    // tail (`rest`) carries no apostrophe, so the clause is reconstructed with an
+    // ASCII "can't be blocked" and `cant_be_blocked_mode` needs no apostrophe arm.
     let (before, _matched, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
-        tag::<_, _, VE>("and can't be blocked").parse(i)
+        alt((
+            tag::<_, _, VE>("and can't be blocked"),
+            tag::<_, _, VE>("and can\u{2019}t be blocked"),
+        ))
+        .parse(i)
     })?;
     let clause = format!("can't be blocked{rest}");
     let mode = cant_be_blocked_mode(&clause)?;

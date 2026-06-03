@@ -142,6 +142,22 @@ fn cant_be_blocked_static_splits_from_keyword_grant() {
     );
 }
 
+/// CR 509.1b: The compound split must also match the typographic U+2019
+/// apostrophe ("can'​t"), matching the standalone evasion branches — MTGJSON
+/// Oracle text uses U+2019, and the static path doesn't normalize apostrophes.
+#[test]
+fn cant_be_blocked_static_splits_with_typographic_apostrophe() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +3/+0 and can\u{2019}t be blocked by more than one creature.",
+    );
+    assert!(
+        defs.iter()
+            .any(|d| d.mode == StaticMode::CantBeBlockedByMoreThan { max: 1 }),
+        "U+2019 form must still split off the evasion grant, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
 /// CR 509.1b: The bare compound form "… and can't be blocked" yields a plain
 /// `CantBeBlocked` static alongside the keyword grant.
 #[test]
