@@ -520,6 +520,94 @@ pub(crate) fn try_split_and_can_block_additional(text: &str) -> Option<Vec<Stati
     Some(defs)
 }
 
+/// CR 509.1b: Classify a "can't be blocked …" evasion predicate (lowercased,
+/// starting with "can't be blocked") into the corresponding `StaticMode`,
+/// composing the same building blocks the standalone branches use. Returns
+/// `None` when the tail is not a recognized evasion shape.
+fn cant_be_blocked_mode(clause: &str) -> Option<StaticMode> {
+    type VE<'a> = OracleError<'a>;
+    let rest = nom_tag_lower(clause, clause, "can't be blocked")?;
+    let rest = rest.trim_end_matches('.').trim_end();
+    // "except by <filter>" → CantBeBlockedExceptBy (quality or min-blockers).
+    if let Some(filter) = nom_tag_lower(rest, rest, " except by ") {
+        return Some(StaticMode::CantBeBlockedExceptBy {
+            kind: classify_block_exception(filter),
+        });
+    }
+    // "by more than N creature(s)" → per-creature blocker maximum. Must precede
+    // the generic "by <filter>" branch, which would read "more than …" as a
+    // quality filter.
+    if let Some(after) = nom_tag_lower(rest, rest, " by more than ") {
+        if let Ok((after, max)) = nom_primitives::parse_number(after) {
+            if let Ok((after, _)) =
+                alt((tag::<_, _, VE>(" creatures"), tag(" creature"))).parse(after)
+            {
+                if after.trim().is_empty() {
+                    return Some(StaticMode::CantBeBlockedByMoreThan { max });
+                }
+            }
+        }
+        return None;
+    }
+    // "by <filter>" → CantBeBlockedBy.
+    if let Some(filter_text) = nom_tag_lower(rest, rest, " by ") {
+        let (filter, _) = parse_type_phrase(filter_text);
+        if !matches!(filter, TargetFilter::Any) {
+            return Some(StaticMode::CantBeBlockedBy { filter });
+        }
+        return None;
+    }
+    // Bare "can't be blocked".
+    if rest.is_empty() {
+        return Some(StaticMode::CantBeBlocked);
+    }
+    None
+}
+
+/// CR 509.1b: Decompose `"<predicate> and can't be blocked[ by/except by … | by
+/// more than N creatures]"` into the first conjunct's static(s) plus the
+/// matching `CantBeBlocked*` static, both sharing the same `affected` set.
+///
+/// Without this split the trailing evasion clause was dropped: Madcap Skills
+/// ("Enchanted creature gets +3/+0 and can't be blocked by more than one
+/// creature.") parsed to only the +3/+0 grant. Mirrors
+/// `try_split_and_can_block_additional`. Standalone "can't be blocked …" lines
+/// (no preceding "and") are handled by the existing branches, so this requires
+/// the conjunction.
+pub(crate) fn try_split_and_cant_be_blocked(text: &str) -> Option<Vec<StaticDefinition>> {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+
+    let (before, _matched, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        tag::<_, _, VE>("and can't be blocked").parse(i)
+    })?;
+    let clause = format!("can't be blocked{rest}");
+    let mode = cant_be_blocked_mode(&clause)?;
+
+    let cut_end = before
+        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
+        .len();
+    let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
+    let mut defs = parse_static_line_multi(&line_a);
+    if defs.is_empty() {
+        return None;
+    }
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+
+    let affected = defs[0].affected.clone()?;
+    let condition = defs[0].condition.clone();
+    let mut companion = StaticDefinition::new(mode)
+        .affected(affected)
+        .description(text.to_string());
+    if let Some(condition) = condition {
+        companion = companion.condition(condition);
+    }
+    defs.push(companion);
+    Some(defs)
+}
+
 /// CR 105.2c / CR 205.4a: Parse property-based creature descriptors that are not subtypes.
 /// Handles "colorless", "multicolored", "snow", and "snow and [Subtype]" patterns.
 /// Returns a fully constructed `TargetFilter` with the appropriate properties.

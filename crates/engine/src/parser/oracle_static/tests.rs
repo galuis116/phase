@@ -114,6 +114,45 @@ fn extra_blockers_static_self_reference_stays_selfref() {
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
 }
 
+/// CR 509.1b: Madcap Skills — "Enchanted creature gets +3/+0 and can't be
+/// blocked by more than one creature." must decompose into BOTH the P/T grant
+/// AND a `CantBeBlockedByMoreThan { max: 1 }` static affecting the enchanted
+/// creature. Previously the evasion clause was dropped entirely.
+#[test]
+fn cant_be_blocked_static_splits_from_keyword_grant() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +3/+0 and can't be blocked by more than one creature.",
+    );
+    assert!(
+        defs.len() >= 2,
+        "expected P/T + evasion defs, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| d.mode == StaticMode::CantBeBlockedByMoreThan { max: 1 }),
+        "expected CantBeBlockedByMoreThan {{ max: 1 }}, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    // The P/T grant is preserved (and remains a continuous modification).
+    assert!(
+        defs.iter().any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "P/T grant must be preserved"
+    );
+}
+
+/// CR 509.1b: The bare compound form "… and can't be blocked" yields a plain
+/// `CantBeBlocked` static alongside the keyword grant.
+#[test]
+fn cant_be_blocked_static_splits_bare_form() {
+    let defs = parse_static_line_multi("Enchanted creature gets +2/+2 and can't be blocked.");
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::CantBeBlocked),
+        "expected CantBeBlocked, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
 /// CR 118.9: Rooftop Storm grants {0} as an alternative MANA cost for Zombie
 /// creature spells the controller casts.
 #[test]
