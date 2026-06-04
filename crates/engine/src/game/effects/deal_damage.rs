@@ -18,7 +18,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DamageRecord, GameState};
 use crate::types::identifiers::ObjectId;
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 
@@ -78,10 +78,31 @@ impl DamageContext {
             source_id,
             controller: obj.controller,
             source_is_creature: obj.card_types.core_types.contains(&CoreType::Creature),
-            has_deathtouch: obj.has_keyword(&Keyword::Deathtouch),
-            has_lifelink: obj.has_keyword(&Keyword::Lifelink),
-            has_wither: obj.has_keyword(&Keyword::Wither),
-            has_infect: obj.has_keyword(&Keyword::Infect),
+            // CR 613.1f + CR 702.2 + CR 702.15 + CR 702.80 + CR 702.90:
+            // Off-battlefield keyword grants (e.g. Judith's "that spell gains
+            // deathtouch and lifelink") live in transient continuous effects and
+            // are visible via `object_has_effective_keyword_kind`, not printed
+            // `obj.keywords`.
+            has_deathtouch: keywords::object_has_effective_keyword_kind(
+                state,
+                source_id,
+                KeywordKind::Deathtouch,
+            ),
+            has_lifelink: keywords::object_has_effective_keyword_kind(
+                state,
+                source_id,
+                KeywordKind::Lifelink,
+            ),
+            has_wither: keywords::object_has_effective_keyword_kind(
+                state,
+                source_id,
+                KeywordKind::Wither,
+            ),
+            has_infect: keywords::object_has_effective_keyword_kind(
+                state,
+                source_id,
+                KeywordKind::Infect,
+            ),
             combat_damage_poison: obj
                 .keywords
                 .iter()
@@ -1264,7 +1285,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        FilterProp, ObjectScope, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+        ContinuousModification, Duration, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
+        TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -2145,6 +2167,44 @@ mod tests {
         assert_eq!(state.objects[&target_id].damage_marked, 3);
         // CR 702.15b: Lifelink triggers on creature damage too.
         assert_eq!(state.players[0].life, 23); // 20 + 3
+    }
+
+    /// Issue #2013: Judith grants deathtouch/lifelink to the cast instant/sorcery via a
+    /// `SpecificObject` transient effect; damage must read effective keywords, not printed.
+    #[test]
+    fn transient_spell_keyword_grants_apply_to_damage() {
+        let mut state = GameState::new_two_player(42);
+        let spell_id = create_object(
+            &mut state,
+            CardId(60),
+            PlayerId(0),
+            "Shock".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+        }
+        state.add_transient_continuous_effect(
+            spell_id,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: spell_id },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Lifelink,
+            }],
+            None,
+        );
+        let ability = make_ability_with_source(2, vec![TargetRef::Player(PlayerId(1))], spell_id);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[1].life, 18);
+        assert_eq!(
+            state.players[0].life, 22,
+            "lifelink from a transient spell grant must apply when the spell deals damage"
+        );
     }
 
     #[test]
