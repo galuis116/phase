@@ -521,18 +521,21 @@ pub(crate) fn try_split_and_can_block_additional(text: &str) -> Option<Vec<Stati
 }
 
 /// CR 509.1b: Classify a "can't be blocked …" evasion predicate (lowercased,
-/// starting with "can't be blocked") into the corresponding `StaticMode`,
-/// composing the same building blocks the standalone branches use. Returns
-/// `None` when the tail is not a recognized evasion shape.
-fn cant_be_blocked_mode(clause: &str) -> Option<StaticMode> {
+/// starting with "can't be blocked") into the corresponding `StaticMode` and
+/// optional evasion condition, composing the same building blocks the standalone
+/// branches use. Returns `None` when the tail is not a recognized evasion shape.
+fn cant_be_blocked_mode(clause: &str) -> Option<(StaticMode, Option<StaticCondition>)> {
     type VE<'a> = OracleError<'a>;
     let rest = nom_tag_lower(clause, clause, "can't be blocked")?;
     let rest = rest.trim_end_matches('.').trim_end();
     // "except by <filter>" → CantBeBlockedExceptBy (quality or min-blockers).
     if let Some(filter) = nom_tag_lower(rest, rest, " except by ") {
-        return Some(StaticMode::CantBeBlockedExceptBy {
-            kind: classify_block_exception(filter),
-        });
+        return Some((
+            StaticMode::CantBeBlockedExceptBy {
+                kind: classify_block_exception(filter),
+            },
+            None,
+        ));
     }
     // "by more than N creature(s)" → per-creature blocker maximum. Must precede
     // the generic "by <filter>" branch, which would read "more than …" as a
@@ -543,7 +546,7 @@ fn cant_be_blocked_mode(clause: &str) -> Option<StaticMode> {
                 alt((tag::<_, _, VE>(" creatures"), tag(" creature"))).parse(after)
             {
                 if after.trim().is_empty() {
-                    return Some(StaticMode::CantBeBlockedByMoreThan { max });
+                    return Some((StaticMode::CantBeBlockedByMoreThan { max }, None));
                 }
             }
         }
@@ -551,17 +554,38 @@ fn cant_be_blocked_mode(clause: &str) -> Option<StaticMode> {
     }
     // "by <filter>" → CantBeBlockedBy.
     if let Some(filter_text) = nom_tag_lower(rest, rest, " by ") {
-        let (filter, _) = parse_type_phrase(filter_text);
+        let filter_tp = TextPair::new(filter_text, filter_text);
+        let (filter, remainder) = if let Some(filter) = parse_chosen_qualifier_subject(&filter_tp) {
+            (filter, "")
+        } else {
+            parse_type_phrase(filter_text)
+        };
         if !matches!(filter, TargetFilter::Any) {
-            return Some(StaticMode::CantBeBlockedBy { filter });
+            let condition = parse_compound_cant_be_blocked_condition(remainder);
+            return Some((StaticMode::CantBeBlockedBy { filter }, condition));
         }
         return None;
     }
     // Bare "can't be blocked".
     if rest.is_empty() {
-        return Some(StaticMode::CantBeBlocked);
+        return Some((StaticMode::CantBeBlocked, None));
+    }
+    if let Some(condition) = parse_compound_cant_be_blocked_condition(rest) {
+        return Some((StaticMode::CantBeBlocked, Some(condition)));
     }
     None
+}
+
+/// CR 509.1b: Attach a trailing "as long as …" condition to the evasion
+/// restriction produced by the compound split.
+fn parse_compound_cant_be_blocked_condition(text: &str) -> Option<StaticCondition> {
+    let condition_text = text.trim().trim_end_matches('.');
+    if condition_text.is_empty() {
+        return None;
+    }
+    nom_condition::parse_condition(condition_text)
+        .ok()
+        .and_then(|(rest, condition)| rest.trim().is_empty().then_some(condition))
 }
 
 /// CR 509.1b: Decompose `"<predicate> and can't be blocked[ by/except by … | by
@@ -591,7 +615,7 @@ pub(crate) fn try_split_and_cant_be_blocked(text: &str) -> Option<Vec<StaticDefi
         .parse(i)
     })?;
     let clause = format!("can't be blocked{rest}");
-    let mode = cant_be_blocked_mode(&clause)?;
+    let (mode, evasion_condition) = cant_be_blocked_mode(&clause)?;
 
     let cut_end = before
         .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
@@ -606,7 +630,7 @@ pub(crate) fn try_split_and_cant_be_blocked(text: &str) -> Option<Vec<StaticDefi
     }
 
     let affected = defs[0].affected.clone()?;
-    let condition = defs[0].condition.clone();
+    let condition = evasion_condition.or_else(|| defs[0].condition.clone());
     let mut companion = StaticDefinition::new(mode)
         .affected(affected)
         .description(text.to_string());

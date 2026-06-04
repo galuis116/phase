@@ -131,8 +131,13 @@ fn cant_be_blocked_static_splits_from_keyword_grant() {
     );
     assert!(
         defs.iter()
-            .any(|d| d.mode == StaticMode::CantBeBlockedByMoreThan { max: 1 }),
-        "expected CantBeBlockedByMoreThan {{ max: 1 }}, got {:?}",
+            .any(|d| d.mode == StaticMode::CantBeBlockedByMoreThan { max: 1 }
+                && matches!(
+                    d.affected,
+                    Some(TargetFilter::Typed(TypedFilter { ref properties, .. }))
+                        if properties.contains(&FilterProp::EnchantedBy)
+                )),
+        "expected enchanted-creature CantBeBlockedByMoreThan {{ max: 1 }}, got {:?}",
         defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
     );
     // The P/T grant is preserved (and remains a continuous modification).
@@ -168,6 +173,61 @@ fn cant_be_blocked_static_splits_bare_form() {
         defs.iter().any(|d| d.mode == StaticMode::CantBeBlocked),
         "expected CantBeBlocked, got {:?}",
         defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
+/// CR 105.4 + CR 509.1b + CR 608.2c: The split path must use the chosen-color
+/// qualifier parser before the generic type parser, matching the standalone
+/// "can't be blocked by <filter>" path.
+#[test]
+fn cant_be_blocked_static_split_keeps_chosen_color_filter() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +2/+2 and can't be blocked by creatures of that color.",
+    );
+    let filter = defs
+        .iter()
+        .find_map(|d| match &d.mode {
+            StaticMode::CantBeBlockedBy { filter } => Some(filter),
+            _ => None,
+        })
+        .expect("expected split CantBeBlockedBy static");
+
+    assert!(
+        matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::IsChosenColor))
+        ),
+        "expected IsChosenColor blocker filter, got {filter:?}"
+    );
+}
+
+/// CR 509.1b: A trailing evasion condition belongs on the split
+/// `CantBeBlocked` companion, not only on standalone attached-subject forms.
+#[test]
+fn cant_be_blocked_static_split_keeps_trailing_condition() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +2/+2 and can't be blocked as long as you control a Gate.",
+    );
+    let condition = defs
+        .iter()
+        .find_map(|d| {
+            (d.mode == StaticMode::CantBeBlocked)
+                .then(|| d.condition.as_ref())
+                .flatten()
+        })
+        .expect("expected split CantBeBlocked static with condition");
+
+    assert!(
+        matches!(
+            condition,
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf))
+            } if tf.get_subtype() == Some("Gate")
+        ),
+        "expected Gate condition, got {condition:?}"
     );
 }
 
