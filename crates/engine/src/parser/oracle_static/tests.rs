@@ -191,6 +191,38 @@ fn doesnt_untap_static_splits_from_pump() {
     );
 }
 
+/// CR 502.3: A trailing "as long as …" rider on the untap clause attaches to
+/// the `CantUntap` companion, not the grant.
+#[test]
+fn doesnt_untap_static_split_keeps_trailing_condition() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 and doesn't untap during its controller's untap step as long as you control a Swamp.",
+    );
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantUntap)
+        .expect("expected a CantUntap static");
+    assert!(
+        cant.condition.is_some(),
+        "the 'as long as …' rider must attach to the CantUntap companion"
+    );
+}
+
+/// CR 502.3: The split declines (rather than silently dropping a clause) when
+/// an unrecognized clause trails the untap-step phrase — parity with the
+/// sibling `try_split_and_cant_block` terminal guard.
+#[test]
+fn doesnt_untap_static_split_declines_unknown_tail() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 and doesn't untap during its controller's untap step, then its controller loses 1 life.",
+    );
+    assert!(
+        !defs.iter().any(|d| d.mode == StaticMode::CantUntap),
+        "unrecognized trailing clause must make the split decline, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
 /// CR 509.1b: Madcap Skills — "Enchanted creature gets +3/+0 and can't be
 /// blocked by more than one creature." must decompose into BOTH the P/T grant
 /// AND a `CantBeBlockedByMoreThan { max: 1 }` static affecting the enchanted

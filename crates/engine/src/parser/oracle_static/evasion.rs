@@ -601,7 +601,7 @@ pub(crate) fn try_split_and_doesnt_untap(text: &str) -> Option<Vec<StaticDefinit
     type VE<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
 
-    let (before, _matched, _rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+    let (before, _matched, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
         // Match both the ASCII and typographic U+2019 apostrophe.
         let (i, _) = alt((
             tag::<_, _, VE>("and doesn't untap during"),
@@ -624,6 +624,16 @@ pub(crate) fn try_split_and_doesnt_untap(text: &str) -> Option<Vec<StaticDefinit
         .parse(i)?;
         Ok((i, ()))
     })?;
+
+    // CR 502.3: only split when the untap clause is terminal or carries a
+    // recognized "as long as …"/"if …" rider (routed to the companion below).
+    // Decline any other trailing clause ("… untap step, then …") rather than
+    // silently dropping it — parity with the sibling `try_split_and_cant_block`
+    // terminal guard.
+    let tail = rest.trim_start().trim_end_matches('.').trim();
+    if !tail.is_empty() && !tail.starts_with("as long as ") && !tail.starts_with("if ") {
+        return None;
+    }
 
     let cut_end = before
         .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())

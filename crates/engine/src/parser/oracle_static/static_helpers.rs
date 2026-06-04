@@ -795,6 +795,7 @@ pub(crate) fn extract_cant_untap_condition(lower: &str) -> Option<StaticConditio
         "its controller's untap step",
         "its controller\u{2019}s untap step",
         "their controllers' untap steps",
+        "their controllers\u{2019} untap steps",
         "your untap step",
     ];
     let mut after_untap = None;
