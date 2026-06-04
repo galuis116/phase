@@ -1537,6 +1537,7 @@ pub(crate) fn attachment_creatures_you_control_filter(kind: AttachmentKind) -> T
             .properties(vec![FilterProp::HasAttachment {
                 kind,
                 controller: None,
+                exclude_source: false,
             }]),
     )
 }
