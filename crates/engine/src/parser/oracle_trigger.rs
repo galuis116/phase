@@ -12,7 +12,7 @@ use super::oracle_effect::{
     try_parse_exile_top_each_library_with_collection_counter,
 };
 use super::oracle_ir::context::ParseContext;
-use super::oracle_ir::trigger::{TriggerBody, TriggerIr, TriggerModifiers};
+use super::oracle_ir::trigger::{FirstTimeLimit, TriggerBody, TriggerIr, TriggerModifiers};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::condition::parse_source_has_counters;
 use super::oracle_nom::error::{oracle_err, OracleResult};
@@ -41,6 +41,8 @@ use crate::types::ability::{
     TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
     ZoneChangeClause,
 };
+#[cfg(test)]
+use crate::types::ability::{AttackScope, AttackSubject};
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::events::PlayerActionKind;
@@ -471,9 +473,9 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
     )]
 }
 
-/// Part D: If `"for the first time each turn"` appears as a word-boundary
-/// phrase in `condition`, strip it and return `(stripped, true)`; otherwise
-/// return `(condition, false)` unchanged.
+/// Part D: If a `"for the first time ..."` qualifier appears as a
+/// word-boundary phrase in `condition`, strip it and return the corresponding
+/// trigger-event limit; otherwise return `(condition, None)` unchanged.
 ///
 /// Stripping is load-bearing. The generic cycle-trigger handlers in
 /// `try_parse_player_trigger` (and several other condition-level handlers)
@@ -487,13 +489,22 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
 /// Implementation: `scan_preceded` locates the phrase at a word boundary
 /// (consistent with `scan_contains`), returning both the prefix and
 /// post-phrase remainder in a single pass — no `str::find` fallback.
-fn strip_first_time_each_turn_qualifier(condition: &str) -> (String, bool) {
+/// Returns stripped text and the detected "for the first time ..." trigger-event limit.
+fn strip_first_time_each_turn_qualifier(condition: &str) -> (String, Option<FirstTimeLimit>) {
     const PHRASE: &str = "for the first time each turn";
+    const PHRASE_PER_OPPONENT: &str = "for the first time during each of their turns";
     let lower = condition.to_lowercase();
-    let Some((before_lower, _, rest_lower)) =
-        scan_preceded(&lower, |i| tag::<_, _, OracleError<'_>>(PHRASE).parse(i))
-    else {
-        return (condition.to_string(), false);
+    let Some((before_lower, matched_phrase, rest_lower)) = scan_preceded(&lower, |i| {
+        alt((
+            value(
+                FirstTimeLimit::EachOpponentTurn,
+                tag::<_, _, OracleError<'_>>(PHRASE_PER_OPPONENT),
+            ),
+            value(FirstTimeLimit::EachTurn, tag(PHRASE)),
+        ))
+        .parse(i)
+    }) else {
+        return (condition.to_string(), None);
     };
     // ASCII-only phrase → byte offsets in `condition` align with `lower`.
     let start = before_lower.len();
@@ -504,7 +515,7 @@ fn strip_first_time_each_turn_qualifier(condition: &str) -> (String, bool) {
     // Collapse any leading / trailing / double whitespace introduced by
     // removing the phrase.
     let stripped = joined.split_whitespace().collect::<Vec<_>>().join(" ");
-    (stripped, true)
+    (stripped, Some(matched_phrase))
 }
 
 /// CR 608.2c + CR 506.2: "attack a player" — the attacked player is the
@@ -703,7 +714,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // before the condition is dispatched. Scoped to condition text (NOT full
     // text) so triggers whose EFFECT text coincidentally contains the phrase
     // aren't retroactively constrained.
-    let (condition_text_stripped, first_time_each_turn_in_condition) =
+    let (condition_text_stripped, first_time_limit) =
         strip_first_time_each_turn_qualifier(&condition_text_raw);
     let condition_text: &str = &condition_text_stripped;
 
@@ -712,8 +723,22 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // "if X, " can hide the "you may " optional marker behind the if-clause.
     let (effect_without_if, if_condition) = extract_if_condition(&effect_text);
 
-    // CR 609.3: "You may" at the start of the effect text makes the triggered
-    // effect optional at resolution.
+    // CR 608.2c (resolution-order instructions): "You may" at the start of
+    // the effect text makes the triggered effect optional at resolution.
+    //
+    // IMPORTANT — multi-sentence triggers must NOT hoist this flag to the
+    // outer trigger. A pattern like
+    //   "look at the top card of your library. If <cond>, you may reveal
+    //    that card and put it into your hand."
+    // contains a MANDATORY first action (`look at …`) followed by an
+    // OPTIONAL second action gated on a condition. Hoisting `you may` to the
+    // trigger-level `optional` flag would make the entire trigger
+    // (including the mandatory look) skippable, which is wrong per
+    // CR 608.2c (the controller follows instructions in printed order).
+    // Per-chunk peel in `clause_shell::peel_clause` marks only the inner
+    // optional sub_ability `optional = true`, which is the correct shape.
+    // The detection below only fires when the `you may` is the FIRST token
+    // (modulo an intervening-if), which excludes the multi-sentence case.
     let starts_with_you_may = |s: &str| tag::<_, _, OracleError<'_>>("you may ").parse(s).is_ok();
     let after_structural_if = effect_lower
         .strip_prefix("if ") // allow-noncombinator: structural if-clause skip when condition is unrecognized
@@ -841,7 +866,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             unless_pay,
             intervening_if: if_condition,
             trigger_subject,
-            first_time_each_turn: first_time_each_turn_in_condition,
+            first_time_limit,
             constraint,
             has_up_to,
             effect_lower: effect_lower.to_string(),
@@ -941,9 +966,12 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // Text-based constraints take precedence; fall back to condition-parser constraint.
     def.constraint = modifiers.constraint.clone().or(def.constraint.take());
 
-    // CR-uniform: apply OncePerTurn as fallback.
-    if modifiers.first_time_each_turn && def.constraint.is_none() {
-        def.constraint = Some(TriggerConstraint::OncePerTurn);
+    // CR 603.2: Apply trigger-event frequency limits as a fallback.
+    if let (Some(limit), None) = (modifiers.first_time_limit, def.constraint.as_ref()) {
+        def.constraint = Some(match limit {
+            FirstTimeLimit::EachTurn => TriggerConstraint::OncePerTurn,
+            FirstTimeLimit::EachOpponentTurn => TriggerConstraint::OncePerOpponentPerTurn,
+        });
     }
     constrain_triggering_spell_with_nth_filter(&mut def);
 
@@ -2223,6 +2251,10 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
         QuantityExpr::Offset { inner, offset } => QuantityExpr::Offset {
             inner: Box::new(substitute_another_in_expr(inner)),
             offset: *offset,
+        },
+        QuantityExpr::ClampMin { inner, minimum } => QuantityExpr::ClampMin {
+            inner: Box::new(substitute_another_in_expr(inner)),
+            minimum: *minimum,
         },
         QuantityExpr::DivideRounded {
             inner,
@@ -5715,7 +5747,10 @@ fn try_parse_event(
                 def.valid_card = Some(subject.clone());
                 // CR 508.1a: Battalion/Pack Tactics counts any N *other* creatures
                 // (untyped head noun) → no condition-level type axis.
-                def.condition = Some(TriggerCondition::MinCoAttackers { minimum: n });
+                def.condition = Some(TriggerCondition::MinCoAttackers {
+                    minimum: n,
+                    filter: None,
+                });
                 return Some((TriggerMode::Attacks, def));
             }
         }
@@ -9061,10 +9096,11 @@ fn attach_event_timing_tail(def: &mut TriggerDefinition, tail: &str) {
 
 /// Nom combinator for a complete timing-tail clause: matches unrestricted
 /// per-turn tails ("each turn", "in a turn") and player-scoped turn tails
-/// ("during each opponent's turn", "during their turn", "during each of your
-/// turns", "during your turn"). Wrapped in `all_consuming` so it succeeds only
-/// when the clause consumes the entire (already-trimmed) input. Shared by the
-/// nth-spell, nth-draw, and related event timing classifiers.
+/// ("during each opponent's turn", "during their turn", "during each of their
+/// turns", "during each of your turns", "during your turn"). Wrapped in
+/// `all_consuming` so it succeeds only when the clause consumes the entire
+/// (already-trimmed) input. Shared by the nth-spell, nth-draw, and related
+/// event timing classifiers.
 fn parse_timing_tail(i: &str) -> OracleResult<'_, NthEventTimingKind> {
     all_consuming(alt((
         value(NthEventTimingKind::Unrestricted, tag("each turn")),
@@ -9078,7 +9114,7 @@ fn parse_timing_tail(i: &str) -> OracleResult<'_, NthEventTimingKind> {
         ),
         value(
             NthEventTimingKind::Restricted(PlayerFilter::TriggeringPlayer),
-            tag("during their turn"),
+            alt((tag("during their turn"), tag("during each of their turns"))),
         ),
         value(
             NthEventTimingKind::Restricted(PlayerFilter::Controller),
@@ -10845,7 +10881,7 @@ mod tests {
     use crate::types::statics::CastFrequency;
 
     fn blocking_source_beyond_first_expr() -> QuantityExpr {
-        QuantityExpr::Offset {
+        let count_minus_one = QuantityExpr::Offset {
             inner: Box::new(QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCount {
                     filter: TargetFilter::Typed(TypedFilter {
@@ -10856,6 +10892,10 @@ mod tests {
                 },
             }),
             offset: -1,
+        };
+        QuantityExpr::ClampMin {
+            inner: Box::new(count_minus_one),
+            minimum: 0,
         }
     }
 
@@ -12176,8 +12216,9 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::Attacks);
         assert!(def.condition.is_some());
-        if let Some(TriggerCondition::MinCoAttackers { minimum }) = &def.condition {
+        if let Some(TriggerCondition::MinCoAttackers { minimum, filter }) = &def.condition {
             assert_eq!(*minimum, 2);
+            assert_eq!(*filter, None);
         } else {
             panic!("Expected MinCoAttackers");
         }
@@ -13703,7 +13744,7 @@ mod tests {
 
         // Clause 2 — effect + player scope: LoseTheGame fanned out over each
         // player the source creature attacked this turn (CR 508.6). The
-        // controller is excluded by `OpponentAttackedBySourceThisTurn`, so the
+        // controller is excluded by `OpponentAttacked { Source, ThisTurn }`, so the
         // Angel never eliminates itself — directly fixing the "my own Angel
         // killed me" report.
         let execute = def.execute.as_ref().expect("execute must be Some");
@@ -13714,7 +13755,10 @@ mod tests {
         );
         assert_eq!(
             execute.player_scope,
-            Some(PlayerFilter::OpponentAttackedBySourceThisTurn),
+            Some(PlayerFilter::OpponentAttacked {
+                subject: AttackSubject::Source,
+                scope: AttackScope::ThisTurn,
+            }),
             "LoseTheGame must scope to players the source attacked this turn (issue #1599), got {:?}",
             execute.player_scope,
         );
@@ -23798,6 +23842,21 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::Attacks);
         assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    }
+
+    #[test]
+    fn first_time_during_each_opponent_turn_sets_per_opponent_constraint() {
+        // CR 603.2: the "first time during each of their turns" text is part
+        // of the trigger event, not a generic once-per-turn limit.
+        let def = parse_trigger_line(
+            "Whenever an opponent loses life for the first time during each of their turns, put a +1/+1 counter on ~.",
+            "Valgavoth, Harrower of Souls",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeLost);
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OncePerOpponentPerTurn)
+        );
     }
 
     #[test]
