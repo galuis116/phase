@@ -147,6 +147,50 @@ fn cant_block_static_splits_self_reference() {
     assert_eq!(cant.affected, Some(TargetFilter::SelfRef));
 }
 
+/// CR 502.3: Flood the Engine — "Enchanted permanent loses all abilities and
+/// doesn't untap during its controller's untap step." must decompose into BOTH
+/// the loses-all-abilities grant AND a `CantUntap` static affecting the
+/// enchanted permanent. Previously the untap restriction was dropped, so the
+/// permanent untapped normally and the lock did nothing.
+#[test]
+fn doesnt_untap_static_splits_from_grant() {
+    let defs = parse_static_line_multi(
+        "Enchanted permanent loses all abilities and doesn't untap during its controller's untap step.",
+    );
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::CantUntap),
+        "expected a CantUntap static, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the loses-all-abilities grant must be preserved"
+    );
+}
+
+/// CR 502.3: A P/T pump compounded with the untap restriction also splits, with
+/// the `CantUntap` static affecting the same subject.
+#[test]
+fn doesnt_untap_static_splits_from_pump() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 and doesn't untap during its controller's untap step.",
+    );
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantUntap)
+        .expect("expected a CantUntap static");
+    assert!(
+        cant.affected.is_some(),
+        "CantUntap companion must share the grant's affected set"
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the +1/+1 grant must be preserved"
+    );
+}
+
 /// CR 509.1b: Madcap Skills — "Enchanted creature gets +3/+0 and can't be
 /// blocked by more than one creature." must decompose into BOTH the P/T grant
 /// AND a `CantBeBlockedByMoreThan { max: 1 }` static affecting the enchanted
