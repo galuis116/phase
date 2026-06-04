@@ -215,7 +215,7 @@ fn cant_be_blocked_static_split_keeps_trailing_condition() {
         .iter()
         .find_map(|d| {
             (d.mode == StaticMode::CantBeBlocked)
-                .then(|| d.condition.as_ref())
+                .then_some(d.condition.as_ref())
                 .flatten()
         })
         .expect("expected split CantBeBlocked static with condition");
