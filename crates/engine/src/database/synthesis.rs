@@ -225,6 +225,9 @@ impl KeywordTriggerInstaller {
             // one trigger is emitted per `Keyword::Soulshift(_)` on the face.
             Keyword::Soulshift(n) => vec![build_soulshift_trigger(*n)],
             Keyword::Annihilator(n) => vec![build_annihilator_trigger(*n)],
+            // CR 702.39a: Provoke — attacks trigger that may untap a creature the
+            // defending player controls and force it to block this attacker.
+            Keyword::Provoke => vec![build_provoke_trigger()],
             Keyword::Renown(n) => vec![build_renown_trigger(*n)],
             Keyword::Mentor => vec![build_mentor_trigger()],
             // CR 702.58a + CR 604.1: granted Graft installs only the
@@ -287,6 +290,7 @@ impl KeywordTriggerInstaller {
             // Soulshift instances with differing N do not dedupe each other.
             Keyword::Soulshift(n) => is_soulshift_trigger_for_value(trigger, *n),
             Keyword::Annihilator(_) => is_annihilator_attack_trigger(trigger),
+            Keyword::Provoke => is_provoke_attack_trigger(trigger),
             Keyword::Renown(_) => is_renown_trigger(trigger),
             Keyword::Mentor => is_mentor_trigger(trigger),
             // CR 702.58a + CR 604.1: symmetric removal — `RemoveKeyword`
@@ -2936,6 +2940,16 @@ pub fn synthesize_annihilator(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Annihilator(_)));
 }
 
+/// CR 702.39a: Provoke — an `Attacks` trigger (source = this creature) that may
+/// untap a creature the defending player controls and force it to block this
+/// creature this turn. One trigger is synthesized per `Keyword::Provoke`
+/// (Provoke has no numeric parameter; multiple instances are vanishingly rare
+/// but each functions independently per CR 113.2c, which `install_matching`'s
+/// per-instance emission preserves). See `build_provoke_trigger`.
+pub fn synthesize_provoke(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Provoke));
+}
+
 /// CR 702.83a: Exalted — an attack trigger that fires whenever a creature you
 /// control attacks alone, giving +1/+1 until end of turn. CR 702.83b: each
 /// instance triggers separately, so one trigger is synthesized per
@@ -3468,6 +3482,112 @@ fn build_annihilator_trigger(n: u32) -> TriggerDefinition {
             "CR 702.86a: Annihilator {n} — whenever ~ attacks, defending player sacrifices {n} permanent{}.",
             if n == 1 { "" } else { "s" }
         ))
+}
+
+/// CR 702.39a: A Provoke trigger — a self-scoped (`valid_card: SelfRef`)
+/// `Attacks` trigger whose execute body untaps a creature the defending player
+/// controls (`Effect::Untap` targeting a `ControllerRef::DefendingPlayer`
+/// creature) and chains an `Effect::ForceBlock` on that same target via
+/// `TargetFilter::ParentTarget`. Used by `RemoveKeyword` symmetric removal and
+/// `triggers_for`/`trigger_matches_keyword_kind` so a granted-then-removed
+/// `Provoke` strips exactly its own trigger and a coincidental "Whenever ~
+/// attacks, untap target creature" printed trigger is never misclassified.
+fn is_provoke_attack_trigger(t: &TriggerDefinition) -> bool {
+    if !matches!(t.mode, TriggerMode::Attacks)
+        || !matches!(t.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return false;
+    }
+    let Some(execute) = t.execute.as_deref() else {
+        return false;
+    };
+    // CR 702.39a: "you may have target creature..." — the untap is optional.
+    if !execute.optional {
+        return false;
+    }
+    // CR 702.39a + CR 701.26b: the parent body untaps a creature the defending
+    // player controls.
+    let Effect::Untap {
+        target: TargetFilter::Typed(tf),
+    } = &*execute.effect
+    else {
+        return false;
+    };
+    if tf.controller != Some(ControllerRef::DefendingPlayer) {
+        return false;
+    }
+    // CR 702.39a + CR 509.1c: the chained sub-body force-blocks that same
+    // target (`ParentTarget`).
+    matches!(
+        execute.sub_ability.as_deref().map(|a| &*a.effect),
+        Some(Effect::ForceBlock {
+            target: TargetFilter::ParentTarget,
+        })
+    )
+}
+
+/// CR 702.39a: Provoke — "Whenever this creature attacks, you may have target
+/// creature defending player controls untap and block it this turn if able."
+///
+/// The trigger is `TriggerMode::Attacks` with `valid_card = SelfRef` so it
+/// fires only when this creature is among the declared attackers
+/// (`match_attacks` in `trigger_matchers.rs`), mirroring `build_annihilator_trigger`.
+///
+/// CR 702.39a is "you may", so the execute ability is `optional`. The single
+/// target is a creature controlled by the defending player — `ControllerRef::
+/// DefendingPlayer` resolves at target-selection time to the player THIS
+/// creature is attacking (CR 508.5 / 508.5a), not "each opponent". The execute
+/// body untaps that creature (`Effect::Untap` — CR 701.26b), then a
+/// continuation `sub_ability` applies `Effect::ForceBlock` to the same target
+/// via `TargetFilter::ParentTarget` (CR 608.2c chained-anaphor inheritance).
+///
+/// `Effect::ForceBlock` is the EXISTING source-referential force-block resolver
+/// (`game::effects::force_block`): because the source is an active attacker at
+/// resolution it grants `StaticMode::MustBlockAttacker { attacker: source }`
+/// (CR 702.39a + CR 509.1c), enforced in `combat.rs` declare-blockers
+/// validation. No force-block logic is reimplemented here.
+///
+fn build_provoke_trigger() -> TriggerDefinition {
+    // CR 702.39a: "target creature defending player controls". `DefendingPlayer`
+    // routes to `defending_player_for_attacker(state, source_id)` at
+    // target-selection time (CR 508.5 / 508.5a).
+    let untap_target =
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::DefendingPlayer));
+
+    // CR 702.39a + CR 509.1c: chained continuation forcing the untapped target
+    // to block this attacker. Reuses the existing source-referential ForceBlock
+    // resolver via `ParentTarget` so the same creature is affected.
+    let force_block = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ForceBlock {
+            target: TargetFilter::ParentTarget,
+        },
+    )
+    .description("CR 509.1c: that creature blocks this creature this turn if able".to_string());
+
+    // CR 702.39a + CR 701.26b: "you may have target creature ... untap" — the
+    // optional parent body untaps the chosen defender, then force-blocks it.
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Untap {
+            target: untap_target,
+        },
+    )
+    .optional()
+    .sub_ability(force_block)
+    .description(
+        "Provoke — untap target creature defending player controls; it blocks this turn if able"
+            .to_string(),
+    );
+
+    TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(execute)
+        .description(
+            "CR 702.39a: Provoke — whenever this creature attacks, you may have target \
+             creature defending player controls untap and block it this turn if able."
+                .to_string(),
+        )
 }
 
 /// CR 702.83a: Exalted — "Whenever a creature you control attacks alone,
@@ -5727,6 +5847,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // separately. Defending player resolved per-attacker via
     // `ControllerRef::DefendingPlayer` (CR 508.5 / 508.5a).
     synthesize_annihilator(face);
+    // CR 702.39a: Provoke — attacks trigger that may untap a creature the
+    // defending player controls (CR 508.5 / 508.5a) and force it to block this
+    // attacker (reusing the existing source-referential ForceBlock resolver).
+    synthesize_provoke(face);
     // CR 702.83a: Exalted — attack trigger that gives +1/+1 until end of turn
     // whenever a creature you control attacks alone. CR 702.83b: each instance
     // triggers separately.
@@ -9121,6 +9245,313 @@ mod annihilator_synthesis_tests {
                 .count(),
             2
         );
+    }
+}
+
+#[cfg(test)]
+mod provoke_synthesis_tests {
+    //! CR 702.39a shape tests: the synthesized Provoke trigger is an `Attacks`
+    //! trigger gated on `SelfRef` whose OPTIONAL execute body untaps a creature
+    //! the defending player controls (`Effect::Untap` over a
+    //! `ControllerRef::DefendingPlayer` creature filter) and chains an
+    //! `Effect::ForceBlock` on that same target via `TargetFilter::ParentTarget`.
+    use super::*;
+
+    fn provoke_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Provoke);
+        face
+    }
+
+    /// CR 702.39a: synthesizer emits an optional `Attacks` trigger whose execute
+    /// body untaps a `DefendingPlayer`-controlled creature, then force-blocks it.
+    #[test]
+    fn synthesize_provoke_adds_untap_and_force_block_attack_trigger() {
+        let mut face = provoke_face();
+        synthesize_provoke(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::Attacks))
+            .expect("provoke should add an Attacks trigger");
+
+        // CR 702.39a: "Whenever THIS creature attacks" — fires only for the source.
+        assert!(
+            matches!(trigger.valid_card, Some(TargetFilter::SelfRef)),
+            "valid_card must be SelfRef (only when the provoking creature attacks)"
+        );
+
+        let execute = trigger.execute.as_deref().expect("execute body required");
+
+        // CR 702.39a: "you may have target creature..." — the ability is optional.
+        assert!(
+            execute.optional,
+            "Provoke is a 'you may' trigger (CR 702.39a)"
+        );
+
+        // CR 702.39a + CR 701.26b: parent body untaps the defending player's creature.
+        let Effect::Untap {
+            target: TargetFilter::Typed(tf),
+        } = &*execute.effect
+        else {
+            panic!("execute body must be Effect::Untap over a TypedFilter");
+        };
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::DefendingPlayer),
+            "untap target must be a creature the defending player controls (CR 702.39a / CR 508.5)"
+        );
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Creature)),
+            "untap target filter must be a creature"
+        );
+
+        // CR 702.39a + CR 509.1c: chained continuation force-blocks the SAME target.
+        let sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("force-block continuation required");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::ForceBlock {
+                    target: TargetFilter::ParentTarget,
+                }
+            ),
+            "sub-ability must force-block the parent (untapped) target via ParentTarget, got {:?}",
+            sub.effect
+        );
+    }
+
+    /// Repeated synthesis must not duplicate the trigger (idempotency).
+    #[test]
+    fn synthesize_provoke_is_idempotent() {
+        let mut face = provoke_face();
+        synthesize_provoke(&mut face);
+        synthesize_provoke(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_provoke_attack_trigger(t))
+            .count();
+        assert_eq!(count, 1, "provoke trigger should be deduped");
+    }
+
+    /// Cards without Provoke are unaffected.
+    #[test]
+    fn synthesize_provoke_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_provoke(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// Idempotency-shape predicate must NOT match unrelated `Attacks` triggers
+    /// — e.g. a non-optional "Whenever this creature attacks, untap target
+    /// creature defending player controls" must not be misclassified as Provoke
+    /// (Provoke requires the optional flag AND the ForceBlock continuation).
+    #[test]
+    fn is_provoke_attack_trigger_rejects_unrelated_untap_on_attack() {
+        // Same target/mode shape but NOT optional and NO force-block sub.
+        let unrelated = TriggerDefinition::new(TriggerMode::Attacks)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Untap {
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::DefendingPlayer),
+                    ),
+                },
+            ));
+        assert!(
+            !is_provoke_attack_trigger(&unrelated),
+            "a non-optional untap-on-attack with no force-block must not match Provoke"
+        );
+    }
+
+    /// CR 604.1 runtime-grant path: `triggers_for` produces the trigger and
+    /// `trigger_matches_keyword_kind` recognizes it (used by layers.rs when
+    /// Provoke is granted/removed at runtime). Symmetric with the analogous
+    /// annihilator/afterlife roundtrip coverage.
+    #[test]
+    fn provoke_triggers_for_and_matcher_roundtrip() {
+        let triggers = KeywordTriggerInstaller::triggers_for(&Keyword::Provoke);
+        assert_eq!(triggers.len(), 1, "Provoke installs exactly one trigger");
+        assert!(
+            KeywordTriggerInstaller::trigger_matches_keyword_kind(&triggers[0], &Keyword::Provoke),
+            "matcher must recognize the synthesized Provoke trigger"
+        );
+        // Must not cross-match an unrelated keyword.
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &Keyword::Mentor
+        ));
+    }
+
+    /// CR 702.39b: if a creature has multiple instances of Provoke, each
+    /// triggers separately. MTGJSON dedupes the keyword array to one "Provoke",
+    /// so `build_oracle_face` must recover repeated printed bare words from
+    /// Oracle text before `synthesize_all` installs one trigger per instance.
+    #[test]
+    fn build_oracle_face_recovers_repeated_provoke_instances_from_oracle_text() {
+        let mtgjson = AtomicCard {
+            name: "Repeated Provoke Test".to_string(),
+            mana_cost: Some("{2}{G}".to_string()),
+            colors: vec!["G".to_string()],
+            color_identity: vec!["G".to_string()],
+            power: Some("2".to_string()),
+            toughness: Some("2".to_string()),
+            loyalty: None,
+            defense: None,
+            text: Some("Provoke, provoke".to_string()),
+            layout: "normal".to_string(),
+            type_line: Some("Creature — Beast".to_string()),
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Beast".to_string()],
+            supertypes: Vec::new(),
+            keywords: Some(vec!["Provoke".to_string()]),
+            side: None,
+            face_name: None,
+            mana_value: 3.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: crate::database::mtgjson::AtomicIdentifiers {
+                scryfall_id: None,
+                scryfall_oracle_id: None,
+            },
+            foreign_data: Vec::new(),
+        };
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        assert_eq!(
+            face.keywords
+                .iter()
+                .filter(|keyword| matches!(keyword, Keyword::Provoke))
+                .count(),
+            2,
+            "Oracle text must recover repeated Provoke instances that MTGJSON dedupes"
+        );
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|trigger| is_provoke_attack_trigger(trigger))
+                .count(),
+            2,
+            "CR 702.39b: each recovered Provoke instance triggers separately"
+        );
+    }
+}
+
+#[cfg(test)]
+mod provoke_runtime_tests {
+    //! CR 702.39a runtime integration: resolving the synthesized Provoke
+    //! execute chain (with a defending-player creature chosen as the target)
+    //! untaps that creature (`Effect::Untap` — CR 701.26b) and, because the
+    //! source is an active attacker, the chained `Effect::ForceBlock` grants
+    //! `StaticMode::MustBlockAttacker { attacker: source }` (CR 702.39a /
+    //! CR 509.1c) — exercising the EXISTING force-block resolver, not new logic.
+
+    use super::*;
+    use crate::game::ability_utils::build_resolved_from_def_with_targets;
+    use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+    use crate::game::effects::resolve_ability_chain;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{ContinuousModification, EffectKind, TargetRef};
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+    use crate::types::statics::StaticMode;
+
+    fn place(state: &mut GameState, controller: PlayerId, name: &str) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        create_object(
+            state,
+            card_id,
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        )
+    }
+
+    /// CR 702.39a + CR 701.26b + CR 509.1c happy path: the provoking creature
+    /// (PlayerId(0)) is an active attacker; the chosen defender (a tapped
+    /// PlayerId(1) creature) untaps and gains `MustBlockAttacker { attacker:
+    /// provoker }`.
+    #[test]
+    fn provoke_execute_untaps_target_and_forces_block_on_attacker() {
+        let trigger = build_provoke_trigger();
+        let execute = trigger.execute.as_deref().expect("execute body required");
+
+        let mut state = GameState::new_two_player(42);
+        let provoker = place(&mut state, PlayerId(0), "Provoker");
+        let defender = place(&mut state, PlayerId(1), "Tapped Bear");
+        // Target starts tapped so the untap is observable.
+        state.objects.get_mut(&defender).unwrap().tapped = true;
+
+        // CR 508.5 / CR 509.1c: the source must be an active attacker for the
+        // ForceBlock resolver to bind `MustBlockAttacker { attacker: source }`.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                provoker,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+
+        // The player chose "yes" and selected the defending creature as target.
+        // `optional` is cleared on the built resolved ability to represent that
+        // affirmative may-choice without routing through the prompt state machine.
+        let mut resolved = build_resolved_from_def_with_targets(
+            execute,
+            provoker,
+            PlayerId(0),
+            vec![TargetRef::Object(defender)],
+        );
+        resolved.optional = false;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+
+        // CR 701.26b: the targeted creature untaps.
+        assert!(
+            !state.objects.get(&defender).unwrap().tapped,
+            "Provoke must untap the targeted defending creature"
+        );
+
+        // CR 702.39a + CR 509.1c: a MustBlockAttacker static bound to the
+        // provoking attacker is applied to the targeted creature.
+        let forced = state.transient_continuous_effects.iter().any(|ce| {
+            ce.modifications.iter().any(|m| {
+                matches!(
+                    m,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::MustBlockAttacker { attacker },
+                    } if *attacker == provoker
+                )
+            })
+        });
+        assert!(
+            forced,
+            "Provoke must apply MustBlockAttacker bound to the provoking attacker, \
+             reusing the existing source-referential ForceBlock resolver"
+        );
+
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::ForceBlock,
+                ..
+            }
+        )));
     }
 }
 
