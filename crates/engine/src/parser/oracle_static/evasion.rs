@@ -598,20 +598,19 @@ pub(crate) fn try_split_and_cant_block(text: &str) -> Option<Vec<StaticDefinitio
 /// different `StaticMode`.
 pub(crate) fn try_split_and_cant_attack(text: &str) -> Option<Vec<StaticDefinition>> {
     type VE<'a> = OracleError<'a>;
-    let lower = text.to_lowercase();
 
-    let (before, _matched, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+    let (before, _matched, rest) = nom_primitives::scan_preceded(text, |i: &str| {
         // Match both the ASCII and typographic U+2019 apostrophe.
         let (i, _) = alt((
-            tag::<_, _, VE>("and can't attack"),
-            tag::<_, _, VE>("and can\u{2019}t attack"),
+            tag_no_case::<_, _, VE>("and can't attack"),
+            tag_no_case::<_, _, VE>("and can\u{2019}t attack"),
         ))
         .parse(i)?;
         // Optional trailing duration phrase.
         let (i, _) = opt(alt((
-            tag::<_, _, VE>(" each combat"),
-            tag::<_, _, VE>(" this combat"),
-            tag::<_, _, VE>(" this turn"),
+            tag_no_case::<_, _, VE>(" each combat"),
+            tag_no_case::<_, _, VE>(" this combat"),
+            tag_no_case::<_, _, VE>(" this turn"),
         )))
         .parse(i)?;
         Ok((i, ()))
