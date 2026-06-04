@@ -631,7 +631,11 @@ pub(crate) fn try_split_and_doesnt_untap(text: &str) -> Option<Vec<StaticDefinit
     // silently dropping it — parity with the sibling `try_split_and_cant_block`
     // terminal guard.
     let tail = rest.trim_start().trim_end_matches('.').trim();
-    if !tail.is_empty() && !tail.starts_with("as long as ") && !tail.starts_with("if ") {
+    let recognized_rider = tail.is_empty()
+        || alt((tag::<_, _, VE>("as long as "), tag::<_, _, VE>("if ")))
+            .parse(tail)
+            .is_ok();
+    if !recognized_rider {
         return None;
     }
 
