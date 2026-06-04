@@ -606,6 +606,14 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 509.1b: "<predicate> and can't be blocked[ by/except by … | by more
+    // than N creatures]" pairs a keyword/continuous grant with an evasion grant
+    // under one subject (Madcap Skills). Split so the evasion clause is not
+    // dropped.
+    if let Some(defs) = try_split_and_cant_be_blocked(&stripped) {
+        return defs;
+    }
+
     // CR 509.1b: "<grant> and cannot block" pairs a P/T (or keyword) grant with a
     // blocking restriction under one subject (Copper Carapace, Maniacal Rage,
     // Threshold downside creatures). Split so the CantBlock clause is not dropped.
