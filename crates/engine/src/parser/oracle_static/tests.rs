@@ -128,7 +128,8 @@ fn cant_block_static_splits_from_pump() {
         defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
     );
     assert!(
-        defs.iter().any(|d| matches!(d.mode, StaticMode::Continuous)),
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
         "the +2/+2 grant must be preserved"
     );
 }
