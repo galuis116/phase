@@ -621,6 +621,15 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 508.1c: "<grant> and can't attack" pairs a P/T (or keyword) grant with an
+    // attacking restriction under one subject (Cagemail). Split so the CantAttack
+    // clause is not dropped. The terminal-phrase guard keeps the scoped
+    // "can't attack alone / you / planeswalkers / its owner …" forms with their
+    // own handlers.
+    if let Some(defs) = try_split_and_cant_attack(&stripped) {
+        return defs;
+    }
+
     // CR 509.1b + CR 604.1 + CR 611.3a + CR 613.1f: Attached-subject grant lines
     // ("enchanted creature ...", "equipped creature ...") may decompose into more
     // than one StaticDefinition (e.g. CantBeBlocked + Continuous{AddKeyword}).
