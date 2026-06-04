@@ -614,7 +614,7 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
-    // CR 509.1b: "<grant> and cannot block" pairs a P/T (or keyword) grant with a
+    // CR 509.1b: "<grant> and can't block" pairs a P/T (or keyword) grant with a
     // blocking restriction under one subject (Copper Carapace, Maniacal Rage,
     // Threshold downside creatures). Split so the CantBlock clause is not dropped.
     if let Some(defs) = try_split_and_cant_block(&stripped) {
