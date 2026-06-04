@@ -621,6 +621,15 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 508.1c: "<grant> and can't attack" pairs a P/T (or keyword) grant with an
+    // attacking restriction under one subject (Cagemail). Split so the CantAttack
+    // clause is not dropped. The terminal-phrase guard keeps the scoped
+    // "can't attack alone / you / planeswalkers / its owner …" forms with their
+    // own handlers.
+    if let Some(defs) = try_split_and_cant_attack(&stripped) {
+        return defs;
+    }
+
     // CR 502.3: "<grant> and doesn't untap during its controller's untap step"
     // pairs a continuous grant with an untap restriction under one subject (Flood
     // the Engine). Split so the CantUntap clause is not dropped. (The "enters
@@ -953,6 +962,10 @@ pub(crate) fn rebind_source_object_quantity_expr_to_recipient(expr: QuantityExpr
         QuantityExpr::Offset { inner, offset } => QuantityExpr::Offset {
             inner: Box::new(rebind_source_object_quantity_expr_to_recipient(*inner)),
             offset,
+        },
+        QuantityExpr::ClampMin { inner, minimum } => QuantityExpr::ClampMin {
+            inner: Box::new(rebind_source_object_quantity_expr_to_recipient(*inner)),
+            minimum,
         },
         QuantityExpr::Multiply { inner, factor } => QuantityExpr::Multiply {
             inner: Box::new(rebind_source_object_quantity_expr_to_recipient(*inner)),
@@ -1959,7 +1972,55 @@ pub(crate) fn strip_rule_static_subject<'a>(
     None
 }
 
+/// CR 303.4 + CR 301.5: Strip "that is/are/'s enchanted/equipped by <kind> you control"
+/// from a subject phrase and return the corresponding `FilterProp`.
+fn parse_attachment_relative_clause_nom(input: &str) -> OracleResult<'_, (&str, AttachmentKind)> {
+    let (input, before) = take_until(" that").parse(input)?;
+    let (input, _) = tag(" that").parse(input)?;
+    let (input, _) = opt(alt((tag("'s"), tag(" is"), tag(" are")))).parse(input)?;
+    let (input, kind) = alt((
+        value(AttachmentKind::Aura, tag(" enchanted by an aura")),
+        value(AttachmentKind::Equipment, tag(" equipped by an equipment")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" you control").parse(input)?;
+    if !input.is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    Ok((input, (before.trim_end(), kind)))
+}
+
+pub(crate) fn strip_attachment_relative_clause(subject: &str) -> (&str, Option<FilterProp>) {
+    let lower = subject.to_lowercase();
+    let Ok((rest, (before, kind))) = parse_attachment_relative_clause_nom(&lower) else {
+        return (subject, None);
+    };
+    if !rest.is_empty() {
+        return (subject, None);
+    }
+    let prop = FilterProp::HasAttachment {
+        kind,
+        controller: Some(ControllerRef::You),
+        exclude_source: false,
+    };
+    (&subject[..before.len()], Some(prop))
+}
+
+fn merge_filter_prop(filter: TargetFilter, prop: FilterProp) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut tf) => {
+            tf.properties.push(prop);
+            TargetFilter::Typed(tf)
+        }
+        other => other,
+    }
+}
+
 pub(crate) fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFilter> {
+    let (subject, attachment_prop) = strip_attachment_relative_clause(subject);
     let lower = subject.to_lowercase();
     let tp = TextPair::new(subject, &lower);
 
@@ -1989,7 +2050,10 @@ pub(crate) fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFi
     if let Some(rest_tp) = nom_tag_tp(&tp, "all ").or_else(|| nom_tag_tp(&tp, "each ")) {
         let (filter, rest) = parse_type_phrase(rest_tp.original);
         if rest.trim().is_empty() {
-            return Some(filter);
+            return Some(match attachment_prop {
+                Some(prop) => merge_filter_prop(filter, prop),
+                None => filter,
+            });
         }
     }
 
@@ -2013,7 +2077,10 @@ pub(crate) fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFi
 
     let (filter, rest) = parse_type_phrase(subject);
     if rest.trim().is_empty() {
-        return Some(filter);
+        return Some(match attachment_prop {
+            Some(prop) => merge_filter_prop(filter, prop),
+            None => filter,
+        });
     }
 
     None
@@ -2137,7 +2204,10 @@ pub(crate) fn parse_rule_static_predicate_nom(
     input: &str,
 ) -> OracleResult<'_, RuleStaticPredicate> {
     let (rest, predicate) = alt((
-        parse_combat_rule_static_predicate_nom,
+        map(
+            parse_combat_rule_static_predicate_with_defended_nom,
+            |(predicate, _)| predicate,
+        ),
         value(
             RuleStaticPredicate::CantBeSacrificed,
             tag("can't be sacrificed"),
@@ -2152,22 +2222,31 @@ pub(crate) fn parse_rule_static_predicate_nom(
     Ok((rest, predicate))
 }
 
-pub(crate) fn parse_combat_rule_static_predicate_nom(
+/// Combat-rule predicate plus optional CR 508.1d defended scope (`CantAttack` only).
+pub(crate) fn parse_combat_rule_static_predicate_with_defended_nom(
     input: &str,
-) -> OracleResult<'_, RuleStaticPredicate> {
+) -> OracleResult<
+    '_,
+    (
+        RuleStaticPredicate,
+        Option<crate::types::triggers::AttackTargetFilter>,
+    ),
+> {
     alt((
         value(
-            RuleStaticPredicate::CantAttackOrBlock,
+            (RuleStaticPredicate::CantAttackOrBlock, None),
             tag("can't attack or block"),
         ),
-        parse_cant_attack_rule_static_predicate_nom,
-        value(RuleStaticPredicate::CantBlock, tag("can't block")),
+        map(parse_cant_attack_rule_static_predicate_nom, |defended| {
+            (RuleStaticPredicate::CantAttack, defended)
+        }),
+        value((RuleStaticPredicate::CantBlock, None), tag("can't block")),
         value(
-            RuleStaticPredicate::CantCrew,
+            (RuleStaticPredicate::CantCrew, None),
             (tag("can't crew"), opt(preceded(space1, tag("vehicles")))),
         ),
         value(
-            RuleStaticPredicate::MustAttack,
+            (RuleStaticPredicate::MustAttack, None),
             alt((
                 tag("attacks each combat if able"),
                 tag("attack each combat if able"),
@@ -2178,7 +2257,7 @@ pub(crate) fn parse_combat_rule_static_predicate_nom(
             )),
         ),
         value(
-            RuleStaticPredicate::MustBlock,
+            (RuleStaticPredicate::MustBlock, None),
             alt((
                 tag("blocks each combat if able"),
                 tag("block each combat if able"),
@@ -2189,14 +2268,14 @@ pub(crate) fn parse_combat_rule_static_predicate_nom(
             )),
         ),
         value(
-            RuleStaticPredicate::MustBeBlocked,
+            (RuleStaticPredicate::MustBeBlocked, None),
             alt((
                 tag("must be blocked each combat if able"),
                 tag("must be blocked if able"),
             )),
         ),
         value(
-            RuleStaticPredicate::Goaded,
+            (RuleStaticPredicate::Goaded, None),
             alt((tag("is goaded"), tag("are goaded"))),
         ),
     ))
@@ -2241,10 +2320,26 @@ pub(crate) fn parse_rule_static_tail_predicates(rest: &str) -> Option<Vec<RuleSt
     }
 }
 
+/// Optional attack-target scope after "can't attack" (CR 508.1d).
+pub(crate) fn parse_cant_attack_defended_scope_nom(
+    input: &str,
+) -> OracleResult<'_, Option<crate::types::triggers::AttackTargetFilter>> {
+    use crate::types::triggers::AttackTargetFilter;
+    opt(alt((
+        value(
+            AttackTargetFilter::PlayerOrPlaneswalker,
+            tag(" you or planeswalkers you control"),
+        ),
+        value(AttackTargetFilter::Player, tag(" you")),
+    )))
+    .parse(input)
+}
+
 pub(crate) fn parse_cant_attack_rule_static_predicate_nom(
     input: &str,
-) -> OracleResult<'_, RuleStaticPredicate> {
+) -> OracleResult<'_, Option<crate::types::triggers::AttackTargetFilter>> {
     let (rest, _) = tag("can't attack").parse(input)?;
     let (rest, _) = opt(preceded(space1, tag("its owner"))).parse(rest)?;
-    Ok((rest, RuleStaticPredicate::CantAttack))
+    let (rest, defended) = parse_cant_attack_defended_scope_nom(rest)?;
+    Ok((rest, defended))
 }
