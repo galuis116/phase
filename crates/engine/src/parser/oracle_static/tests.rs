@@ -115,6 +115,37 @@ fn extra_blockers_static_self_reference_stays_selfref() {
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
 }
 
+/// CR 509.1b: Copper Carapace — "Equipped creature gets +2/+2 and can't block."
+/// must decompose into BOTH the P/T grant AND a `CantBlock` static affecting the
+/// equipped creature. Previously the "can't block" drawback was dropped, making
+/// the card a strictly-better-than-printed pure pump.
+#[test]
+fn cant_block_static_splits_from_pump() {
+    let defs = parse_static_line_multi("Equipped creature gets +2/+2 and can't block.");
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::CantBlock),
+        "expected a CantBlock static, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter().any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the +2/+2 grant must be preserved"
+    );
+}
+
+/// CR 509.1b: A self-referential pump ("This creature gets +2/+2 and can't
+/// block.", e.g. Threshold downside creatures) also splits, with the `CantBlock`
+/// static affecting the source.
+#[test]
+fn cant_block_static_splits_self_reference() {
+    let defs = parse_static_line_multi("This creature gets +2/+2 and can't block.");
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantBlock)
+        .expect("expected a CantBlock static");
+    assert_eq!(cant.affected, Some(TargetFilter::SelfRef));
+}
+
 /// CR 118.9: Rooftop Storm grants {0} as an alternative MANA cost for Zombie
 /// creature spells the controller casts.
 #[test]
