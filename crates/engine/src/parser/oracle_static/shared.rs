@@ -638,6 +638,14 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 702.5 / CR 702.6: "<grant or restriction> and can't be enchanted [or
+    // equipped] [by other Auras]" pairs a first clause with an attach prohibition
+    // under one subject (Anti-Magic Aura, Consecrate Land). Split so the
+    // CantBeEnchanted/CantBeEquipped clause is not dropped.
+    if let Some(defs) = try_split_and_cant_be_attached(&stripped) {
+        return defs;
+    }
+
     // CR 701.21: "<grant or restriction> and can't be sacrificed" pairs a first
     // clause with a sacrifice prohibition under one subject (Assault Suit). Split
     // so the CantBeSacrificed clause is not dropped.
