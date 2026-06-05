@@ -729,6 +729,59 @@ pub(crate) fn try_split_and_cant_attack(text: &str) -> Option<Vec<StaticDefiniti
     Some(defs)
 }
 
+/// CR 701.21: Decompose `"<grant or restriction> and can't be sacrificed"` into
+/// the first conjunct's static(s) plus an `Other("CantBeSacrificed")` static
+/// sharing the same `affected` set.
+///
+/// Without this split the trailing sacrifice prohibition was dropped: Assault
+/// Suit ("Equipped creature gets +2/+2, has haste, can't attack you or
+/// planeswalkers you control, and can't be sacrificed.") parsed without the
+/// `CantBeSacrificed` static, so the equipped creature could still be
+/// sacrificed — defeating the Equipment's political lock. Mirrors
+/// `try_split_and_cant_block`; `CantBeSacrificed` is a `StaticMode::Other(..)`
+/// host-prohibition (runtime-enforced in `game::sacrifice`), not a
+/// `ContinuousModification`, so the continuous-grant default drops it.
+pub(crate) fn try_split_and_cant_be_sacrificed(text: &str) -> Option<Vec<StaticDefinition>> {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+
+    let (before, _matched, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        // Match both the ASCII and typographic U+2019 apostrophe.
+        alt((
+            tag::<_, _, VE>("and can't be sacrificed"),
+            tag::<_, _, VE>("and can\u{2019}t be sacrificed"),
+        ))
+        .parse(i)
+    })?;
+
+    // Only the bare, terminal "can't be sacrificed" is a plain prohibition. A
+    // remaining tail ("unless …", "to …") is a qualified restriction owned by
+    // another branch — decline so we don't mis-split it.
+    if !rest.trim_start().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    let cut_end = before
+        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
+        .len();
+    let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
+    let mut defs = parse_static_line_multi(&line_a);
+    if defs.is_empty() {
+        return None;
+    }
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+
+    let affected = defs[0].affected.clone()?;
+    defs.push(
+        StaticDefinition::new(StaticMode::Other("CantBeSacrificed".to_string()))
+            .affected(affected)
+            .description(text.to_string()),
+    );
+    Some(defs)
+}
+
 /// CR 509.1b: Classify a "can't be blocked …" evasion predicate (lowercased,
 /// starting with "can't be blocked") into the corresponding `StaticMode` and
 /// optional evasion condition, composing the same building blocks the standalone

@@ -303,6 +303,65 @@ fn cant_attack_split_declines_scoped_restrictions() {
     );
 }
 
+/// CR 701.21: Assault Suit — "Equipped creature gets +2/+2, has haste, can't
+/// attack you or planeswalkers you control, and can't be sacrificed." must
+/// include an `Other("CantBeSacrificed")` static alongside the +2/+2 grant.
+/// Previously the sacrifice prohibition was dropped, so the equipped creature
+/// could still be sacrificed.
+#[test]
+fn cant_be_sacrificed_static_splits_from_grant() {
+    let defs = parse_static_line_multi(
+        "Equipped creature gets +2/+2, has haste, can't attack you or planeswalkers you control, and can't be sacrificed.",
+    );
+    assert!(
+        defs.iter()
+            .any(|d| d.mode == StaticMode::Other("CantBeSacrificed".to_string())),
+        "expected a CantBeSacrificed static, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the +2/+2 grant must be preserved"
+    );
+}
+
+/// CR 701.21: A simple pump compounded with the sacrifice prohibition also
+/// splits, with `CantBeSacrificed` sharing the grant's affected set.
+#[test]
+fn cant_be_sacrificed_static_splits_from_pump() {
+    let defs = parse_static_line_multi("Enchanted creature gets +1/+1 and can't be sacrificed.");
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Other("CantBeSacrificed".to_string()))
+        .expect("expected a CantBeSacrificed static");
+    assert!(
+        cant.affected.is_some(),
+        "CantBeSacrificed companion must share the grant's affected set"
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the +1/+1 grant must be preserved"
+    );
+}
+
+/// CR 701.21: A qualified "can't be sacrificed unless …" tail must not be
+/// mis-split into a plain `CantBeSacrificed` — the terminal guard declines.
+#[test]
+fn cant_be_sacrificed_split_declines_qualified_tail() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 and can't be sacrificed unless you pay 2 life.",
+    );
+    assert!(
+        !defs
+            .iter()
+            .any(|d| d.mode == StaticMode::Other("CantBeSacrificed".to_string())),
+        "qualified \"unless …\" tail must make the split decline, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
 /// CR 509.1b: Madcap Skills — "Enchanted creature gets +3/+0 and can't be
 /// blocked by more than one creature." must decompose into BOTH the P/T grant
 /// AND a `CantBeBlockedByMoreThan { max: 1 }` static affecting the enchanted
