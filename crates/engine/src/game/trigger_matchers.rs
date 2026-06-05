@@ -605,6 +605,9 @@ fn player_matches_filter(
             controller: Some(ControllerRef::Opponent),
             ..
         }) => trigger_controller.is_some_and(|controller| controller != player_id),
+        TargetFilter::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, source_id) == Some(player_id)
+        }
         TargetFilter::AttachedTo => {
             state
                 .objects
