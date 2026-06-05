@@ -115,6 +115,32 @@ fn extra_blockers_static_self_reference_stays_selfref() {
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
 }
 
+/// CR 502.3 + CR 113.6: the self-referential Seedborn-class untap permission —
+/// "Untap this artifact during each other player's untap step" (Bender's
+/// Waterskin) must lower to `UntapsDuringEachOtherPlayersUntapStep` with the
+/// affected filter being the source itself (`SelfRef`), so its controller
+/// untaps it during every other player's untap step. Before this, the line was
+/// classified as a one-shot `Effect::Untap` and never reached this static path.
+#[test]
+fn self_untap_during_each_other_untap_step_bender_waterskin() {
+    for subject in [
+        "this artifact",
+        "this creature",
+        "this permanent",
+        "this card",
+        "this attraction",
+        "itself",
+        "~",
+    ] {
+        let def = parse_static_line(&format!(
+            "Untap {subject} during each other player's untap step."
+        ))
+        .unwrap_or_else(|| panic!("static def for subject {subject:?}"));
+        assert_eq!(def.mode, StaticMode::UntapsDuringEachOtherPlayersUntapStep);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    }
+}
+
 /// CR 509.1b: Copper Carapace — "Equipped creature gets +2/+2 and can't block."
 /// must decompose into BOTH the P/T grant AND a `CantBlock` static affecting the
 /// equipped creature. Previously the "can't block" drawback was dropped, making
