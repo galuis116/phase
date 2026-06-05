@@ -369,6 +369,54 @@ fn cant_be_attached_static_splits_both_prohibitions() {
     );
 }
 
+/// CR 602.5: Viper's Kiss — "Enchanted creature gets -1/-1, and its activated
+/// abilities can't be activated." must decompose into BOTH the -1/-1 grant AND a
+/// `CantBeActivated` static. Previously the activation prohibition was dropped,
+/// so the enchanted creature's activated abilities still worked.
+#[test]
+fn cant_activate_abilities_static_splits_from_grant() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets -1/-1, and its activated abilities can't be activated.",
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::CantBeActivated { .. })),
+        "expected a CantBeActivated static, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the -1/-1 grant must be preserved"
+    );
+}
+
+/// CR 602.5 + CR 603.2a: The split `CantBeActivated` carries the self-reference
+/// scope (every player is prohibited from activating the affected permanent's
+/// own activated abilities), matching the standalone / Arrest-compound path.
+#[test]
+fn cant_activate_abilities_static_self_reference_scope() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets -1/-1, and its activated abilities can't be activated.",
+    );
+    let prohibition = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::CantBeActivated { .. }))
+        .expect("expected a CantBeActivated static");
+    assert!(
+        matches!(
+            &prohibition.mode,
+            StaticMode::CantBeActivated {
+                who: ProhibitionScope::AllPlayers,
+                source_filter: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "expected self-reference AllPlayers scope, got {:?}",
+        prohibition.mode
+    );
+}
+
 /// CR 509.1b: Madcap Skills — "Enchanted creature gets +3/+0 and can't be
 /// blocked by more than one creature." must decompose into BOTH the P/T grant
 /// AND a `CantBeBlockedByMoreThan { max: 1 }` static affecting the enchanted

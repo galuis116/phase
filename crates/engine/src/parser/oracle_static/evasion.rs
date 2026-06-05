@@ -797,6 +797,66 @@ pub(crate) fn try_split_and_cant_be_attached(text: &str) -> Option<Vec<StaticDef
     Some(defs)
 }
 
+/// CR 602.5 + CR 603.2a: Decompose `"<grant or restriction> and [its] activated
+/// abilities can't be activated"` into the first conjunct's static(s) plus a
+/// `CantBeActivated` static (self-reference: the affected permanent's own
+/// activated abilities can't be activated by anyone).
+///
+/// Without this split the trailing activation prohibition was dropped: Viper's
+/// Kiss ("Enchanted creature gets -1/-1, and its activated abilities can't be
+/// activated.") parsed to only the -1/-1 grant, so the enchanted creature's
+/// activated abilities still worked. Mirrors `try_split_and_cant_block`;
+/// `CantBeActivated` is a struct `StaticMode` (not a `ContinuousModification`),
+/// built exactly like the standalone / Arrest-compound path
+/// (`who = AllPlayers, source_filter = SelfRef`) so it rides the same enforcement.
+/// The "can't attack/block, and activated abilities can't be activated" compound
+/// (Arrest, Faith's Fetters) is handled by its own earlier branch.
+pub(crate) fn try_split_and_cant_activate_abilities(text: &str) -> Option<Vec<StaticDefinition>> {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+
+    let (before, _matched, _rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        // Match both the ASCII and typographic U+2019 apostrophe, with/without "its".
+        let (i, _) = alt((
+            tag::<_, _, VE>("and its activated abilities can't be activated"),
+            tag::<_, _, VE>("and its activated abilities can\u{2019}t be activated"),
+            tag::<_, _, VE>("and activated abilities can't be activated"),
+            tag::<_, _, VE>("and activated abilities can\u{2019}t be activated"),
+        ))
+        .parse(i)?;
+        Ok((i, ()))
+    })?;
+
+    let cut_end = before
+        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
+        .len();
+    let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
+    let mut defs = parse_static_line_multi(&line_a);
+    if defs.is_empty() {
+        return None;
+    }
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+    // Guard: only split when the first conjunct is itself an affected static
+    // (a grant/restriction on the same subject), never a bare/global line.
+    defs[0].affected.clone()?;
+
+    // CR 602.5 + CR 603.2a: self-reference case — the affected permanent's own
+    // activated abilities can't be activated by anyone. Mirrors the standalone
+    // dispatch and the Arrest compound, including any "except …" exemption tail.
+    defs.push(
+        StaticDefinition::new(StaticMode::CantBeActivated {
+            who: ProhibitionScope::AllPlayers,
+            source_filter: TargetFilter::SelfRef,
+            exemption: parse_cant_be_activated_exemption_in_text(&lower),
+        })
+        .affected(TargetFilter::SelfRef)
+        .description(text.to_string()),
+    );
+    Some(defs)
+}
+
 /// CR 509.1b: Classify a "can't be blocked …" evasion predicate (lowercased,
 /// starting with "can't be blocked") into the corresponding `StaticMode` and
 /// optional evasion condition, composing the same building blocks the standalone
