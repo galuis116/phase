@@ -816,12 +816,13 @@ pub(crate) fn try_split_and_cant_activate_abilities(text: &str) -> Option<Vec<St
     let lower = text.to_lowercase();
 
     let (before, _matched, _rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
-        // Match both the ASCII and typographic U+2019 apostrophe, with/without "its".
+        // Compose the two independent axes rather than enumerating the product:
+        // an optional possessive "its " and the ASCII / U+2019 apostrophe form.
+        let (i, _) = tag::<_, _, VE>("and ").parse(i)?;
+        let (i, _) = opt(tag::<_, _, VE>("its ")).parse(i)?;
         let (i, _) = alt((
-            tag::<_, _, VE>("and its activated abilities can't be activated"),
-            tag::<_, _, VE>("and its activated abilities can\u{2019}t be activated"),
-            tag::<_, _, VE>("and activated abilities can't be activated"),
-            tag::<_, _, VE>("and activated abilities can\u{2019}t be activated"),
+            tag::<_, _, VE>("activated abilities can't be activated"),
+            tag::<_, _, VE>("activated abilities can\u{2019}t be activated"),
         ))
         .parse(i)?;
         Ok((i, ()))
@@ -838,20 +839,28 @@ pub(crate) fn try_split_and_cant_activate_abilities(text: &str) -> Option<Vec<St
     for def in &mut defs {
         def.description = Some(text.to_string());
     }
-    // Guard: only split when the first conjunct is itself an affected static
-    // (a grant/restriction on the same subject), never a bare/global line.
-    defs[0].affected.clone()?;
 
-    // CR 602.5 + CR 603.2a: self-reference case — the affected permanent's own
-    // activated abilities can't be activated by anyone. Mirrors the standalone
-    // dispatch and the Arrest compound, including any "except …" exemption tail.
+    // CR 602.5 + CR 603.2a: the prohibition applies to the same subject as the
+    // grant (the enchanted/equipped creature). `CantBeActivated` is a
+    // data-carrying static with no layer-pipeline handler — it is NOT re-homed
+    // onto the host the way `Continuous`/`GrantStaticAbility` modifications are.
+    // `is_blocked_by_cant_be_activated` (game/casting.rs) matches `source_filter`
+    // against the activating permanent from the static SOURCE's perspective
+    // (`FilterContext::from_source(static_owner)`), ignoring `affected`. The
+    // static lives on the Aura/Equipment, so `source_filter` must be the host
+    // filter (e.g. `EnchantedBy`) to resolve to the enchanted/equipped creature.
+    // A `SelfRef` `source_filter` would resolve to the Aura/Equipment itself and
+    // silently block nothing. For a self-referential grant ("this creature gets
+    // … and its activated abilities …") the first conjunct's filter is already
+    // `SelfRef`, so threading it through is correct in every case.
+    let affected = defs[0].affected.clone()?;
     defs.push(
         StaticDefinition::new(StaticMode::CantBeActivated {
             who: ProhibitionScope::AllPlayers,
-            source_filter: TargetFilter::SelfRef,
+            source_filter: affected.clone(),
             exemption: parse_cant_be_activated_exemption_in_text(&lower),
         })
-        .affected(TargetFilter::SelfRef)
+        .affected(affected)
         .description(text.to_string()),
     );
     Some(defs)

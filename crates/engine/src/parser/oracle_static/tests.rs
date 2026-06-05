@@ -391,11 +391,14 @@ fn cant_activate_abilities_static_splits_from_grant() {
     );
 }
 
-/// CR 602.5 + CR 603.2a: The split `CantBeActivated` carries the self-reference
-/// scope (every player is prohibited from activating the affected permanent's
-/// own activated abilities), matching the standalone / Arrest-compound path.
+/// CR 602.5 + CR 603.2a: The split `CantBeActivated` prohibits every player from
+/// activating the ENCHANTED creature's abilities. Because the static lives on the
+/// Aura and `is_blocked_by_cant_be_activated` matches `source_filter` from the
+/// Aura source (ignoring `affected`, and with no re-homing for this static mode),
+/// the companion's `source_filter` must be the host filter (`EnchantedBy`) — NOT
+/// `SelfRef`, which would resolve to the Aura itself (a silent runtime no-op).
 #[test]
-fn cant_activate_abilities_static_self_reference_scope() {
+fn cant_activate_abilities_static_targets_enchanted_creature() {
     let defs = parse_static_line_multi(
         "Enchanted creature gets -1/-1, and its activated abilities can't be activated.",
     );
@@ -403,17 +406,24 @@ fn cant_activate_abilities_static_self_reference_scope() {
         .iter()
         .find(|d| matches!(d.mode, StaticMode::CantBeActivated { .. }))
         .expect("expected a CantBeActivated static");
+    let StaticMode::CantBeActivated {
+        who, source_filter, ..
+    } = &prohibition.mode
+    else {
+        unreachable!("matched CantBeActivated above");
+    };
+    assert_eq!(
+        *who,
+        ProhibitionScope::AllPlayers,
+        "every player is prohibited"
+    );
     assert!(
         matches!(
-            &prohibition.mode,
-            StaticMode::CantBeActivated {
-                who: ProhibitionScope::AllPlayers,
-                source_filter: TargetFilter::SelfRef,
-                ..
-            }
+            source_filter,
+            TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::EnchantedBy)
         ),
-        "expected self-reference AllPlayers scope, got {:?}",
-        prohibition.mode
+        "source_filter must be the host (EnchantedBy) filter so it resolves to the \
+         enchanted creature from the Aura source, got {source_filter:?}"
     );
 }
 

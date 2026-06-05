@@ -28929,6 +28929,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cant_be_activated_aura_blocks_enchanted_creature_not_others() {
+        // CR 602.5: Viper's Kiss — an Aura whose text grants "its activated
+        // abilities can't be activated" must block the ENCHANTED creature's
+        // abilities, not the Aura's own. `CantBeActivated` is not re-homed onto
+        // the host, and the runtime matches `source_filter` from the Aura source,
+        // so the parser must emit `source_filter = EnchantedBy` (the host filter).
+        // This is the end-to-end proof that the #2479 split is not a runtime no-op.
+        let mut state = setup_game_at_main_phase();
+
+        // Enchanted creature with a {T}: Draw activated ability, under P0.
+        let creature = add_artifact_with_activated_ability(&mut state, PlayerId(0));
+        let creature_ability = state.objects[&creature].abilities[0].clone();
+
+        // Parse Viper's Kiss's compound line and take the CantBeActivated companion.
+        let cba = crate::parser::oracle_static::parse_static_line_multi(
+            "Enchanted creature gets -1/-1, and its activated abilities can't be activated.",
+        )
+        .into_iter()
+        .find(|d| matches!(d.mode, StaticMode::CantBeActivated { .. }))
+        .expect("Viper's Kiss yields a CantBeActivated companion static");
+
+        // Place it on an Aura attached to the creature.
+        let aura = create_object(
+            &mut state,
+            CardId(0x71BE),
+            PlayerId(0),
+            "Viper's Kiss".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.entered_battlefield_turn = Some(0);
+            obj.attached_to = Some(creature.into());
+            obj.static_definitions.push(cba);
+        }
+
+        assert!(
+            is_blocked_by_cant_be_activated(&state, PlayerId(0), creature, &creature_ability),
+            "Viper's Kiss must block the ENCHANTED creature's activated ability"
+        );
+
+        // A different, unenchanted creature is unaffected.
+        let other = add_artifact_with_activated_ability(&mut state, PlayerId(0));
+        let other_ability = state.objects[&other].abilities[0].clone();
+        assert!(
+            !is_blocked_by_cant_be_activated(&state, PlayerId(0), other, &other_ability),
+            "Viper's Kiss must NOT block a creature it doesn't enchant"
+        );
+    }
+
     // === CR 605.1a: Pithing Needle mana-ability exemption gate ===
 
     /// Build a Llanowar-Elves-style mana ability: `{T}: Add {G}` (no targets, produces mana).
