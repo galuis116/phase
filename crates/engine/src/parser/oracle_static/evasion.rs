@@ -968,7 +968,7 @@ pub(crate) fn try_split_and_cant_be_sacrificed(text: &str) -> Option<Vec<StaticD
 /// preserved rather than collapsed into blanket Shroud.
 pub(crate) fn try_split_and_cant_be_targeted(text: &str) -> Option<Vec<StaticDefinition>> {
     type VE<'a> = OracleError<'a>;
-    let lower = text.to_lowercase();
+    let lower = text.to_ascii_lowercase();
 
     let (before, _matched, _rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
         // Match both the ASCII and typographic U+2019 apostrophe, and both the
