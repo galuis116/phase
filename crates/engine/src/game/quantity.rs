@@ -303,7 +303,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeCountThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
-        | QuantityRef::AttackedThisTurn
+        | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::SpellsCastLastTurn
@@ -471,7 +471,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::ZoneChangeCountThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
-        | QuantityRef::AttackedThisTurn
+        | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::SpellsCastLastTurn
@@ -1979,12 +1979,31 @@ fn resolve_ref(
             })
             .unwrap_or(0),
         // CR 508.1a: Count creatures the controller attacked with this turn.
-        QuantityRef::AttackedThisTurn => state
-            .attacking_creatures_this_turn
-            .get(&controller)
-            .copied()
-            .map(u32_to_i32_saturating)
-            .unwrap_or(0),
+        QuantityRef::AttackedThisTurn { filter } => match filter {
+            // Bare form — total attackers this turn (per-player tally).
+            None => state
+                .attacking_creatures_this_turn
+                .get(&controller)
+                .copied()
+                .map(u32_to_i32_saturating)
+                .unwrap_or(0),
+            // Filtered form — this-turn attackers controlled by the player that
+            // match `filter` (Neyali "a token", Neriv "a commander", Goblin
+            // Researcher "~", etc.), resolved against the tracked attacker set.
+            Some(filter) => usize_to_i32_saturating(
+                state
+                    .creatures_attacked_this_turn
+                    .iter()
+                    .filter(|&&id| {
+                        state
+                            .objects
+                            .get(&id)
+                            .is_some_and(|o| o.controller == controller)
+                            && matches_target_filter(state, id, filter, &filter_ctx)
+                    })
+                    .count(),
+            ),
+        },
         // CR 603.4: Whether the controller descended this turn.
         QuantityRef::DescendedThisTurn => {
             if player.is_some_and(|p| p.descended_this_turn) {
@@ -3716,7 +3735,7 @@ mod tests {
         state.attacking_creatures_this_turn.insert(PlayerId(0), 3);
 
         let qty = QuantityExpr::Ref {
-            qty: QuantityRef::AttackedThisTurn,
+            qty: QuantityRef::AttackedThisTurn { filter: None },
         };
 
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(1)), 3);
