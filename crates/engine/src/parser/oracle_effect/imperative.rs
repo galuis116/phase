@@ -10681,7 +10681,7 @@ mod tests {
             "search target player's graveyard, hand, and library for all cards with that name and exile them",
             "search its owner's graveyard, hand, and library for any number of cards with the same name as that card and exile them",
             "search their graveyard, hand, and library for a card with that name and exile them",
-            // CR 201.2: "its controller's" possessive + card-type name source —
+            // CR 201.2a: "its controller's" possessive + card-type name source —
             // Eradicate ("that creature"), Crumble to Dust ("that land"),
             // Counterbore ("that spell"), Deicide ("its controller's … that card").
             "search its controller's graveyard, hand, and library for all cards with the same name as that creature and exile them",
