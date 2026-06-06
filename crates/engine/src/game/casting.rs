@@ -2541,6 +2541,29 @@ fn casting_variant_candidates(
         candidates.push(CastingVariant::Freerunning);
     }
 
+    // CR 702.76a: Prowl — a hand alternative cost legal when a source the caster
+    // controlled dealt combat damage to a player this turn and, at that time, had
+    // any of this spell's creature types. The per-turn creature-type ledger is
+    // snapshot at damage time (`creature_types_dealt_combat_damage_this_turn`).
+    if obj.zone == Zone::Hand
+        && effective_spell_keywords(state, player, object_id)
+            .iter()
+            .any(|k| matches!(k, Keyword::Prowl(_)))
+        && state
+            .creature_types_dealt_combat_damage_this_turn
+            .iter()
+            .any(|(controller, creature_type)| {
+                *controller == player
+                    && obj
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|spell_type| spell_type == creature_type)
+            })
+    {
+        candidates.push(CastingVariant::Prowl);
+    }
+
     // CR 702.74a + CR 118.9: Evoke is a static alternative cost usable from any
     // zone the card can be cast from; surface it as a hand candidate so the gate
     // offers it when the printed cost is unaffordable. effective_spell_keywords
@@ -3241,6 +3264,19 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
+    // CR 702.76a: When the caller opted into Prowl, substitute the prowl mana cost
+    // from the `Keyword::Prowl(cost)` payload (printed or granted). Mirrors the
+    // Freerunning/Overload cost-selection pattern.
+    let prowl_cost = if casting_variant == CastingVariant::Prowl {
+        effective_spell_keywords(state, player, object_id)
+            .iter()
+            .find_map(|k| match k {
+                crate::types::keywords::Keyword::Prowl(cost) => Some(cost.clone()),
+                _ => None,
+            })
+    } else {
+        None
+    };
     // CR 702.34a: When the flashback cost is purely non-mana (e.g. Battle Screech's
     // "tap three white creatures"), the spell pays no mana through the normal flow.
     // For compound flashback costs ("{1}{U}, Pay 3 life") we still want the mana
@@ -3340,6 +3376,7 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(effective_dash_cost_for_path)
             .or(effective_blitz_cost_for_path)
             .or(freerunning_cost)
+            .or(prowl_cost)
             .unwrap_or_else(|| obj.mana_cost.clone())
     };
     let has_granted_flash =
@@ -12781,6 +12818,131 @@ mod tests {
         assert!(
             !candidates.contains(&CastingVariant::Freerunning),
             "Freerunning must NOT be a candidate after turn cleanup; got {candidates:?}",
+        );
+    }
+
+    // ----- CR 702.76a: Prowl alternative-cost casts -------------------------
+
+    fn prowl_test_cost() -> ManaCost {
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 1,
+        }
+    }
+
+    /// A Tribal sorcery in P0's hand with creature type "Rogue", prowl {1}{U},
+    /// and a printed cost of {3}{U}{U}.
+    fn add_prowl_spell(state: &mut GameState) -> ObjectId {
+        let object_id = create_object(
+            state,
+            CardId(2076),
+            PlayerId(0),
+            "Prowl Test Spell".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&object_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.card_types.subtypes.push("Rogue".to_string());
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            generic: 3,
+        };
+        obj.keywords.push(Keyword::Prowl(prowl_test_cost()));
+        object_id
+    }
+
+    /// CR 702.76a: With no matching combat damage this turn, Prowl is not offered.
+    #[test]
+    fn prowl_unavailable_without_matching_combat_damage() {
+        let mut state = setup_game_at_main_phase();
+        let object_id = add_prowl_spell(&mut state);
+        let candidates = casting_variant_candidates(&state, PlayerId(0), object_id);
+        assert!(
+            !candidates.contains(&CastingVariant::Prowl),
+            "Prowl must not be a candidate without a matching ledger entry; got {candidates:?}",
+        );
+    }
+
+    /// CR 702.76a: When a Rogue source the caster controlled dealt combat damage
+    /// this turn, Prowl is surfaced and the prowl cost replaces the printed cost.
+    #[test]
+    fn prowl_available_after_matching_creature_type_combat_damage() {
+        let mut state = setup_game_at_main_phase();
+        let object_id = add_prowl_spell(&mut state);
+        state
+            .creature_types_dealt_combat_damage_this_turn
+            .insert((PlayerId(0), "Rogue".to_string()));
+
+        let candidates = casting_variant_candidates(&state, PlayerId(0), object_id);
+        assert!(
+            candidates.contains(&CastingVariant::Prowl),
+            "Prowl must be a candidate when a matching creature type dealt combat damage; \
+             got {candidates:?}",
+        );
+
+        let prepared = prepare_spell_cast_with_variant_override(
+            &state,
+            PlayerId(0),
+            object_id,
+            Some(CastingVariant::Prowl),
+        )
+        .expect("prowl override must prepare a spell cast");
+        assert_eq!(prepared.casting_variant, CastingVariant::Prowl);
+        assert_eq!(
+            prepared.mana_cost,
+            prowl_test_cost(),
+            "prepared mana cost must be the prowl alt cost, not the printed cost",
+        );
+        assert_ne!(
+            prepared.mana_cost, state.objects[&object_id].mana_cost,
+            "printed mana cost must NOT be paid when Prowl override is selected",
+        );
+    }
+
+    /// CR 702.76a: The recorded creature type must overlap one of the spell's
+    /// creature types — an unrelated type does not unlock Prowl.
+    #[test]
+    fn prowl_requires_creature_type_overlap() {
+        let mut state = setup_game_at_main_phase();
+        let object_id = add_prowl_spell(&mut state); // spell is a Rogue
+        state
+            .creature_types_dealt_combat_damage_this_turn
+            .insert((PlayerId(0), "Goblin".to_string()));
+
+        let candidates = casting_variant_candidates(&state, PlayerId(0), object_id);
+        assert!(
+            !candidates.contains(&CastingVariant::Prowl),
+            "Prowl must require a creature-type overlap; Goblin damage must not unlock a \
+             Rogue spell; got {candidates:?}",
+        );
+    }
+
+    /// CR 702.76a + CR 514: The Prowl creature-type ledger is turn-scoped.
+    #[test]
+    fn prowl_ledger_resets_at_turn_cleanup() {
+        let mut state = setup_game_at_main_phase();
+        let object_id = add_prowl_spell(&mut state);
+        state
+            .creature_types_dealt_combat_damage_this_turn
+            .insert((PlayerId(0), "Rogue".to_string()));
+        assert!(
+            casting_variant_candidates(&state, PlayerId(0), object_id)
+                .contains(&CastingVariant::Prowl),
+            "Prowl must be a candidate before cleanup",
+        );
+
+        crate::game::turns::start_next_turn(&mut state, &mut Vec::new());
+
+        assert!(
+            state
+                .creature_types_dealt_combat_damage_this_turn
+                .is_empty(),
+            "ledger must be cleared by start_next_turn",
+        );
+        assert!(
+            !casting_variant_candidates(&state, PlayerId(0), object_id)
+                .contains(&CastingVariant::Prowl),
+            "Prowl must NOT be a candidate after turn cleanup",
         );
     }
 
