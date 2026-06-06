@@ -3888,11 +3888,9 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
         }
     }
     // CR 602.5: "if <condition>" gate (Lightning Storm "if ~ is on the stack").
-    if value((), tag::<_, _, OracleError<'_>>("if "))
-        .parse(lower.as_str())
-        .is_ok()
-    {
-        let condition_text = phrase[3..].trim();
+    if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>("if ")).parse(lower.as_str()) {
+        let condition_start = phrase.len() - rest.len();
+        let condition_text = phrase[condition_start..].trim();
         return Some(vec![ActivationRestriction::RequiresCondition {
             condition: parse_restriction_condition(condition_text),
         }]);
@@ -7831,46 +7829,71 @@ mod tests {
     /// restriction, instead of dropping the whole sentence to Unimplemented.
     #[test]
     fn any_player_may_activate_but_only_records_timing_restriction() {
+        let activation_restrictions_for = |text: &str, name: &str| {
+            let parsed = parse(text, name, &[], &["Artifact"], &[]);
+            assert!(
+                parsed.abilities.iter().all(|ability| !matches!(
+                    ability.effect.as_ref(),
+                    Effect::Unimplemented { .. }
+                )),
+                "expected no unimplemented fallback, got {:?}",
+                parsed.abilities
+            );
+            parsed
+                .abilities
+                .into_iter()
+                .find(|ability| !ability.activation_restrictions.is_empty())
+                .expect("expected an activated ability with restrictions")
+                .activation_restrictions
+        };
+
         // "as a sorcery" form (Endbringer's Revel / Scandalmonger / Task Mage Assembly).
-        let r = parse(
+        let restrictions = activation_restrictions_for(
             "{T}: Draw a card. Any player may activate this ability but only as a sorcery.",
             "Test Any-Player Sorcery",
-            &[],
-            &["Artifact"],
-            &[],
         );
-        let ability = r
-            .abilities
-            .iter()
-            .find(|a| !a.activation_restrictions.is_empty())
-            .expect("expected an activated ability with restrictions");
         assert!(
-            ability
-                .activation_restrictions
-                .contains(&ActivationRestriction::AsSorcery),
+            restrictions.contains(&ActivationRestriction::AsSorcery),
             "expected AsSorcery, got {:?}",
-            ability.activation_restrictions
+            restrictions
         );
 
         // "during their turn" form (Volrath's Dungeon) → the activator's turn.
-        let r = parse(
+        let restrictions = activation_restrictions_for(
             "{T}: Draw a card. Any player may activate this ability but only during their turn.",
             "Test Any-Player Turn",
-            &[],
-            &["Artifact"],
-            &[],
         );
-        let ability = r
-            .abilities
-            .iter()
-            .find(|a| !a.activation_restrictions.is_empty())
-            .expect("expected an activated ability with restrictions");
         assert!(
-            ability
-                .activation_restrictions
-                .contains(&ActivationRestriction::DuringYourTurn),
+            restrictions.contains(&ActivationRestriction::DuringYourTurn),
             "expected DuringYourTurn, got {:?}",
-            ability.activation_restrictions
+            restrictions
+        );
+
+        // "during their upkeep" form maps to the activator's upkeep restriction.
+        let restrictions = activation_restrictions_for(
+            "{T}: Draw a card. Any player may activate this ability but only during their upkeep.",
+            "Test Any-Player Upkeep",
+        );
+        assert!(
+            restrictions.contains(&ActivationRestriction::DuringYourUpkeep),
+            "expected DuringYourUpkeep, got {:?}",
+            restrictions
+        );
+
+        // "if <condition>" form (Lightning Storm) keeps the parsed condition gate.
+        let restrictions = activation_restrictions_for(
+            "{T}: Draw a card. Any player may activate this ability but only if ~ is on the stack.",
+            "Test Any-Player Condition",
+        );
+        assert!(
+            restrictions.iter().any(|restriction| matches!(
+                restriction,
+                ActivationRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::SourceInZone { zone: Zone::Stack })
+                }
+            )),
+            "expected source-on-stack condition, got {:?}",
+            restrictions
         );
     }
 
