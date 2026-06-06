@@ -1028,7 +1028,7 @@ pub(super) fn push_unique_string(values: &mut Vec<String>, value: impl Into<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef, RoundingMode};
+    use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef, RoundingMode, TypeFilter};
     use crate::types::card_type::CoreType;
 
     #[test]
@@ -1062,14 +1062,21 @@ mod tests {
         let Effect::CopyTokenOf { count, .. } = effect else {
             panic!("expected CopyTokenOf")
         };
-        assert_ne!(
-            count,
-            QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string()
-                }
-            },
-            "X must be bound to the where-clause, not left as bare X"
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                },
+        } = count
+        else {
+            panic!("expected where-clause to bind X to an ObjectCount, got {count:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Subtype("Clue".to_string())),
+            "X must count controlled Clues, got {:?}",
+            tf.type_filters
         );
     }
 
