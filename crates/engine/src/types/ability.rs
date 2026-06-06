@@ -11029,6 +11029,13 @@ pub struct TriggerDefinition {
     /// When `Some(Won)`, fires only on wins; `Some(Lost)` only on losses; `None` fires on any flip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coin_flip_result: Option<CoinFlipResult>,
+    /// CR 603.2 + CR 106.1: Produced-mana filter for `TriggerMode::TapsForMana`
+    /// triggers whose event text specifies "for {C}" / "for {G}" rather than
+    /// the generic "for mana". When `Some`, the `TappedForMana` event must
+    /// include at least one produced unit matching the set; `None` accepts any
+    /// mana type (the "for mana" form). Ignored by other trigger modes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taps_for_mana_produced: Option<Vec<ManaType>>,
 }
 
 impl TriggerDefinition {
@@ -11063,6 +11070,7 @@ impl TriggerDefinition {
             damage_amount: None,
             life_amount: None,
             coin_flip_result: None,
+            taps_for_mana_produced: None,
         }
     }
 
@@ -13338,6 +13346,7 @@ mod tests {
             damage_amount: None,
             life_amount: None,
             coin_flip_result: None,
+            taps_for_mana_produced: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();
