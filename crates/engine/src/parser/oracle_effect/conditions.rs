@@ -2314,9 +2314,13 @@ fn parse_attacked_with_filter_condition(text: &str) -> Option<AbilityCondition> 
     let after_verb = after_verb.trim();
     let after_lower = after_verb.to_lowercase();
     let body = nom_on_lower(after_verb, &after_lower, |i| {
-        value((), terminated(take_until(" this turn"), tag(" this turn"))).parse(i)
+        terminated(
+            take_until::<_, _, OracleError<'_>>(" this turn"),
+            tag(" this turn"),
+        )
+        .parse(i)
     })
-    .map(|((), _)| &after_verb[..after_verb.len() - " this turn".len()])
+    .map(|(prefix, _)| prefix)
     .unwrap_or(after_verb)
     .trim();
     let body_lower = body.to_lowercase();
