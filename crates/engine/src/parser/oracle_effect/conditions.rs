@@ -2313,15 +2313,24 @@ fn parse_attacked_with_filter_condition(text: &str) -> Option<AbilityCondition> 
     // Strip an optional trailing " this turn".
     let after_verb = after_verb.trim();
     let after_lower = after_verb.to_lowercase();
-    let body = nom_on_lower(after_verb, &after_lower, |i| {
-        terminated(
-            take_until::<_, _, OracleError<'_>>(" this turn"),
-            tag(" this turn"),
+    // CR 508.6: drop a trailing " this turn" if present. The closure yields `()`
+    // (the `take_until` prefix borrows the lowercase local and must not escape);
+    // the body is sliced from the ORIGINAL text using the mapped-back remainder.
+    let body = match nom_on_lower(after_verb, &after_lower, |i| {
+        value(
+            (),
+            terminated(
+                take_until::<_, _, OracleError<'_>>(" this turn"),
+                tag(" this turn"),
+            ),
         )
         .parse(i)
-    })
-    .map(|(prefix, _)| prefix)
-    .unwrap_or(after_verb)
+    }) {
+        Some(((), remainder)) => {
+            &after_verb[..after_verb.len() - remainder.len() - " this turn".len()]
+        }
+        None => after_verb,
+    }
     .trim();
     let body_lower = body.to_lowercase();
 
