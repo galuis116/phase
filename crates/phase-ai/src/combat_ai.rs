@@ -1282,13 +1282,13 @@ fn crackback_damage(
             if used[i] {
                 continue;
             }
-            if !can_block_pair(state, bid, opp_id) {
+            if !can_block_pair(attacker_source, bid, opp_id) {
                 continue; // skip — still available for other attackers
             }
             used[i] = true;
             blocked = true;
             if opp_obj.has_keyword(&Keyword::Trample) {
-                let blocker_toughness = state
+                let blocker_toughness = attacker_source
                     .objects
                     .get(&bid)
                     .and_then(|b| b.toughness)
@@ -1765,6 +1765,31 @@ mod tests {
         let cb = crackback_damage(&state, PlayerId(0), &[PlayerId(1)], &[], None);
         // 5 power - 2 toughness blocker = 3 trample-through.
         assert_eq!(cb, 3, "only the trample excess (5-2) is counted");
+    }
+
+    #[test]
+    fn crackback_projection_drives_block_legality() {
+        let mut state = setup();
+        add_creature(&mut state, PlayerId(0), "Wall", 0, 5, vec![]);
+        let attacker = add_creature(&mut state, PlayerId(1), "Projected Flyer", 4, 4, vec![]);
+
+        let mut projected = state.clone();
+        projected
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+        let projection = Projection {
+            horizon_reached: ProjectionHorizon::OpponentAttackersDeclared,
+            state: projected,
+            snapshots: Vec::new(),
+            confidence: crate::projection::Confidence::Exact,
+            target_opponent: PlayerId(1),
+        };
+
+        let cb = crackback_damage(&state, PlayerId(0), &[PlayerId(1)], &[], Some(&projection));
+        assert_eq!(cb, 4, "projected flying must make the attacker unblocked");
     }
 
     /// Battlefield planeswalker for `owner` with the given starting loyalty.
