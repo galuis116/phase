@@ -313,16 +313,44 @@ fn cant_be_sacrificed_static_splits_from_grant() {
     let defs = parse_static_line_multi(
         "Equipped creature gets +2/+2, has haste, can't attack you or planeswalkers you control, and can't be sacrificed.",
     );
+    let continuous = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::Continuous))
+        .expect("expected the +2/+2 and haste grant to be preserved");
     assert!(
-        defs.iter()
-            .any(|d| d.mode == StaticMode::Other("CantBeSacrificed".to_string())),
-        "expected a CantBeSacrificed static, got {:?}",
-        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+        continuous
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }),
+        "expected +2 power grant, got {:?}",
+        continuous.modifications
     );
     assert!(
-        defs.iter()
-            .any(|d| matches!(d.mode, StaticMode::Continuous)),
-        "the +2/+2 grant must be preserved"
+        continuous
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 2 }),
+        "expected +2 toughness grant, got {:?}",
+        continuous.modifications
+    );
+    assert!(
+        continuous
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Haste,
+            }),
+        "expected haste grant, got {:?}",
+        continuous.modifications
+    );
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::Other("CantBeSacrificed".to_string()))
+        .expect("expected a CantBeSacrificed static");
+    assert_eq!(
+        cant.affected, continuous.affected,
+        "CantBeSacrificed companion must share the grant's affected set"
+    );
+    assert!(
+        cant.affected.is_some(),
+        "CantBeSacrificed companion must have an affected set"
     );
 }
 
