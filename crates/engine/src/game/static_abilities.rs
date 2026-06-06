@@ -1163,11 +1163,11 @@ pub fn object_has_cant_crew(state: &GameState, object_id: ObjectId) -> bool {
 
 /// CR 702.122c / 702.171a / 702.184a: The power a creature contributes toward a
 /// crew / saddle / station cost, after applying any active `CrewContribution`
-/// static whose [`CrewActionScope`](crate::types::statics::CrewActionScope)
-/// covers `action`. "Using its toughness rather than its power" substitutes the
-/// creature's toughness for its base power; "as though its power were N greater"
-/// adds N. Multiple deltas accumulate. The result is clamped to 0, matching the
-/// plain `power.unwrap_or(0).max(0)` it replaces.
+/// static whose action list contains `action`. "Using its toughness rather than
+/// its power" substitutes the creature's toughness for its base power; "as
+/// though its power were N greater" adds N. Multiple deltas accumulate. The
+/// result is clamped to 0, matching the plain `power.unwrap_or(0).max(0)` it
+/// replaces.
 pub fn object_crew_power_contribution(
     state: &GameState,
     object_id: ObjectId,
@@ -1180,7 +1180,7 @@ pub fn object_crew_power_contribution(
     let mut delta = 0;
     for def in super::functioning_abilities::active_static_definitions(state, obj) {
         if let StaticMode::CrewContribution { kind, actions } = &def.mode {
-            if !actions.applies_to(action) {
+            if !actions.contains(&action) {
                 continue;
             }
             match kind {

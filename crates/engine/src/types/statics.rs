@@ -573,35 +573,13 @@ pub enum CrewContributionKind {
     ToughnessInsteadOfPower,
 }
 
-/// The set of keyword actions a [`StaticMode::CrewContribution`] applies to.
-/// A card names exactly the actions it modifies (e.g. "saddles Mounts and crews
-/// Vehicles" sets `crew` and `saddle`; "crews Vehicles" sets only `crew`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub struct CrewActionScope {
-    pub crew: bool,
-    pub saddle: bool,
-    pub station: bool,
-}
-
-/// The keyword action being performed, used to query whether a
-/// [`StaticMode::CrewContribution`]'s [`CrewActionScope`] applies. CR 702.122 /
-/// 702.171 / 702.184.
+/// The keyword action being performed. `StaticMode::CrewContribution` stores the
+/// exact named actions it modifies. CR 702.122 / 702.171 / 702.184.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CrewAction {
     Crew,
     Saddle,
     Station,
-}
-
-impl CrewActionScope {
-    /// Whether this modifier applies to the given keyword action.
-    pub fn applies_to(&self, action: CrewAction) -> bool {
-        match action {
-            CrewAction::Crew => self.crew,
-            CrewAction::Saddle => self.saddle,
-            CrewAction::Station => self.station,
-        }
-    }
 }
 
 /// All static ability modes from Forge's static ability registry.
@@ -1150,7 +1128,7 @@ pub enum StaticMode {
     /// the modifier applies to, since a card may name only some of them.
     CrewContribution {
         kind: CrewContributionKind,
-        actions: CrewActionScope,
+        actions: Vec<CrewAction>,
     },
     MayLookAtTopOfLibrary,
 

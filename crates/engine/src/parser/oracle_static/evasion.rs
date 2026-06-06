@@ -1662,39 +1662,17 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
 /// (which records the affected keyword actions) with the modifier tail.
 fn parse_crew_contribution_predicate_nom(
     input: &str,
-) -> OracleResult<
-    '_,
-    (
-        crate::types::statics::CrewContributionKind,
-        crate::types::statics::CrewActionScope,
-    ),
-> {
-    use crate::types::statics::{CrewActionScope, CrewContributionKind};
+) -> OracleResult<'_, (CrewContributionKind, Vec<CrewAction>)> {
     let (input, actions) = alt((
         value(
-            CrewActionScope {
-                crew: true,
-                saddle: true,
-                station: false,
-            },
+            vec![CrewAction::Saddle, CrewAction::Crew],
             tag::<_, _, OracleError<'_>>("saddles mounts and crews vehicles"),
         ),
         value(
-            CrewActionScope {
-                crew: true,
-                saddle: false,
-                station: true,
-            },
+            vec![CrewAction::Crew, CrewAction::Station],
             tag("crews vehicles and stations permanents"),
         ),
-        value(
-            CrewActionScope {
-                crew: true,
-                saddle: false,
-                station: false,
-            },
-            tag("crews vehicles"),
-        ),
+        value(vec![CrewAction::Crew], tag("crews vehicles")),
     ))
     .parse(input)?;
     let (input, _) = space1.parse(input)?;

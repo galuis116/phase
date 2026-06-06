@@ -19774,9 +19774,9 @@ mod crew_tests {
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use crate::types::statics::StaticMode;
+    use crate::types::statics::{CrewAction, CrewContributionKind, StaticMode};
     use crate::types::zones::Zone;
-    use crate::types::StaticDefinition;
+    use crate::types::{StaticDefinition, TargetFilter};
 
     fn setup_game_at_main_phase() -> GameState {
         let mut state = new_game(42);
@@ -20044,9 +20044,6 @@ mod crew_tests {
     /// otherwise-insufficient creature pay the crew cost alone.
     #[test]
     fn crew_contribution_power_delta_lets_low_power_creature_crew() {
-        use crate::types::ability::{StaticDefinition, TargetFilter};
-        use crate::types::statics::{CrewActionScope, CrewContributionKind, StaticMode};
-
         let (mut state, vehicle_id, _creature_a, creature_b) = setup_crew_scenario();
         // creature_b is 2/2; the Vehicle needs Crew 3, so it cannot crew alone
         // (see `test_crew_fails_insufficient_power`). Grant it the +2 modifier.
@@ -20055,11 +20052,7 @@ mod crew_tests {
             obj.static_definitions.push(
                 StaticDefinition::new(StaticMode::CrewContribution {
                     kind: CrewContributionKind::PowerDelta { delta: 2 },
-                    actions: CrewActionScope {
-                        crew: true,
-                        saddle: false,
-                        station: false,
-                    },
+                    actions: vec![CrewAction::Crew],
                 })
                 .affected(TargetFilter::SelfRef),
             );
@@ -20091,11 +20084,6 @@ mod crew_tests {
     /// named keyword actions (crew-only here, not saddle).
     #[test]
     fn crew_contribution_toughness_substitution_and_action_scope() {
-        use crate::types::ability::{StaticDefinition, TargetFilter};
-        use crate::types::statics::{
-            CrewAction, CrewActionScope, CrewContributionKind, StaticMode,
-        };
-
         let (mut state, _vehicle_id, _creature_a, creature_b) = setup_crew_scenario();
         {
             let obj = state.objects.get_mut(&creature_b).unwrap();
@@ -20104,11 +20092,7 @@ mod crew_tests {
             obj.static_definitions.push(
                 StaticDefinition::new(StaticMode::CrewContribution {
                     kind: CrewContributionKind::ToughnessInsteadOfPower,
-                    actions: CrewActionScope {
-                        crew: true,
-                        saddle: false,
-                        station: false,
-                    },
+                    actions: vec![CrewAction::Crew],
                 })
                 .affected(TargetFilter::SelfRef),
             );
