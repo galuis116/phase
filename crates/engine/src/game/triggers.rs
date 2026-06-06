@@ -1513,6 +1513,7 @@ fn collect_pending_triggers(
                         Effect::CopySpell {
                             target: TargetFilter::SelfRef,
                             retarget: CopyRetargetPermission::MayChooseNewTargets,
+                            copier: None,
                         },
                         Vec::new(),
                         *cast_obj_id,
@@ -4424,19 +4425,17 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::ManaColorSpent { color, minimum } => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.colors_spent_to_cast.get(*color) >= *minimum),
-        // CR 601.2h: "if no mana was spent to cast it/them" — check the entering object.
+        // CR 601.2h: "if no mana was spent to cast it/them" — check the cast or
+        // entering object, not the trigger source (Lavinia #2345 / Satoru #2417).
         // Read `mana_spent_to_cast_amount`, not the transient `mana_spent_to_cast`
         // boolean: `clear_post_collection_transients` clears the latter after trigger
-        // collection but before CR 603.4 resolution re-checks (Satoru #2417).
+        // collection but before CR 603.4 resolution re-checks.
         TriggerCondition::ManaSpentCondition { text } => {
-            let entering_id = trigger_event
-                .and_then(|e| match e {
-                    GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
-                    _ => None,
-                })
+            let cast_object_id = trigger_event
+                .and_then(crate::game::targeting::extract_source_from_event)
                 .or(source_id);
             if text.contains("no mana was spent") {
-                entering_id
+                cast_object_id
                     .and_then(|id| state.objects.get(&id))
                     .is_some_and(|obj| obj.mana_spent_to_cast_amount == 0)
             } else {
@@ -11968,6 +11967,51 @@ pub mod tests {
         assert!(
             check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
             "spent 3 on mana value 4 must satisfy a strict less-than condition"
+        );
+    }
+
+    /// CR 601.2h + CR 603.4: Lavinia, Azorius Renegade — "if no mana was spent
+    /// to cast it" must read the triggering spell from `SpellCast`, not the
+    /// Lavinia object (issue #2345).
+    #[test]
+    fn no_mana_spent_condition_uses_triggering_spell_not_trigger_source() {
+        let mut state = setup();
+        let lavinia = make_creature(&mut state, PlayerId(0), "Lavinia, Azorius Renegade", 2, 2);
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Unearth".to_string(),
+            Zone::Stack,
+        );
+
+        let condition = TriggerCondition::ManaSpentCondition {
+            text: "no mana was spent to cast it".to_string(),
+        };
+        let event = GameEvent::SpellCast {
+            card_id: CardId(2),
+            controller: PlayerId(1),
+            object_id: spell,
+        };
+
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .mana_spent_to_cast_amount = 1;
+        assert!(
+            !check_trigger_condition(&state, &condition, PlayerId(0), Some(lavinia), Some(&event)),
+            "paid mana Unearth must not satisfy no-mana-spent intervening-if"
+        );
+
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .mana_spent_to_cast_amount = 0;
+        assert!(
+            check_trigger_condition(&state, &condition, PlayerId(0), Some(lavinia), Some(&event)),
+            "zero-mana cast must satisfy no-mana-spent intervening-if"
         );
     }
 

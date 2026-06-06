@@ -646,6 +646,15 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 602.5: "<grant or restriction> and its activated abilities can't be
+    // activated" pairs a first clause with an activation prohibition under one
+    // subject (Viper's Kiss). Split so the CantBeActivated clause is not dropped.
+    // (The "can't attack/block, and activated abilities …" compound — Arrest,
+    // Faith's Fetters — is handled by its own earlier branch above.)
+    if let Some(defs) = try_split_and_cant_activate_abilities(&stripped) {
+        return defs;
+    }
+
     // CR 701.21: "<grant or restriction> and can't be sacrificed" pairs a first
     // clause with a sacrifice prohibition under one subject (Assault Suit). Split
     // so the CantBeSacrificed clause is not dropped.

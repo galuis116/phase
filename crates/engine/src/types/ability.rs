@@ -6120,6 +6120,17 @@ pub enum Effect {
         /// CR 707.10c: whether the controller may choose new targets for the copy.
         #[serde(default = "default_copy_keep_targets")]
         retarget: CopyRetargetPermission,
+        /// CR 707.10: which player puts this copy onto the stack (and thus
+        /// controls it), when that player is NOT the effect's controller. `None`
+        /// = the controller copies (Twincast, Casualty, Replicate). `Some(ref)`
+        /// resolves a player relative to the controller for "[another player]
+        /// copies the spell" effects — CR 702.144a (Demonstrate) uses
+        /// `Some(ControllerRef::Opponent)` so a chosen opponent copies. This
+        /// parameterizes the existing copier axis (the same axis the Chain cycle
+        /// expresses via an inherited `TargetRef::Player`) rather than adding a
+        /// sibling copy effect.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copier: Option<ControllerRef>,
     },
     /// CR 707.12: Create a copy of a card/object in its zone and cast that
     /// copy while the resolving spell or ability continues resolving.
@@ -9298,6 +9309,13 @@ pub struct AbilityDefinition {
     /// Read at target-selection time to short-circuit `WaitingFor::TargetSelection`.
     #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
     pub target_selection_mode: TargetSelectionMode,
+    /// CR 601.2c + CR 603.3d: When set, this player (not the controller) announces
+    /// this ability's target(s) at stack placement. `None` = controller chooses
+    /// (default). Mirrors `target_selection_mode` (the same "by-whom are targets
+    /// selected" axis). Distinct from CR 608.2d resolution-time "of their choice"
+    /// sacrifices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_chooser: Option<TargetFilter>,
     /// CR 608.2c + CR 107.1c: per-iteration loop-continuation predicate, the
     /// non-count companion to `repeat_for`. When `Some`, the resolution chain
     /// is re-followed ("repeat this process") under this predicate instead of
@@ -9383,6 +9401,8 @@ struct AbilityDefinitionRepr<'a> {
     #[serde(skip_serializing_if = "TargetSelectionMode::is_chosen")]
     target_selection_mode: TargetSelectionMode,
     #[serde(skip_serializing_if = "Option::is_none")]
+    target_chooser: &'a Option<TargetFilter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     repeat_until: &'a Option<RepeatContinuation>,
     #[serde(skip_serializing_if = "SubAbilityLink::is_continuation")]
     sub_link: SubAbilityLink,
@@ -9427,6 +9447,7 @@ impl Serialize for AbilityDefinition {
             player_scope,
             starting_with,
             target_selection_mode,
+            target_chooser,
             repeat_until,
             sub_link,
             iteration_kind_binding,
@@ -9464,6 +9485,7 @@ impl Serialize for AbilityDefinition {
             player_scope,
             starting_with,
             target_selection_mode: *target_selection_mode,
+            target_chooser,
             repeat_until,
             sub_link: *sub_link,
             iteration_kind_binding,
@@ -9603,6 +9625,7 @@ impl AbilityDefinition {
             player_scope: None,
             starting_with: None,
             target_selection_mode: TargetSelectionMode::Chosen,
+            target_chooser: None,
             repeat_until: None,
             sub_link: SubAbilityLink::ContinuationStep,
             iteration_kind_binding: None,
@@ -12292,6 +12315,13 @@ pub struct ResolvedAbility {
     /// to short-circuit `WaitingFor::TargetSelection` for `Random` abilities.
     #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
     pub target_selection_mode: TargetSelectionMode,
+    /// CR 601.2c + CR 603.3d: When set, this player (not the controller) announces
+    /// this ability's target(s) at stack placement. `None` = controller chooses
+    /// (default). Mirrors `target_selection_mode` (the same "by-whom are targets
+    /// selected" axis). Distinct from CR 608.2d resolution-time "of their choice"
+    /// sacrifices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_chooser: Option<TargetFilter>,
     /// CR 608.2c + CR 109.4: Players chosen by `Effect::Choose { choice_type:
     /// ChoiceType::Player }` instructions during this resolution, in chain
     /// order. The `WaitingFor::NamedChoice` answer handler appends to this list
@@ -12359,6 +12389,7 @@ impl ResolvedAbility {
             ability_index: None,
             may_trigger_origin: None,
             target_selection_mode: TargetSelectionMode::Chosen,
+            target_chooser: None,
             chosen_players: Vec::new(),
             repeat_until: None,
             sub_link: SubAbilityLink::ContinuationStep,
