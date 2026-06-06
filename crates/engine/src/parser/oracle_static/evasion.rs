@@ -952,6 +952,79 @@ pub(crate) fn try_split_and_cant_be_sacrificed(text: &str) -> Option<Vec<StaticD
     Some(defs)
 }
 
+/// CR 702.18a / CR 702.11a: Decompose `"<grant or restriction> and can't be the
+/// target of …"` into the first conjunct's static(s) plus the targeting
+/// restriction, sharing the same `affected` set.
+///
+/// Without this split the trailing targeting prohibition was dropped: Spectral
+/// Shield ("Enchanted creature gets +0/+2 and can't be the target of spells.")
+/// parsed to only the +0/+2 grant, so the enchanted creature could still be
+/// targeted — the Aura's entire protection was lost. Mirrors
+/// `try_split_and_cant_be_attached`; the descriptive "can't be the target …"
+/// form is a `CantBeTargeted` `StaticMode` (or Hexproof for the opponents-only
+/// scope — CR 702.11a), not a `ContinuousModification`, so the continuous-grant
+/// default drops it. Scope classification reuses `classify_cant_be_targeted`,
+/// matching the standalone dispatch so the "your opponents control" qualifier is
+/// preserved rather than collapsed into blanket Shroud.
+pub(crate) fn try_split_and_cant_be_targeted(text: &str) -> Option<Vec<StaticDefinition>> {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+
+    let (before, _matched, _rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        // Match both the ASCII and typographic U+2019 apostrophe, and both the
+        // "target of …" and bare "targeted" phrasings.
+        alt((
+            tag::<_, _, VE>("and can't be the target"),
+            tag::<_, _, VE>("and can\u{2019}t be the target"),
+            tag::<_, _, VE>("and can't be targeted"),
+            tag::<_, _, VE>("and can\u{2019}t be targeted"),
+        ))
+        .parse(i)
+    })?;
+
+    // Classify the whole trailing clause exactly as the standalone dispatch does
+    // (`dispatch.rs`), so "… your opponents control" → Hexproof (CR 702.11a) and
+    // the unqualified form → blanket Shroud (CR 702.18a). Decline if the tail is
+    // not a recognized targeting restriction.
+    let targeting_clause = &lower[before.len()..];
+    let scope = crate::parser::oracle_keyword::classify_cant_be_targeted(targeting_clause)?;
+
+    let cut_end = before
+        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
+        .len();
+    let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
+    let mut defs = parse_static_line_multi(&line_a);
+    if defs.is_empty() {
+        return None;
+    }
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+
+    let affected = defs[0].affected.clone()?;
+    let companion = match scope {
+        // CR 702.11a: "… your opponents control" grants Hexproof so the
+        // permanent's own controller can still target it.
+        crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+            StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: crate::types::keywords::Keyword::Hexproof,
+                }])
+                .description(text.to_string())
+        }
+        // CR 702.18a: blanket — can't be targeted by any player. Enforced in
+        // `targeting.rs::can_target` via the object's active static definitions.
+        crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+            StaticDefinition::new(StaticMode::CantBeTargeted)
+                .affected(affected)
+                .description(text.to_string())
+        }
+    };
+    defs.push(companion);
+    Some(defs)
+}
+
 /// CR 509.1b: Classify a "can't be blocked …" evasion predicate (lowercased,
 /// starting with "can't be blocked") into the corresponding `StaticMode` and
 /// optional evasion condition, composing the same building blocks the standalone

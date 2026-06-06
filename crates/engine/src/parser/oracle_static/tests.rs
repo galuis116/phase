@@ -456,6 +456,56 @@ fn cant_be_attached_static_splits_both_prohibitions() {
     );
 }
 
+/// CR 702.18a: Spectral Shield — "Enchanted creature gets +0/+2 and can't be the
+/// target of spells." must decompose into BOTH the +0/+2 grant AND a
+/// `CantBeTargeted` static sharing the first conjunct's `affected` set.
+/// Previously the targeting restriction was dropped, so the enchanted creature
+/// could still be targeted — the Aura's entire protection was lost.
+#[test]
+fn cant_be_targeted_static_splits_from_grant() {
+    let defs =
+        parse_static_line_multi("Enchanted creature gets +0/+2 and can't be the target of spells.");
+    let targeting = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantBeTargeted)
+        .expect("expected a CantBeTargeted static");
+    assert!(
+        targeting.affected.is_some(),
+        "CantBeTargeted companion must share the first clause's affected set"
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the +0/+2 grant must be preserved, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
+/// CR 702.11a: the opponents-only targeting scope in a compound static must
+/// become Hexproof (controller can still target), NOT blanket Shroud — mirroring
+/// the standalone dispatch so the "your opponents control" qualifier is not lost.
+#[test]
+fn cant_be_targeted_opponents_scope_splits_as_hexproof() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +1/+1 and can't be the target of spells your opponents control.",
+    );
+    assert!(
+        defs.iter().any(|d| matches!(d.mode, StaticMode::Continuous)
+            && d.modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Hexproof
+                })),
+        "expected a Hexproof grant (opponents-only scope), got {:?}",
+        defs.iter()
+            .map(|d| (&d.mode, &d.modifications))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !defs.iter().any(|d| d.mode == StaticMode::CantBeTargeted),
+        "opponents-only scope must NOT collapse into blanket Shroud"
+    );
+}
+
 /// CR 602.5: Viper's Kiss — "Enchanted creature gets -1/-1, and its activated
 /// abilities can't be activated." must decompose into BOTH the -1/-1 grant AND a
 /// `CantBeActivated` static. Previously the activation prohibition was dropped,

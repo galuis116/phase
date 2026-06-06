@@ -646,6 +646,14 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 702.18a / CR 702.11a: "<grant or restriction> and can't be the target of
+    // …" pairs a first clause with a targeting restriction under one subject
+    // (Spectral Shield). Split so the CantBeTargeted/Hexproof clause is not
+    // dropped.
+    if let Some(defs) = try_split_and_cant_be_targeted(&stripped) {
+        return defs;
+    }
+
     // CR 602.5: "<grant or restriction> and its activated abilities can't be
     // activated" pairs a first clause with an activation prohibition under one
     // subject (Viper's Kiss). Split so the CantBeActivated clause is not dropped.
