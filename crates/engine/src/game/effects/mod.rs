@@ -2266,6 +2266,12 @@ fn affected_objects_from_events(
                 // to that zone makes a downstream "from among the milled cards"
                 // sub-ability resolve against exactly the milled cards.
                 Effect::Mill { destination, .. } => Some(*destination),
+                // CR 701.20a + CR 608.2f: The kept card lands in `kept_destination`; scope the
+                // tracked set to that zone so downstream TrackedSet consumers (e.g. IC's
+                // ChangeZoneAll{Exile→Battlefield}) see only the kept card, not the rest pile.
+                Effect::RevealUntil {
+                    kept_destination, ..
+                } => Some(*kept_destination),
                 Effect::ExileTop { .. } | Effect::ExileFromTopUntil { .. } => {
                     Some(crate::types::zones::Zone::Exile)
                 }
@@ -8331,6 +8337,53 @@ mod tests {
             .filter(|o| o.name == "Treasure")
             .count();
         assert_eq!(treasures0, 0, "Empty chain must mint zero tokens");
+    }
+
+    /// CR 701.20a + CR 608.2f: an Indomitable Creativity-style
+    /// `RevealUntil(kept_destination=Exile)` publishes only the kept card as
+    /// the chain tracked set. Without the `RevealUntil` destination filter in
+    /// `affected_objects_from_events`, both the kept card and miss pile zone
+    /// changes would be published.
+    #[test]
+    fn reveal_until_exile_kept_publishes_only_kept_card_for_tracked_set() {
+        let miss = ObjectId(2);
+        let hit = ObjectId(3);
+        let events = vec![
+            GameEvent::ZoneChanged {
+                object_id: miss,
+                from: Some(Zone::Library),
+                to: Zone::Library,
+                record: Box::new(ZoneChangeRecord::test_minimal(
+                    miss,
+                    Some(Zone::Library),
+                    Zone::Library,
+                )),
+            },
+            GameEvent::ZoneChanged {
+                object_id: hit,
+                from: Some(Zone::Library),
+                to: Zone::Exile,
+                record: Box::new(ZoneChangeRecord::test_minimal(
+                    hit,
+                    Some(Zone::Library),
+                    Zone::Exile,
+                )),
+            },
+        ];
+        let effect = Effect::RevealUntil {
+            player: TargetFilter::Controller,
+            filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+            kept_destination: Zone::Exile,
+            rest_destination: Zone::Library,
+            enter_tapped: false,
+            enters_attacking: false,
+            kept_optional_to: None,
+        };
+
+        assert_eq!(
+            affected_objects_from_events(&effect, &events, &[]),
+            vec![hit]
+        );
     }
 
     /// CR 608.2c + CR 400.7: a mass-destroy parent must publish the destroyed

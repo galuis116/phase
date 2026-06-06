@@ -5452,15 +5452,11 @@ fn parse_threshold_comparator(input: &str) -> Option<Comparator> {
     .map(|(c, _)| c)
 }
 
-/// CR 701.20a: Parse the prefix `"reveal[s] cards from the top of <possessive>
-/// library until <pronoun> reveal[s] "` and return the remaining text containing
-/// the filter clause. Handles both second-person ("reveal cards from the top of
-/// your library until you reveal") and third-person possessive variants
-/// ("their/his/her/its library until they/he/she/it reveal[s]").
-///
-/// Returns the slice after the matched article (`a`/`an`), so the caller can
-/// extract the filter text directly.
-fn parse_reveal_until_prefix(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+/// CR 701.20a: Shared prefix `"reveal[s] cards from the top of <possessive> library until "`.
+/// Returns the input positioned at the first token after `"until "`.
+/// Used by both the active-form and passive-form `RevealUntil` parsers so that
+/// any future possessive arm addition only needs to be made in one place.
+fn parse_reveal_cards_from_library_until(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
     // CR 701.20a: verb form — bare imperative ("reveal") or third-person ("reveals")
     let (input, _) = alt((tag("reveals "), tag("reveal "))).parse(input)?;
     let (input, _) = tag("cards from the top of ").parse(input)?;
@@ -5473,10 +5469,16 @@ fn parse_reveal_until_prefix(input: &str) -> nom::IResult<&str, (), OracleError<
         tag("his "),
         tag("her "),
         tag("its "),
+        // CR 109.5: "top of that library" — Mirror-Mad Phantasm class
+        tag("that "),
     ))
     .parse(input)?;
-    let (input, _) = tag("library until ").parse(input)?;
-    // Pronoun + matching verb form.
+    value((), tag("library until ")).parse(input)
+}
+
+fn parse_reveal_until_prefix(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    let (input, _) = parse_reveal_cards_from_library_until(input)?;
+    // Active-voice pronoun + matching verb form.
     let (input, _) = alt((
         tag("you reveal "),
         tag("they reveal "),
@@ -5489,48 +5491,117 @@ fn parse_reveal_until_prefix(input: &str) -> nom::IResult<&str, (), OracleError<
     Ok((input, ()))
 }
 
-/// CR 701.20a: Parse "reveal[s] cards from the top of <possessive> library
-/// until <pronoun> reveal[s] a [filter]". Builds the [`Effect::RevealUntil`]
-/// with `player` identifying whose library is revealed.
+/// CR 701.20a: Parse the **passive-voice** prefix `"reveal[s] cards from the top of
+/// <possessive> library until "`, returning `()`.
+/// Stops before the article — the caller (`try_parse_reveal_until`) extracts the
+/// article, filter phrase, and optional exile suffix using nom combinators in
+/// the function body.
 ///
-/// Defaults: kept_destination = Hand, rest_destination = Library (bottom).
-/// Subsequent "put that card" / "put the rest" sentences override via
-/// ContinuationAst.
+/// Covers: Indomitable Creativity, Blessed Reincarnation, Tunnel Vision.
+fn parse_reveal_until_passive_prefix(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    parse_reveal_cards_from_library_until(input)
+}
+
+fn parse_reveal_until_active_filter_text(input: &str) -> OracleResult<'_, &str> {
+    all_consuming(alt((
+        terminated(take_until(" card"), (tag(" card"), opt(tag(".")))),
+        terminated(take_until("."), tag(".")),
+        rest,
+    )))
+    .parse(input)
+}
+
+fn parse_reveal_until_passive_filter_text(input: &str) -> OracleResult<'_, &str> {
+    all_consuming(alt((terminated(take_until(" card"), tag(" card")), rest))).parse(input)
+}
+
+/// Build a [`TargetFilter`] from the bare filter phrase extracted from a `RevealUntil`
+/// until-clause (caller has already stripped the article and trailing `" card"` suffix).
+fn build_reveal_until_filter(filter_text: &str) -> TargetFilter {
+    // CR 701.20a: "with the chosen name" — active form (e.g. Abundance)
+    if nom_primitives::scan_contains(filter_text, "with the chosen name") {
+        return TargetFilter::HasChosenName;
+    }
+    // CR 701.20a: "with that name" — passive form (Tunnel Vision)
+    if nom_primitives::scan_contains(filter_text, "with that name") {
+        return TargetFilter::HasChosenName;
+    }
+    if filter_text == "nonland" {
+        return TargetFilter::Typed(
+            TypedFilter::default().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+        );
+    }
+    if let Some(filter) = try_parse_chosen_kind_filter(filter_text) {
+        return filter;
+    }
+    let (parsed, _) = parse_target(filter_text);
+    parsed
+}
+
+/// CR 701.20a: Parse `"reveal[s] cards from the top of <possessive> library until …"`
+/// in both active voice (`"until <pronoun> reveal[s] a <filter>"`) and
+/// passive voice (`"until a/an <filter> [card] is revealed [and exiles that card]"`).
+/// Builds [`Effect::RevealUntil`] with `player` identifying whose library is revealed.
 fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEffectClause> {
-    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, parse_reveal_until_prefix)?;
+    // CR 701.20a: Active-voice form — "…until they reveal a <filter>".
+    let active_result = nom_on_lower(tp.original, tp.lower, parse_reveal_until_prefix);
+    if let Some((_, rest_orig)) = active_result {
+        let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
+        let (_, filter_text) = parse_reveal_until_active_filter_text(rest_lower).ok()?;
+        let filter = build_reveal_until_filter(filter_text);
+        return Some(parsed_clause(Effect::RevealUntil {
+            player,
+            filter,
+            kept_destination: Zone::Hand,
+            rest_destination: Zone::Library,
+            enter_tapped: false,
+            enters_attacking: false,
+            kept_optional_to: None,
+        }));
+    }
+
+    // CR 701.20a: Passive-voice form — "…until a/an <filter> [card] is revealed
+    // [and exiles that card]" (Indomitable Creativity, Blessed Reincarnation,
+    // Tunnel Vision). Passive prefix stops before the article; extract article,
+    // filter phrase, and optional exile suffix here.
+    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, parse_reveal_until_passive_prefix)?;
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
 
-    // Strip trailing period and " card" suffix to get the filter text.
-    let filter_text = rest_lower.trim_end_matches('.').trim_end_matches(" card");
+    // Consume the article ("a" / "an").
+    let (_, after_article_orig) =
+        nom_on_lower(rest_orig, rest_lower, nom_primitives::parse_article)?;
+    let after_article_lower = &rest_lower[rest_lower.len() - after_article_orig.len()..];
 
-    // Parse "card with the chosen name" specially.
-    let filter = if nom_primitives::scan_contains(filter_text, "with the chosen name") {
-        TargetFilter::HasChosenName
-    } else if filter_text == "nonland" {
-        TargetFilter::Typed(
-            TypedFilter::default().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
-        )
-    } else if let Some(filter) = try_parse_chosen_kind_filter(filter_text) {
-        // CR 614.11 + CR 701.20a: Reveal-until loop inside a draw replacement
-        // whose filter is resolved from the player's earlier "land or nonland"
-        // labeled choice (Abundance). Delegate the "of the chosen kind"
-        // recognition to `parse_search_filter` — the same detector already
-        // consumed by the Seek-of-the-chosen-kind family — so the runtime
-        // `FilterProp::IsChosenLandOrNonlandKind` resolver lights up here for
-        // free without a parallel string-matching arm.
-        filter
+    // Capture everything up to " is revealed" — this is the filter phrase.
+    let (remainder, captured) = take_until::<_, _, OracleError<'_>>(" is revealed")
+        .parse(after_article_lower)
+        .ok()?;
+
+    // Strip trailing " card" if present ("artifact or creature card" → "artifact or creature").
+    // Tunnel Vision's captured = "card with that name" (no " card" suffix — handled by HasChosenName).
+    let (_, filter_text) = parse_reveal_until_passive_filter_text(captured).ok()?;
+
+    let filter = build_reveal_until_filter(filter_text);
+
+    // CR 406.2: Detect inline "and exiles that card" suffix. When present, the kept
+    // card goes directly to Exile. Consume " is revealed" via nom tag, then check
+    // the optional exile clause with a tag probe (.is_ok() since opt is infallible anyway).
+    let (after_is_revealed, _) = tag::<_, _, OracleError<'_>>(" is revealed")
+        .parse(remainder)
+        .ok()?;
+    let inline_exile = tag::<_, _, OracleError<'_>>(" and exiles that card")
+        .parse(after_is_revealed)
+        .is_ok();
+    let kept_destination = if inline_exile {
+        Zone::Exile
     } else {
-        let (parsed, _) = parse_target(filter_text);
-        parsed
+        Zone::Hand
     };
 
-    // CR 701.20a: Default destinations — most cards use hand + library bottom.
-    // Subsequent "put that card" / "put the rest" sentences refine these via
-    // RevealUntilKept / PutRest continuations.
     Some(parsed_clause(Effect::RevealUntil {
         player,
         filter,
-        kept_destination: Zone::Hand,
+        kept_destination,
         rest_destination: Zone::Library,
         enter_tapped: false,
         enters_attacking: false,
@@ -36392,6 +36463,117 @@ mod tests {
                 }
             ),
             "expected rest->graveyard, got: {:?}",
+            def.effect
+        );
+    }
+
+    /// CR 701.20a + CR 406.2: Passive form with inline exile — Indomitable Creativity pattern.
+    /// "its controller reveals cards … until an artifact or creature card is revealed and exiles that card."
+    #[test]
+    fn reveal_until_passive_inline_exile_ic_pattern() {
+        let def = parse_effect_chain(
+            "Its controller reveals cards from the top of their library until an artifact or creature card is revealed and exiles that card.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::RevealUntil {
+                    player: TargetFilter::ParentTargetController,
+                    kept_destination: Zone::Exile,
+                    rest_destination: Zone::Library,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    kept_optional_to: None,
+                    ..
+                }
+            ),
+            "expected RevealUntil(ParentTargetController, kept=Exile, rest=Library), got: {:?}",
+            def.effect
+        );
+        if let Effect::RevealUntil { filter, .. } = &*def.effect {
+            assert!(
+                matches!(filter, TargetFilter::Or { .. }),
+                "expected Or filter for artifact-or-creature, got: {:?}",
+                filter
+            );
+        }
+    }
+
+    /// CR 701.20a: Passive form without inline exile — Blessed Reincarnation pattern.
+    /// "That player reveals cards … until a creature card is revealed."
+    #[test]
+    fn reveal_until_passive_creature_br_pattern() {
+        let def = parse_effect_chain(
+            "That player reveals cards from the top of their library until a creature card is revealed.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::RevealUntil {
+                    kept_destination: Zone::Hand,
+                    rest_destination: Zone::Library,
+                    ..
+                }
+            ),
+            "expected RevealUntil(kept=Hand, rest=Library), got: {:?}",
+            def.effect
+        );
+        if let Effect::RevealUntil { filter, .. } = &*def.effect {
+            match filter {
+                TargetFilter::Typed(tf) => {
+                    assert!(
+                        tf.type_filters
+                            .iter()
+                            .any(|t| matches!(t, TypeFilter::Creature)),
+                        "expected Creature type filter, got: {:?}",
+                        tf
+                    );
+                }
+                _ => panic!("expected Typed filter for creature, got: {:?}", filter),
+            }
+        }
+    }
+
+    /// CR 701.20a: Passive form with HasChosenName — Tunnel Vision pattern.
+    /// "Target player reveals cards … until a card with that name is revealed."
+    #[test]
+    fn reveal_until_passive_has_chosen_name_tv_pattern() {
+        let def = parse_effect_chain(
+            "Target player reveals cards from the top of their library until a card with that name is revealed.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::RevealUntil {
+                    filter: TargetFilter::HasChosenName,
+                    ..
+                }
+            ),
+            "expected RevealUntil filter=HasChosenName, got: {:?}",
+            def.effect
+        );
+    }
+
+    /// CR 701.20a: Active form with "that library" possessive arm (Mirror-Mad Phantasm class).
+    #[test]
+    fn reveal_until_active_that_library_possessive() {
+        let def = parse_effect_chain(
+            "They reveal cards from the top of that library until they reveal a creature card.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::RevealUntil {
+                    kept_destination: Zone::Hand,
+                    rest_destination: Zone::Library,
+                    ..
+                }
+            ),
+            "expected RevealUntil with that-library active form, got: {:?}",
             def.effect
         );
     }
