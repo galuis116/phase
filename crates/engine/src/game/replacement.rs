@@ -23,6 +23,8 @@ use crate::types::proposed_event::{CounterMoveStage, EtbTapState, ProposedEvent,
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
+use super::game_object::GameObject;
+
 // CR 122.1c shield-counter effects are intrinsic to counters, not stored
 // `ReplacementDefinition`s: ordinary `ShieldKind` definitions expire at cleanup,
 // while shield counters persist. Use reserved per-object candidate IDs so the
@@ -38,6 +40,16 @@ const UMBRA_ARMOR_DESTROY_INDEX: usize = usize::MAX - 2;
 /// not a battlefield `ReplacementDefinition`, but it must still participate in
 /// CR 616 ordering against AddCounter replacements such as Doubling Season.
 const COMPLEATED_LOYALTY_INDEX: usize = usize::MAX - 3;
+
+/// CR 109.4 + CR 108.4a: Cards outside the battlefield/stack have no
+/// controller; if an effect asks for a card's controller, use its owner
+/// instead. Command-zone emblems keep their controller under CR 109.4c.
+pub(crate) fn replacement_source_player(obj: &GameObject) -> PlayerId {
+    match obj.zone {
+        Zone::Battlefield | Zone::Stack | Zone::Command => obj.controller,
+        Zone::Library | Zone::Hand | Zone::Graveyard | Zone::Exile => obj.owner,
+    }
+}
 
 fn compleated_replacement_id(object_id: ObjectId) -> ReplacementId {
     ReplacementId {
@@ -1486,7 +1498,8 @@ fn resolve_event_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> 
 
 fn gain_life_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     // CR 614.1a: Basic event type match. Player scope is checked by `valid_player`
-    // in `find_applicable_replacements`. Without `valid_player`, defaults to controller-only.
+    // in `find_applicable_replacements`. Without `valid_player`, defaults to
+    // the replacement source player.
     matches!(event, ProposedEvent::LifeGain { .. })
 }
 
@@ -3241,7 +3254,26 @@ pub fn find_applicable_replacements(
         let is_entering = entering_object_id == Some(obj.id);
         let is_being_discarded = discarding_object_id == Some(obj.id);
 
-        if !in_scanned_zone && !is_entering && !is_being_discarded {
+        // CR 702.52a: Dredge functions only while the card is in a player's
+        // graveyard. The default Battlefield/Command scan misses it, so include a
+        // graveyard dredge card on its owner's draw — "as long as you have at
+        // least N cards in your library" (CR 702.52b) is the offer gate.
+        // Strictly additive: gated on `Keyword::Dredge` in the graveyard, so no
+        // non-dredge object is affected.
+        let replacement_player = replacement_source_player(obj);
+        let is_applicable_dredge = matches!(repl_def.event, ReplacementEvent::Draw)
+            && obj.zone == Zone::Graveyard
+            && matches!(event, ProposedEvent::Draw { player_id, .. } if *player_id == replacement_player)
+            && obj.keywords.iter().any(|k| {
+                matches!(k, crate::types::keywords::Keyword::Dredge(n)
+                    if state
+                        .players
+                        .iter()
+                        .find(|p| p.id == replacement_player)
+                        .is_some_and(|p| p.library.len() as u32 >= *n))
+            });
+
+        if !in_scanned_zone && !is_entering && !is_being_discarded && !is_applicable_dredge {
             continue;
         }
 
@@ -3279,7 +3311,8 @@ pub fn find_applicable_replacements(
                     // Enforce valid_card filter: if set, the event's affected object
                     // must match the filter (e.g., SelfRef means only this card's own events)
                     if let Some(ref filter) = repl_def.valid_card {
-                        let ctx = FilterContext::from_source(state, obj.id);
+                        let ctx =
+                            FilterContext::from_source_with_controller(obj.id, replacement_player);
                         let matches = if repl_def.event == ReplacementEvent::ChangeZone {
                             matches_target_filter_on_battlefield_entry(state, event, filter, &ctx)
                         } else {
@@ -3311,7 +3344,7 @@ pub fn find_applicable_replacements(
                     if let Some(ref cond) = repl_def.condition {
                         if !evaluate_replacement_condition(
                             cond,
-                            obj.controller,
+                            replacement_player,
                             obj.id,
                             state,
                             event.affected_object_id(),
@@ -3327,7 +3360,10 @@ pub fn find_applicable_replacements(
                                 state,
                                 *source_id,
                                 sf,
-                                &FilterContext::from_source(state, obj.id),
+                                &FilterContext::from_source_with_controller(
+                                    obj.id,
+                                    replacement_player,
+                                ),
                             ) {
                                 continue;
                             }
@@ -3349,7 +3385,7 @@ pub fn find_applicable_replacements(
                             if !matches_damage_target_filter(
                                 tf,
                                 target,
-                                obj.controller,
+                                replacement_player,
                                 obj.id,
                                 state,
                             ) {
@@ -3381,10 +3417,10 @@ pub fn find_applicable_replacements(
                         if let ProposedEvent::CreateToken { owner, .. } = event {
                             let matches = match scope {
                                 crate::types::ability::ControllerRef::You => {
-                                    *owner == obj.controller
+                                    *owner == replacement_player
                                 }
                                 crate::types::ability::ControllerRef::Opponent => {
-                                    *owner != obj.controller
+                                    *owner != replacement_player
                                 }
                                 // CR 109.4: Target-player scope has no meaning
                                 // for static token-creation replacements. Fail
@@ -3413,7 +3449,7 @@ pub fn find_applicable_replacements(
                     }
                     // CR 614.1a: valid_player scope — restricts which player's events
                     // trigger this replacement. For GainLife events, determines whose life
-                    // gain is replaced. Default (None) = controller only.
+                    // gain is replaced. Default (None) = source-player only.
                     if let ProposedEvent::LifeGain { player_id, .. }
                     | ProposedEvent::Draw { player_id, .. }
                     | ProposedEvent::Scry { player_id, .. }
@@ -3423,18 +3459,19 @@ pub fn find_applicable_replacements(
                         let player_ok = match &repl_def.valid_player {
                             // CR 614.1a: opponent-scoped replacement (Tainted Remedy).
                             Some(crate::types::ability::ReplacementPlayerScope::Opponent) => {
-                                *player_id != obj.controller
+                                *player_id != replacement_player
                             }
                             // Explicit controller scope.
                             Some(crate::types::ability::ReplacementPlayerScope::You) => {
-                                *player_id == obj.controller
+                                *player_id == replacement_player
                             }
                             // CR 614.1a: all-players replacement (Rain of Gore) —
                             // applies regardless of who controls the source.
                             Some(crate::types::ability::ReplacementPlayerScope::AnyPlayer) => true,
                             None => {
-                                // Default: controller-only (backward compatible)
-                                *player_id == obj.controller
+                                // Default: source-player only (controller for permanents,
+                                // owner for non-stack/non-battlefield cards).
+                                *player_id == replacement_player
                             }
                         };
                         if !player_ok {
@@ -6038,6 +6075,147 @@ mod tests {
             1
         );
         assert!(find_applicable_replacements(&state, &opponent_event, &registry).is_empty());
+    }
+
+    // CR 702.52a: a Dredge draw-replacement shaped like `synthesize_dredge`'s.
+    fn dredge_draw_replacement_def() -> ReplacementDefinition {
+        let return_to_hand = AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+        );
+        let mut mill = AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Spell,
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            },
+        );
+        mill.sub_ability = Some(Box::new(return_to_hand));
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw);
+        repl.mode = ReplacementMode::Optional { decline: None };
+        repl.execute = Some(Box::new(mill));
+        repl
+    }
+
+    fn dredge_state(library_size: usize) -> GameState {
+        let mut state = test_state_with_object(
+            ObjectId(10),
+            Zone::Graveyard,
+            vec![dredge_draw_replacement_def()],
+        );
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .keywords
+            .push(crate::types::keywords::Keyword::Dredge(2));
+        let lib = &mut state.players[0].library;
+        lib.clear();
+        for i in 0..library_size {
+            let object_id = ObjectId(100 + i as u64);
+            lib.push_back(object_id);
+            state.objects.insert(
+                object_id,
+                GameObject::new(
+                    object_id,
+                    CardId(100 + i as u64),
+                    PlayerId(0),
+                    format!("Library Card {i}"),
+                    Zone::Library,
+                ),
+            );
+        }
+        state
+    }
+
+    /// CR 702.52a: a graveyard dredge card's draw-replacement applies on its
+    /// owner's draw when the library has at least N cards — even though the
+    /// scanner's default zones are Battlefield/Command.
+    #[test]
+    fn dredge_applies_from_graveyard_on_owner_draw_with_enough_library() {
+        let state = dredge_state(2);
+        let registry = build_replacement_registry();
+        let owner_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert_eq!(
+            find_applicable_replacements(&state, &owner_draw, &registry).len(),
+            1,
+            "dredge must apply on the owner's draw with library >= N"
+        );
+        // CR 614.1a default scope is source-player only: an opponent's draw
+        // never offers your dredge card.
+        let opponent_draw = ProposedEvent::Draw {
+            player_id: PlayerId(1),
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &opponent_draw, &registry).is_empty(),
+            "dredge must not apply to an opponent's draw"
+        );
+    }
+
+    /// CR 702.52b: with fewer than N cards in library, dredge is not offered.
+    #[test]
+    fn dredge_not_applicable_when_library_smaller_than_n() {
+        let state = dredge_state(1); // 1 < Dredge 2
+        let registry = build_replacement_registry();
+        let owner_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &owner_draw, &registry).is_empty(),
+            "CR 702.52b: dredge must not apply when the library has fewer than N cards"
+        );
+    }
+
+    /// CR 109.4 + CR 108.4a + CR 702.52a: once a stolen card is in its owner's
+    /// graveyard, it has no controller; Dredge belongs to the owner, not the
+    /// last battlefield controller.
+    #[test]
+    fn dredge_graveyard_scope_uses_owner_not_stale_controller() {
+        let mut state = dredge_state(2);
+        state.objects.get_mut(&ObjectId(10)).unwrap().controller = PlayerId(1);
+        let registry = build_replacement_registry();
+
+        let owner_draw = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert_eq!(
+            find_applicable_replacements(&state, &owner_draw, &registry).len(),
+            1,
+            "dredge must be offered to the graveyard card's owner"
+        );
+
+        let stale_controller_draw = ProposedEvent::Draw {
+            player_id: PlayerId(1),
+            count: 1,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &stale_controller_draw, &registry).is_empty(),
+            "dredge must not follow the card's stale battlefield controller"
+        );
     }
 
     #[test]

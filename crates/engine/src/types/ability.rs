@@ -11505,8 +11505,10 @@ pub enum CombatDamageScope {
 }
 
 /// CR 614.1a: Which player(s) a replacement effect applies to, scoped relative
-/// to the replacement source's controller. `valid_player: None` keeps the
-/// controller-only default; `Some(You)` is the explicit controller scope,
+/// to the replacement source player. For permanents/spells this is the source's
+/// controller; for cards outside the battlefield/stack, CR 109.4 + CR 108.4a
+/// make this the owner. `valid_player: None` keeps the source-player default;
+/// `Some(You)` is the explicit source-player scope,
 /// `Some(Opponent)` an opponent-scoped replacement (Tainted Remedy), and
 /// `Some(AnyPlayer)` a global all-players replacement (Rain of Gore).
 ///
@@ -11515,9 +11517,9 @@ pub enum CombatDamageScope {
 /// `valid_player` values (`"You"` / `"Opponent"`) deserialize unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReplacementPlayerScope {
-    /// The replacement source's controller.
+    /// The replacement source player.
     You,
-    /// Any opponent of the replacement source's controller.
+    /// Any opponent of the replacement source player.
     Opponent,
     /// Every player in the game, regardless of who controls the source.
     AnyPlayer,
@@ -11627,7 +11629,7 @@ pub struct ReplacementDefinition {
     /// CR 614.1a: Restricts which player this replacement applies to.
     /// "an opponent would gain life" → Some(Opponent); "a spell or ability would
     /// cause its controller to gain life" (Rain of Gore) → Some(AnyPlayer).
-    /// None = applies to the replacement source's controller only.
+    /// None = applies to the replacement source player only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_player: Option<ReplacementPlayerScope>,
     /// Marks this replacement as consumed (one-shot). Skipped by find_applicable_replacements.

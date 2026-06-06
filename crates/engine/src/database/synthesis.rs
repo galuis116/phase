@@ -2522,6 +2522,96 @@ pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
     }
 }
 
+/// CR 702.52a: Dredge — "As long as you have at least N cards in your library,
+/// if you would draw a card, you may instead mill N cards and return this card
+/// from your graveyard to your hand." Synthesized as an optional `Draw`
+/// replacement whose execute mills N then returns this card from the graveyard
+/// to hand.
+///
+/// The replacement functions while the card is in the graveyard. Two pieces make
+/// that work: (1) the draw-replacement default player-scope follows the dredge
+/// card's effective source player (CR 109.4 + CR 108.4a), so a graveyard card
+/// applies on its owner's draw — no `valid_player`/`valid_card` needed (and
+/// `valid_card: SelfRef` would not match a `Draw`, which has no affected object);
+/// (2) `find_applicable_replacements` includes graveyard dredge cards on that
+/// player's draw, gated on library size >= N (CR 702.52b enforced at offer time).
+pub fn synthesize_dredge(face: &mut CardFace) {
+    let Some(n) = face.keywords.iter().find_map(|k| match k {
+        Keyword::Dredge(n) => Some(*n),
+        _ => None,
+    }) else {
+        return;
+    };
+    if face.replacements.iter().any(is_dredge_draw_replacement) {
+        return;
+    }
+
+    // CR 702.52a: "return this card from your graveyard to your hand."
+    let return_to_hand = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Hand,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: false,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+        },
+    );
+    // CR 702.52a: "mill N cards", then return — `TargetFilter::Controller`
+    // resolves through the replacement source player, which is the graveyard
+    // card's owner under CR 109.4 + CR 108.4a.
+    let mut mill = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Mill {
+            count: QuantityExpr::Fixed { value: n as i32 },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
+        },
+    );
+    mill.sub_ability = Some(Box::new(return_to_hand));
+
+    let mut replacement = ReplacementDefinition::new(ReplacementEvent::Draw);
+    replacement.mode = crate::types::ability::ReplacementMode::Optional { decline: None };
+    replacement.description = Some(
+        "CR 702.52a: Dredge — instead of drawing, you may mill N cards and return this \
+         card from your graveyard to your hand."
+            .to_string(),
+    );
+    replacement.execute = Some(Box::new(mill));
+    face.replacements.push(replacement);
+}
+
+/// Idempotency-shape predicate for the synthesized Dredge draw-replacement — a
+/// `Draw` replacement whose execute mills then returns `SelfRef` from the
+/// graveyard to hand.
+fn is_dredge_draw_replacement(r: &ReplacementDefinition) -> bool {
+    matches!(r.event, ReplacementEvent::Draw)
+        && matches!(
+            r.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Mill { .. })
+        )
+        && r.execute
+            .as_deref()
+            .and_then(|a| a.sub_ability.as_deref())
+            .is_some_and(|sub| {
+                matches!(
+                    &*sub.effect,
+                    Effect::ChangeZone {
+                        origin: Some(Zone::Graveyard),
+                        destination: Zone::Hand,
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                )
+            })
+}
+
 /// CR 702.74a: Evoke is a static ability granting an alternative cost plus a
 /// linked intervening-if triggered ability. The static ability's
 /// "you may cast for evoke cost" is wired at the engine level via
@@ -7886,6 +7976,8 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_demonstrate(face);
     synthesize_entwine(face);
     synthesize_madness_intrinsics(face);
+    // CR 702.52a: Dredge — optional graveyard draw-replacement (mill N + return).
+    synthesize_dredge(face);
     synthesize_evoke(face);
     synthesize_echo(face);
     // CR 702.24a: Cumulative upkeep — at the beginning of your upkeep, put an
@@ -9403,6 +9495,74 @@ mod madness_synthesis_tests {
                 .count(),
             1
         );
+    }
+
+    /// CR 702.52a: Dredge synthesizes one optional `Draw` replacement whose
+    /// execute mills N then returns this card from the graveyard to hand.
+    #[test]
+    fn synthesize_dredge_adds_optional_draw_replacement_with_mill_and_return() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Dredge(3));
+        synthesize_dredge(&mut face);
+
+        let repl = face
+            .replacements
+            .iter()
+            .find(|r| matches!(r.event, ReplacementEvent::Draw))
+            .expect("dredge should add a Draw replacement");
+        // "you may" → Optional; no valid_card (a Draw has no affected object, and
+        // the default player-scope follows the graveyard card's owner).
+        assert!(matches!(
+            repl.mode,
+            crate::types::ability::ReplacementMode::Optional { .. }
+        ));
+        assert!(repl.valid_card.is_none());
+
+        let exec = repl.execute.as_deref().expect("execute body");
+        assert!(matches!(
+            &*exec.effect,
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 3 },
+                ..
+            }
+        ));
+        let sub = exec
+            .sub_ability
+            .as_deref()
+            .expect("return-to-hand sub-ability");
+        assert!(matches!(
+            &*sub.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+        assert!(is_dredge_draw_replacement(repl));
+    }
+
+    #[test]
+    fn synthesize_dredge_is_idempotent() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Dredge(2));
+        synthesize_dredge(&mut face);
+        synthesize_dredge(&mut face);
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| is_dredge_draw_replacement(r))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn synthesize_dredge_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_dredge(&mut face);
+        assert!(face.replacements.is_empty());
     }
 }
 

@@ -621,7 +621,7 @@ pub(super) fn apply_post_replacement_effect(
             state
                 .objects
                 .get(&obj_id)
-                .map(|obj| (obj_id, obj.controller))
+                .map(|obj| (obj_id, super::replacement::replacement_source_player(obj)))
         })
         .unwrap_or((ObjectId(0), state.active_player));
 
@@ -1594,6 +1594,62 @@ mod tests {
         assert!(state.post_replacement_continuation.is_none());
         // Source's controller (P0) lost 2 life.
         assert_eq!(state.players[0].life, initial_life - 2);
+    }
+
+    /// CR 109.4 + CR 108.4a + CR 702.52a: A replacement template resolving
+    /// from a card in a graveyard scopes `Controller` to that card's owner, not
+    /// to stale battlefield control.
+    #[test]
+    fn post_replacement_template_from_graveyard_uses_owner_not_stale_controller() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dredge Source".to_string(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&source).unwrap().controller = PlayerId(1);
+
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Top Card".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Second Card".to_string(),
+            Zone::Library,
+        );
+
+        let template = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            },
+        );
+        state.post_replacement_continuation =
+            Some(PostReplacementContinuation::Template(Box::new(template)));
+
+        let mut events = Vec::new();
+        let waiting = apply_pending_post_replacement_effect(
+            &mut state,
+            Some(source),
+            None,
+            None,
+            &mut events,
+        );
+
+        assert!(waiting.is_none(), "Template path resolved without prompt");
+        assert_eq!(state.players[0].library.len(), 0);
+        assert_eq!(state.players[0].graveyard.len(), 3);
+        assert!(state.players[1].graveyard.is_empty());
     }
 
     /// 2026-05-09 audit M4 regression: the unified slot dispatches a
