@@ -5470,11 +5470,18 @@ fn handle_crew_activation(
         })
         .collect();
 
-    // Validate total power of all eligible creatures can meet the threshold
+    // Validate total power of all eligible creatures can meet the threshold.
+    // CR 702.122c: a creature's contribution may be modified ("as though its
+    // power were N greater" / "using its toughness rather than its power").
     let total_power: i32 = eligible_creatures
         .iter()
-        .filter_map(|id| state.objects.get(id))
-        .map(|o| o.power.unwrap_or(0).max(0))
+        .map(|&id| {
+            super::static_abilities::object_crew_power_contribution(
+                state,
+                id,
+                crate::types::statics::CrewAction::Crew,
+            )
+        })
         .sum();
 
     if total_power < crew_power as i32 {
@@ -5578,7 +5585,12 @@ fn handle_crew_announcement(
                 "Creature can't crew Vehicles".to_string(),
             ));
         }
-        total_power += obj.power.unwrap_or(0).max(0);
+        // CR 702.122c: apply any crew power-contribution modifier.
+        total_power += super::static_abilities::object_crew_power_contribution(
+            state,
+            cid,
+            crate::types::statics::CrewAction::Crew,
+        );
     }
 
     // CR 702.122a: Total power must meet threshold
@@ -5748,10 +5760,15 @@ fn handle_station_announcement(
 
     // CR 702.184a + CR 113.7a: Snapshot the creature's power BEFORE tapping —
     // the counter count is determined at cost-payment time and survives the
-    // creature leaving the battlefield before resolution. CR 702.184c lets
-    // static abilities modify the characteristic read; this implementation
-    // reads `power`, which is the default per the rule.
-    let snapshot_power = creature.power.unwrap_or(0).max(0);
+    // creature leaving the battlefield before resolution. CR 702.184c +
+    // CR 702.122c: static abilities may modify the contributed value ("stations
+    // permanents as though its power were N greater"); the helper applies any
+    // such modifier and otherwise reads `power`, the default per the rule.
+    let snapshot_power = super::static_abilities::object_crew_power_contribution(
+        state,
+        creature_id,
+        crate::types::statics::CrewAction::Station,
+    );
 
     // CR 701.26a: Tap the creature as cost payment.
     if let Some(obj) = state.objects.get_mut(&creature_id) {
@@ -5844,10 +5861,16 @@ fn handle_saddle_activation(
         })
         .collect();
 
+    // CR 702.171a + CR 702.122c: a creature's saddle contribution may be modified.
     let total_power: i32 = eligible_creatures
         .iter()
-        .filter_map(|id| state.objects.get(id))
-        .map(|o| o.power.unwrap_or(0).max(0))
+        .map(|&id| {
+            super::static_abilities::object_crew_power_contribution(
+                state,
+                id,
+                crate::types::statics::CrewAction::Saddle,
+            )
+        })
         .sum();
 
     if total_power < saddle_power as i32 {
@@ -5914,7 +5937,12 @@ fn handle_saddle_announcement(
                 "Creature is no longer eligible for saddling".to_string(),
             ));
         }
-        total_power += obj.power.unwrap_or(0).max(0);
+        // CR 702.122c: apply any saddle power-contribution modifier.
+        total_power += super::static_abilities::object_crew_power_contribution(
+            state,
+            cid,
+            crate::types::statics::CrewAction::Saddle,
+        );
     }
 
     if total_power < saddle_power as i32 {
@@ -20009,6 +20037,100 @@ mod crew_tests {
         );
 
         assert!(result.is_err());
+    }
+
+    /// CR 702.122c: a creature with "crews Vehicles as though its power were N
+    /// greater" (Reckoner Bankbuster) contributes its modified power, letting an
+    /// otherwise-insufficient creature pay the crew cost alone.
+    #[test]
+    fn crew_contribution_power_delta_lets_low_power_creature_crew() {
+        use crate::types::ability::{StaticDefinition, TargetFilter};
+        use crate::types::statics::{CrewActionScope, CrewContributionKind, StaticMode};
+
+        let (mut state, vehicle_id, _creature_a, creature_b) = setup_crew_scenario();
+        // creature_b is 2/2; the Vehicle needs Crew 3, so it cannot crew alone
+        // (see `test_crew_fails_insufficient_power`). Grant it the +2 modifier.
+        {
+            let obj = state.objects.get_mut(&creature_b).unwrap();
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CrewContribution {
+                    kind: CrewContributionKind::PowerDelta { delta: 2 },
+                    actions: CrewActionScope {
+                        crew: true,
+                        saddle: false,
+                        station: false,
+                    },
+                })
+                .affected(TargetFilter::SelfRef),
+            );
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![],
+            },
+        )
+        .unwrap();
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CrewVehicle {
+                vehicle_id,
+                creature_ids: vec![creature_b],
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "power 2 + delta 2 = 4 should satisfy Crew 3: {result:?}"
+        );
+    }
+
+    /// CR 702.122c: "using its toughness rather than its power" (Giant Ox)
+    /// substitutes toughness for power, and the modifier applies only to the
+    /// named keyword actions (crew-only here, not saddle).
+    #[test]
+    fn crew_contribution_toughness_substitution_and_action_scope() {
+        use crate::types::ability::{StaticDefinition, TargetFilter};
+        use crate::types::statics::{
+            CrewAction, CrewActionScope, CrewContributionKind, StaticMode,
+        };
+
+        let (mut state, _vehicle_id, _creature_a, creature_b) = setup_crew_scenario();
+        {
+            let obj = state.objects.get_mut(&creature_b).unwrap();
+            obj.power = Some(0);
+            obj.toughness = Some(4);
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::CrewContribution {
+                    kind: CrewContributionKind::ToughnessInsteadOfPower,
+                    actions: CrewActionScope {
+                        crew: true,
+                        saddle: false,
+                        station: false,
+                    },
+                })
+                .affected(TargetFilter::SelfRef),
+            );
+        }
+        // Crew: contributes toughness (4) instead of power (0).
+        assert_eq!(
+            crate::game::static_abilities::object_crew_power_contribution(
+                &state,
+                creature_b,
+                CrewAction::Crew
+            ),
+            4
+        );
+        // Saddle: the modifier is crew-only, so the base power (0) is contributed.
+        assert_eq!(
+            crate::game::static_abilities::object_crew_power_contribution(
+                &state,
+                creature_b,
+                CrewAction::Saddle
+            ),
+            0
+        );
     }
 
     #[test]

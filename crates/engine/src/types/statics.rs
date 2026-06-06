@@ -563,6 +563,47 @@ pub enum CostModifyMode {
     Minimum,
 }
 
+/// CR 702.122c: How a creature's contributed power is modified when it crews a
+/// Vehicle, saddles a Mount, or stations a permanent. See [`StaticMode::CrewContribution`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CrewContributionKind {
+    /// "as though its power were N greater" — contribute `power + delta`.
+    PowerDelta { delta: i32 },
+    /// "using its toughness rather than its power" — contribute `toughness`.
+    ToughnessInsteadOfPower,
+}
+
+/// The set of keyword actions a [`StaticMode::CrewContribution`] applies to.
+/// A card names exactly the actions it modifies (e.g. "saddles Mounts and crews
+/// Vehicles" sets `crew` and `saddle`; "crews Vehicles" sets only `crew`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct CrewActionScope {
+    pub crew: bool,
+    pub saddle: bool,
+    pub station: bool,
+}
+
+/// The keyword action being performed, used to query whether a
+/// [`StaticMode::CrewContribution`]'s [`CrewActionScope`] applies. CR 702.122 /
+/// 702.171 / 702.184.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CrewAction {
+    Crew,
+    Saddle,
+    Station,
+}
+
+impl CrewActionScope {
+    /// Whether this modifier applies to the given keyword action.
+    pub fn applies_to(&self, action: CrewAction) -> bool {
+        match action {
+            CrewAction::Crew => self.crew,
+            CrewAction::Saddle => self.saddle,
+            CrewAction::Station => self.station,
+        }
+    }
+}
+
 /// All static ability modes from Forge's static ability registry.
 /// Matched case-sensitively against Forge mode strings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1102,6 +1143,15 @@ pub enum StaticMode {
     CantBlockAlone,
     /// CR 702.122c: This creature can't crew Vehicles.
     CantCrew,
+    /// CR 702.122c / CR 702.171a / CR 702.184a: This creature contributes to a
+    /// crew/saddle/station cost as though its power were modified (Reckoner
+    /// Bankbuster: "as though its power were 2 greater") or using its toughness
+    /// instead of its power (Giant Ox). `actions` records which keyword actions
+    /// the modifier applies to, since a card may name only some of them.
+    CrewContribution {
+        kind: CrewContributionKind,
+        actions: CrewActionScope,
+    },
     MayLookAtTopOfLibrary,
 
     // -- Tier 3: Parser-produced statics --
@@ -1284,6 +1334,10 @@ impl Hash for StaticMode {
             }
             StaticMode::ActivateAsInstant { cost_category } => {
                 cost_category.hash(state);
+            }
+            StaticMode::CrewContribution { kind, actions } => {
+                kind.hash(state);
+                actions.hash(state);
             }
             StaticMode::ExtraBlockers { count } => count.hash(state),
             StaticMode::MustBlockAttacker { attacker } => attacker.hash(state),
@@ -1570,6 +1624,10 @@ impl fmt::Display for StaticMode {
             StaticMode::CantAttackAlone => write!(f, "CantAttackAlone"),
             StaticMode::CantBlockAlone => write!(f, "CantBlockAlone"),
             StaticMode::CantCrew => write!(f, "CantCrew"),
+            // Debug format, one-way (mirrors CantBeBlockedBy). No from_str reconstruction.
+            StaticMode::CrewContribution { kind, actions } => {
+                write!(f, "CrewContribution({kind:?},{actions:?})")
+            }
             StaticMode::MayLookAtTopOfLibrary => write!(f, "MayLookAtTopOfLibrary"),
             // Tier 3
             StaticMode::MayChooseNotToUntap => write!(f, "MayChooseNotToUntap"),

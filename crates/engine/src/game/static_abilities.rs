@@ -9,7 +9,9 @@ use crate::types::ability::{ContinuousModification, Duration, TargetFilter, Type
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::statics::{CostPaymentProhibition, ProhibitionScope, StaticMode};
+use crate::types::statics::{
+    CostPaymentProhibition, CrewAction, CrewContributionKind, ProhibitionScope, StaticMode,
+};
 
 /// Handler function type for static ability modes.
 /// Receives the `StaticMode` variant the handler was registered under.
@@ -1157,6 +1159,39 @@ pub fn object_has_cant_crew(state: &GameState, object_id: ObjectId) -> bool {
         super::functioning_abilities::active_static_definitions(state, obj)
             .any(|def| def.mode == StaticMode::CantCrew)
     })
+}
+
+/// CR 702.122c / 702.171a / 702.184a: The power a creature contributes toward a
+/// crew / saddle / station cost, after applying any active `CrewContribution`
+/// static whose [`CrewActionScope`](crate::types::statics::CrewActionScope)
+/// covers `action`. "Using its toughness rather than its power" substitutes the
+/// creature's toughness for its base power; "as though its power were N greater"
+/// adds N. Multiple deltas accumulate. The result is clamped to 0, matching the
+/// plain `power.unwrap_or(0).max(0)` it replaces.
+pub fn object_crew_power_contribution(
+    state: &GameState,
+    object_id: ObjectId,
+    action: CrewAction,
+) -> i32 {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return 0;
+    };
+    let mut base = obj.power.unwrap_or(0);
+    let mut delta = 0;
+    for def in super::functioning_abilities::active_static_definitions(state, obj) {
+        if let StaticMode::CrewContribution { kind, actions } = &def.mode {
+            if !actions.applies_to(action) {
+                continue;
+            }
+            match kind {
+                CrewContributionKind::ToughnessInsteadOfPower => {
+                    base = obj.toughness.unwrap_or(0);
+                }
+                CrewContributionKind::PowerDelta { delta: d } => delta += *d,
+            }
+        }
+    }
+    (base + delta).max(0)
 }
 
 /// Check if a static ability named `name` applies to a specific object

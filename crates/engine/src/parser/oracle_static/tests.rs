@@ -14453,3 +14453,89 @@ fn eriette_charmed_apple_static_and_trigger_parse() {
         other => panic!("expected GainLife, got {other:?}"),
     }
 }
+
+/// CR 702.122c / 702.171a / 702.184a: crew/saddle/station power-contribution
+/// modifiers (Reckoner Bankbuster, the "Roads" cycle, Giant Ox, Stoic
+/// Star-Captain) parse into a `CrewContribution` static carrying the kind and
+/// the named action scope.
+/// CR 702.122c / 702.171a / 702.184a: crew/saddle/station power-contribution
+/// modifiers (Reckoner Bankbuster, the "Roads" cycle, Giant Ox, Stoic
+/// Star-Captain) parse into a `CrewContribution` static carrying the kind and
+/// the named action scope.
+#[test]
+fn crew_contribution_power_and_toughness_modifiers_parse() {
+    use crate::types::statics::{CrewActionScope, CrewContributionKind};
+
+    let defs = parse_static_line_multi("~ crews Vehicles as though its power were 2 greater.");
+    assert_eq!(
+        defs.len(),
+        1,
+        "got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        defs[0].mode,
+        StaticMode::CrewContribution {
+            kind: CrewContributionKind::PowerDelta { delta: 2 },
+            actions: CrewActionScope {
+                crew: true,
+                saddle: false,
+                station: false
+            },
+        }
+    );
+    assert_eq!(defs[0].affected, Some(TargetFilter::SelfRef));
+
+    let defs = parse_static_line_multi(
+        "~ saddles Mounts and crews Vehicles as though its power were 2 greater.",
+    );
+    assert_eq!(
+        defs[0].mode,
+        StaticMode::CrewContribution {
+            kind: CrewContributionKind::PowerDelta { delta: 2 },
+            actions: CrewActionScope {
+                crew: true,
+                saddle: true,
+                station: false
+            },
+        }
+    );
+
+    let defs =
+        parse_static_line_multi("~ crews Vehicles using its toughness rather than its power.");
+    assert_eq!(
+        defs[0].mode,
+        StaticMode::CrewContribution {
+            kind: CrewContributionKind::ToughnessInsteadOfPower,
+            actions: CrewActionScope {
+                crew: true,
+                saddle: false,
+                station: false
+            },
+        }
+    );
+
+    // Anthem form (Stoic Star-Captain): granted to a group, so it is emitted as a
+    // Continuous static carrying AddStaticMode(CrewContribution) for propagation
+    // onto each affected creature, rather than a bare group-affected mode.
+    let defs = parse_static_line_multi(
+        "Each creature you control crews Vehicles and stations permanents as though its power were 2 greater.",
+    );
+    assert_eq!(defs[0].mode, StaticMode::Continuous);
+    assert!(
+        defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddStaticMode {
+                mode: StaticMode::CrewContribution {
+                    kind: CrewContributionKind::PowerDelta { delta: 2 },
+                    actions: CrewActionScope {
+                        crew: true,
+                        saddle: false,
+                        station: true,
+                    },
+                }
+            }),
+        "anthem form must propagate via AddStaticMode, got {:?}",
+        defs[0].modifications
+    );
+}
