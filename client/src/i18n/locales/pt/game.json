@@ -1436,6 +1436,9 @@
   "proliferate": {
     "proliferateTitle": "Proliferar",
     "proliferateSubtitle": "Escolha qualquer número de permanentes e jogadores com marcadores. Cada alvo escolhido recebe mais um marcador de cada tipo já presente.",
+    "timeTravelTitle": "Viagem no Tempo",
+    "timeTravelRemoveSubtitle": "Escolha qualquer número de objetos elegíveis para remover um marcador temporal.",
+    "timeTravelAddSubtitle": "Escolha qualquer número de objetos elegíveis restantes para adicionar um marcador temporal.",
     "chooseObjectsTitle": "Escolher Permanentes",
     "chooseObjectsSubtitle": "Escolha qualquer número de permanentes. Você paga um custo por cada um escolhido.",
     "selectAll": "Todos",

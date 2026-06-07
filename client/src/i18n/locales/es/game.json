@@ -1436,6 +1436,9 @@
   "proliferate": {
     "proliferateTitle": "Proliferar",
     "proliferateSubtitle": "Elige cualquier número de permanentes y jugadores con contadores. Cada objetivo elegido recibe un contador más de cada tipo que ya tenga.",
+    "timeTravelTitle": "Viaje en el Tiempo",
+    "timeTravelRemoveSubtitle": "Elige cualquier número de objetos elegibles de los que retirar un contador de tiempo.",
+    "timeTravelAddSubtitle": "Elige cualquier número de objetos elegibles restantes a los que añadir un contador de tiempo.",
     "chooseObjectsTitle": "Elegir permanentes",
     "chooseObjectsSubtitle": "Elige cualquier número de permanentes. Pagas un coste por cada uno elegido.",
     "selectAll": "Todos",

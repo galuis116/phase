@@ -4081,6 +4081,65 @@ fn apply_action(
             effects::drain_pending_continuation(state, &mut events);
             state.waiting_for.clone()
         }
+        // CR 701.56a: Time travel — player selected objects for the current phase
+        // (remove a time counter, then add). Validate against the eligible set,
+        // apply the per-object counter change, then advance to the add phase or
+        // finish. Counter changes drive the existing suspend/vanishing triggers.
+        (
+            WaitingFor::TimeTravelChoice {
+                player,
+                eligible,
+                phase,
+            },
+            GameAction::SelectTargets { targets },
+        ) => {
+            let p = *player;
+            let phase = *phase;
+            let eligible_set = eligible.clone();
+            for t in &targets {
+                if !eligible_set.contains(t) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected object not eligible for time travel".to_string(),
+                    ));
+                }
+            }
+            effects::time_travel::apply_phase(state, p, &targets, phase, &mut events);
+
+            if phase == crate::types::game_state::TimeTravelPhase::Remove {
+                // CR 701.56a: after the remove phase, offer the add phase over the
+                // still-eligible objects, excluding any just chosen to remove.
+                let add_eligible: Vec<_> = effects::time_travel::eligible_objects(state, p)
+                    .into_iter()
+                    .filter(|t| !targets.contains(t))
+                    .collect();
+                if !add_eligible.is_empty() {
+                    state.waiting_for = WaitingFor::TimeTravelChoice {
+                        player: p,
+                        eligible: add_eligible,
+                        phase: crate::types::game_state::TimeTravelPhase::Add,
+                    };
+                    state.waiting_for.clone()
+                } else {
+                    events.push(GameEvent::EffectResolved {
+                        kind: crate::types::ability::EffectKind::TimeTravel,
+                        source_id: ObjectId(0),
+                    });
+                    state.waiting_for = WaitingFor::Priority { player: p };
+                    state.priority_player = p;
+                    effects::drain_pending_continuation(state, &mut events);
+                    state.waiting_for.clone()
+                }
+            } else {
+                events.push(GameEvent::EffectResolved {
+                    kind: crate::types::ability::EffectKind::TimeTravel,
+                    source_id: ObjectId(0),
+                });
+                state.waiting_for = WaitingFor::Priority { player: p };
+                state.priority_player = p;
+                effects::drain_pending_continuation(state, &mut events);
+                state.waiting_for.clone()
+            }
+        }
         // CR 608.2c: ChooseObjectsIntoTrackedSet — player submitted their
         // battlefield-permanent selection. Publish a fresh tracked set so the
         // downstream `PayCost { ScaledMana }` and the `IfYouDo`/`Untap` tail

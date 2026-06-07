@@ -1441,6 +1441,9 @@
   "proliferate": {
     "proliferateTitle": "Proliferate",
     "proliferateSubtitle": "Choose any number of permanents and players with counters. Each chosen target gets one more counter of each kind already there.",
+    "timeTravelTitle": "Time Travel",
+    "timeTravelRemoveSubtitle": "Choose any number of eligible objects to remove a time counter from.",
+    "timeTravelAddSubtitle": "Choose any number of remaining eligible objects to add a time counter to.",
     "chooseObjectsTitle": "Choose Permanents",
     "chooseObjectsSubtitle": "Choose any number of permanents. You pay a cost for each one chosen.",
     "selectAll": "All",

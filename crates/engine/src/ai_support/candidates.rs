@@ -1915,6 +1915,39 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             }
             actions
         }
+        // CR 701.56a: Time travel — choose any subset of eligible objects for the
+        // current phase (remove a time counter, then add). Mirrors the
+        // ProliferateChoice subset offer over `GameAction::SelectTargets`.
+        WaitingFor::TimeTravelChoice {
+            player, eligible, ..
+        } => {
+            let mut actions = vec![
+                candidate(
+                    GameAction::SelectTargets {
+                        targets: eligible.clone(),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ),
+                candidate(
+                    GameAction::SelectTargets {
+                        targets: Vec::new(),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ),
+            ];
+            for target in eligible {
+                actions.push(candidate(
+                    GameAction::SelectTargets {
+                        targets: vec![target.clone()],
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ));
+            }
+            actions
+        }
         // CR 608.2c: ChooseObjectsIntoTrackedSet — choose any subset of the
         // eligible battlefield permanents (or decline with an empty selection).
         WaitingFor::ChooseObjectsSelection {

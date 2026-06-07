@@ -147,6 +147,7 @@ pub mod surveil;
 pub mod suspect;
 pub mod switch_pt;
 pub mod tap_untap;
+pub mod time_travel;
 pub mod token;
 pub mod token_copy;
 pub mod transform_effect;
@@ -985,6 +986,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             }
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::ProliferateChoice { .. }
+            | WaitingFor::TimeTravelChoice { .. }
             | WaitingFor::ChooseObjectsSelection { .. }
             | WaitingFor::ExploreChoice { .. }
             | WaitingFor::CopyRetarget { .. }
@@ -1862,7 +1864,7 @@ pub fn resolve_effect(
         Effect::Tribute { .. } => tribute::resolve(state, ability, events),
         // CR 701.56a: Time travel — interactive counter manipulation on suspended/time-countered permanents.
         // Currently a no-op; full interactive implementation requires WaitingFor infrastructure.
-        Effect::TimeTravel => Ok(()),
+        Effect::TimeTravel => time_travel::resolve(state, ability, events),
         Effect::BecomeMonarch => become_monarch::resolve(state, ability, events),
         Effect::Proliferate => proliferate::resolve(state, ability, events),
         Effect::ProliferateTarget { .. } => proliferate::resolve_target(state, ability, events),

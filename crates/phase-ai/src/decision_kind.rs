@@ -138,6 +138,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::BattleProtectorChoice { .. }
         | WaitingFor::ProliferateChoice { .. }
+        | WaitingFor::TimeTravelChoice { .. }
         | WaitingFor::ChooseObjectsSelection { .. }
         | WaitingFor::CategoryChoice { .. }
         | WaitingFor::AssignCombatDamage { .. }

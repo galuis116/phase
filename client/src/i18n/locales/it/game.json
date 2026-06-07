@@ -1436,6 +1436,9 @@
   "proliferate": {
     "proliferateTitle": "Proliferare",
     "proliferateSubtitle": "Scegli un numero qualsiasi di permanenti e giocatori con segnalini. Ogni bersaglio scelto riceve un altro segnalino di ciascun tipo già presente.",
+    "timeTravelTitle": "Viaggio Temporale",
+    "timeTravelRemoveSubtitle": "Scegli un numero qualsiasi di oggetti idonei da cui rimuovere un segnalino tempo.",
+    "timeTravelAddSubtitle": "Scegli un numero qualsiasi di oggetti idonei rimanenti a cui aggiungere un segnalino tempo.",
     "chooseObjectsTitle": "Scegli permanenti",
     "chooseObjectsSubtitle": "Scegli un numero qualsiasi di permanenti. Paghi un costo per ciascuno scelto.",
     "selectAll": "Tutti",

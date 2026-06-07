@@ -705,6 +705,12 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             targets: Vec::new(),
         }),
 
+        // CR 701.56a: Time travel — default to changing nothing this phase
+        // (an empty selection is legal: "choose any number").
+        WaitingFor::TimeTravelChoice { .. } => Some(GameAction::SelectTargets {
+            targets: Vec::new(),
+        }),
+
         // ChooseObjectsIntoTrackedSet: default to declining (empty selection).
         WaitingFor::ChooseObjectsSelection { .. } => Some(GameAction::SelectTargets {
             targets: Vec::new(),

@@ -1436,6 +1436,9 @@
   "proliferate": {
     "proliferateTitle": "Wuchern",
     "proliferateSubtitle": "Wähle eine beliebige Anzahl bleibender Karten und Spieler mit Marken. Jedes gewählte Ziel erhält eine weitere Marke jeder Art, die bereits dort vorhanden ist.",
+    "timeTravelTitle": "Zeitreise",
+    "timeTravelRemoveSubtitle": "Wähle eine beliebige Anzahl gültiger Objekte, von denen eine Zeitmarke entfernt werden soll.",
+    "timeTravelAddSubtitle": "Wähle eine beliebige Anzahl verbleibender gültiger Objekte, auf die eine Zeitmarke gelegt werden soll.",
     "chooseObjectsTitle": "Bleibende Karten wählen",
     "chooseObjectsSubtitle": "Wähle eine beliebige Anzahl bleibender Karten. Du zahlst für jede gewählte Karte Kosten.",
     "selectAll": "Alle",

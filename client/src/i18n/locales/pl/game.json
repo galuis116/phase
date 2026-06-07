@@ -1436,6 +1436,9 @@
   "proliferate": {
     "proliferateTitle": "Proliferate",
     "proliferateSubtitle": "Wybierz dowolną liczbę trwałych i graczy ze znacznikami. Każdy wybrany cel otrzymuje po jednym dodatkowym znaczniku każdego rodzaju, który już tam jest.",
+    "timeTravelTitle": "Podróż w czasie",
+    "timeTravelRemoveSubtitle": "Wybierz dowolną liczbę kwalifikujących się obiektów, z których usunąć znacznik czasu.",
+    "timeTravelAddSubtitle": "Wybierz dowolną liczbę pozostałych kwalifikujących się obiektów, na które dodać znacznik czasu.",
     "chooseObjectsTitle": "Wybierz trwałe",
     "chooseObjectsSubtitle": "Wybierz dowolną liczbę trwałych. Płacisz koszt za każdego wybranego.",
     "selectAll": "Wszystko",
