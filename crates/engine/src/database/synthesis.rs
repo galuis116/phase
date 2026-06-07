@@ -9108,15 +9108,25 @@ pub(crate) fn strip_level_gated_keywords(face: &mut CardFace) {
                     )
             )
         })
-        .flat_map(|stat| {
-            stat.modifications.iter().filter_map(|m| match m {
-                ContinuousModification::AddKeyword { keyword } => Some(keyword.clone()),
-                _ => None,
-            })
-        })
+        .flat_map(keyword_granted_by_level_gated_static)
         .collect();
 
     face.keywords.retain(|kw| !gated.contains(kw));
+}
+
+fn keyword_granted_by_level_gated_static(stat: &StaticDefinition) -> Vec<Keyword> {
+    let mut gated = stat
+        .modifications
+        .iter()
+        .filter_map(|m| match m {
+            ContinuousModification::AddKeyword { keyword } => Some(keyword.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if let Some(kw) = stat.mode.as_keyword() {
+        gated.push(kw);
+    }
+    gated
 }
 
 /// Build a `CardFace` from MTGJSON data, running the Oracle text parser and all synthesis.
@@ -16841,6 +16851,32 @@ mod sorcery_speed_invariant_tests {
 
         // Both gated keywords stripped; the LevelUp keyword survives.
         assert_eq!(face.keywords, vec![level_up]);
+    }
+
+    /// CR 711.4: Level-block standalone keyword static modes (Hada Spy Patrol's
+    /// "Shroud" line) must strip the matching base keyword.
+    #[test]
+    fn strip_level_gated_keywords_strips_static_mode_keyword_grants() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Shroud],
+            static_abilities: vec![StaticDefinition::new(StaticMode::Shroud)
+                .affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                ))
+                .condition(StaticCondition::HasCounters {
+                    counters: CounterMatch::OfType(CounterType::Generic("level".to_string())),
+                    minimum: 3,
+                    maximum: None,
+                })],
+            ..Default::default()
+        };
+
+        strip_level_gated_keywords(&mut face);
+
+        assert!(
+            face.keywords.is_empty(),
+            "Shroud must strip from base keywords"
+        );
     }
 
     /// Negative case: a `HasCounters` static on a NON-"level" generic counter
