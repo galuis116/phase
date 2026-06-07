@@ -470,7 +470,12 @@ mod tests {
         evaluate_layers(&mut state);
         assert_eq!(state.objects[&source_id].name, "Target Bear");
 
-        move_to_zone(&mut state, source_id, Zone::Exile, &mut events);
+        move_to_zone(&mut state, source_id, Zone::Graveyard, &mut events);
+        assert_eq!(
+            state.objects[&source_id].name, "Copy Source",
+            "copy identity must not persist in graveyard after leaving the battlefield"
+        );
+
         move_to_zone(&mut state, source_id, Zone::Battlefield, &mut events);
         evaluate_layers(&mut state);
         assert_eq!(state.objects[&source_id].name, "Copy Source");

@@ -1170,6 +1170,34 @@ impl GameObject {
         }
     }
 
+    /// CR 613.1 + CR 400.7: Revert layer-derived characteristics to the object's
+    /// printed baseline. Mirrors the per-object reset in `evaluate_layers` Step 1
+    /// (layers.rs) but runs at zone-exit time so off-battlefield objects — e.g. a
+    /// Vesuva copy sacrificed to the legend rule — do not retain copied name, types,
+    /// or abilities in the graveyard after copy effects are pruned.
+    pub fn revert_layered_characteristics_to_base(&mut self) {
+        self.sync_missing_base_characteristics();
+        self.name = self.base_name.clone();
+        self.power = self.base_power;
+        self.toughness = self.base_toughness;
+        self.loyalty = self.base_loyalty;
+        // CR 310.4a + CR 400.7: Battle defense reverts to printed baseline off the battlefield.
+        self.defense = self.base_defense;
+        self.card_types = self.base_card_types.clone();
+        self.mana_cost = self.base_mana_cost.clone();
+        self.keywords = self.base_keywords.clone();
+        self.abilities = Arc::clone(&self.base_abilities);
+        self.trigger_definitions = Arc::clone(&self.base_trigger_definitions).into();
+        self.replacement_definitions = Arc::clone(&self.base_replacement_definitions).into();
+        self.static_definitions = Arc::clone(&self.base_static_definitions).into();
+        self.color = self.base_color.clone();
+        self.printed_ref = self.base_printed_ref.clone();
+        self.controller = self.base_controller.unwrap_or(self.owner);
+        self.assigns_damage_from_toughness = false;
+        self.assigns_damage_as_though_unblocked = false;
+        self.assigns_no_combat_damage = false;
+    }
+
     /// CR 400.7: Clear battlefield-only designations when a permanent leaves the battlefield.
     /// Separate from entry reset because some state (counters, transform) is already handled
     /// by `apply_zone_exit_cleanup` in zones.rs.

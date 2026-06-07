@@ -1966,6 +1966,49 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             }
             actions
         }
+        // CR 702.132a: Assist — caster may decline or pick any eligible helper.
+        WaitingFor::AssistChoosePlayer {
+            player, candidates, ..
+        } => {
+            let mut actions = vec![candidate(
+                GameAction::ChooseAssistPlayer { player: None },
+                TacticalClass::Selection,
+                Some(*player),
+            )];
+            for &helper in candidates {
+                actions.push(candidate(
+                    GameAction::ChooseAssistPlayer {
+                        player: Some(helper),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ));
+            }
+            actions
+        }
+        // CR 702.132a: Assist — the chosen player contributes nothing or the full
+        // amount they were offered (the engine validates feasibility on commit).
+        WaitingFor::AssistPayment {
+            chosen,
+            max_generic,
+            ..
+        } => {
+            let mut actions = vec![candidate(
+                GameAction::CommitAssistPayment { generic: 0 },
+                TacticalClass::Selection,
+                Some(*chosen),
+            )];
+            if *max_generic > 0 {
+                actions.push(candidate(
+                    GameAction::CommitAssistPayment {
+                        generic: *max_generic,
+                    },
+                    TacticalClass::Selection,
+                    Some(*chosen),
+                ));
+            }
+            actions
+        }
         // CR 608.2c: ChooseObjectsIntoTrackedSet — choose any subset of the
         // eligible battlefield permanents (or decline with an empty selection).
         WaitingFor::ChooseObjectsSelection {
@@ -3513,6 +3556,19 @@ fn mana_payment_actions(
                 }
                 ConvokeMode::Improvise if obj.is_improvise_eligible(player) => {
                     // CR 702.126a: Improvise pays generic mana — always colorless.
+                    actions.push(candidate(
+                        GameAction::TapForConvoke {
+                            object_id: *obj_id,
+                            mana_type: crate::types::mana::ManaType::Colorless,
+                        },
+                        TacticalClass::Mana,
+                        Some(player),
+                    ));
+                }
+                ConvokeMode::Delve
+                    if obj.zone == crate::types::zones::Zone::Graveyard && obj.owner == player =>
+                {
+                    // CR 702.66a: exile a graveyard card to pay one generic mana.
                     actions.push(candidate(
                         GameAction::TapForConvoke {
                             object_id: *obj_id,

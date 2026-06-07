@@ -44,8 +44,9 @@ mod prelude {
         AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction,
         AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator,
         ContinuousModification, ControllerRef, CostCategory, CountScope, FilterProp, ObjectScope,
-        ParsedCondition, PtStat, PtValueScope, QuantityExpr, QuantityRef, StaticCondition,
-        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        ParsedCondition, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
+        SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     pub(super) use crate::types::card_type::{
         noncreature_subtype_set, CoreType, SubtypeSet, Supertype,

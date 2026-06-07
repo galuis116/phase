@@ -901,6 +901,21 @@ impl<'a> CardBuilder<'a> {
         self
     }
 
+    /// CR 302: Make this card a creature. Strips the spell core types
+    /// (Instant/Sorcery) pushed by `add_spell_to_library_top` and adds Creature.
+    /// Mirrors `as_sorcery`/`as_instant`; reusable for search/tutor library tests.
+    pub fn as_creature(&mut self) -> &mut Self {
+        let obj = self.obj();
+        obj.card_types
+            .core_types
+            .retain(|t| *t != CoreType::Instant && *t != CoreType::Sorcery);
+        if !obj.card_types.core_types.contains(&CoreType::Creature) {
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        self.sync_base_card_types();
+        self
+    }
+
     /// Add the Legendary supertype (CR 205.4a: a card's supertypes are printed
     /// on the type line; CR 205.4d: a permanent with the legendary supertype is
     /// subject to the "legend rule" state-based action).
@@ -1476,6 +1491,9 @@ impl GameRunner {
                 crate::types::game_state::AlternativeCastKeyword::Blitz => {
                     "AlternativeCastChoice(Blitz)"
                 }
+                crate::types::game_state::AlternativeCastKeyword::Spectacle => {
+                    "AlternativeCastChoice(Spectacle)"
+                }
                 crate::types::game_state::AlternativeCastKeyword::Overload => {
                     "AlternativeCastChoice(Overload)"
                 }
@@ -1535,6 +1553,8 @@ impl GameRunner {
             WaitingFor::BattleProtectorChoice { .. } => "BattleProtectorChoice",
             WaitingFor::ProliferateChoice { .. } => "ProliferateChoice",
             WaitingFor::TimeTravelChoice { .. } => "TimeTravelChoice",
+            WaitingFor::AssistChoosePlayer { .. } => "AssistChoosePlayer",
+            WaitingFor::AssistPayment { .. } => "AssistPayment",
             WaitingFor::ChooseObjectsSelection { .. } => "ChooseObjectsSelection",
             WaitingFor::CopyRetarget { .. } => "CopyRetarget",
             WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",

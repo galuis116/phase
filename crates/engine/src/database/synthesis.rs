@@ -1790,6 +1790,98 @@ pub fn synthesize_transmute(face: &mut CardFace) {
     face.abilities.extend(transmute_abilities);
 }
 
+/// CR 702.71a: Synthesize Transfigure into an activated ability on the card.
+///
+/// "Transfigure [cost]" means "[Cost], Sacrifice this permanent: Search your
+/// library for a creature card with the same mana value as this permanent and
+/// put it onto the battlefield. Then shuffle your library. Activate only as a
+/// sorcery." Mirrors `synthesize_transmute`, but (1) the cost sacrifices the
+/// source permanent instead of discarding it, (2) the same-mana-value filter
+/// reads the *source* permanent's mana value (`ObjectScope::Source`, not
+/// `CostPaidObject` — a Sacrifice cost never stamps `cost_paid_object`), (3) the
+/// found card is a creature and goes to the battlefield (not hand), and (4) the
+/// ability functions on the battlefield (default `activation_zone`, unlike
+/// Transmute's hand-only).
+pub fn synthesize_transfigure(face: &mut CardFace) {
+    let transfigure_abilities: Vec<AbilityDefinition> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| {
+            let Keyword::Transfigure(cost) = kw else {
+                return None;
+            };
+            // CR 702.71a: Composite cost — pay mana, then sacrifice this permanent.
+            let composite_cost = AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana { cost: cost.clone() },
+                    AbilityCost::Sacrifice {
+                        target: TargetFilter::SelfRef,
+                        count: 1,
+                    },
+                ],
+            };
+            // CR 702.71a: "a creature card with the same mana value as this
+            // permanent." ObjectScope::Source reads the (sacrificed) source's
+            // printed mana value (zone-stable, LKI-backed) — NOT CostPaidObject.
+            let filter =
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+                    FilterProp::Cmc {
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectManaValue {
+                                scope: ObjectScope::Source,
+                            },
+                        },
+                    },
+                ]));
+            // CR 702.71a: "Then shuffle your library."
+            let shuffle_def = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Shuffle {
+                    target: TargetFilter::Controller,
+                },
+            );
+            // CR 702.71a: "put it onto the battlefield" — Library→Battlefield.
+            let mut put_on_battlefield_def = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Library),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                },
+            );
+            put_on_battlefield_def.sub_ability = Some(Box::new(shuffle_def));
+            // CR 702.71a: "Search your library ... Activate only as a sorcery."
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::SearchLibrary {
+                    filter,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    reveal: false,
+                    target_player: None,
+                    selection_constraint: SearchSelectionConstraint::None,
+                    split: None,
+                    source_zones: vec![crate::types::zones::Zone::Library],
+                },
+            )
+            .cost(composite_cost)
+            .sorcery_speed();
+            def.sub_ability = Some(Box::new(put_on_battlefield_def));
+            Some(def)
+        })
+        .collect();
+
+    face.abilities.extend(transfigure_abilities);
+}
+
 /// CR 702.53a: "a card with the same mana value as the discarded card." The
 /// discarded card is the transmute card itself, paid as the discard cost, so the
 /// filter compares a library card's mana value to the cost-paid object's mana
@@ -8326,6 +8418,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // a card with the same mana value, reveal it, put it in hand, then shuffle.
     // Activate only as a sorcery."
     synthesize_transmute(face);
+    // CR 702.71a: Transfigure — "[Cost], Sacrifice this permanent: search your
+    // library for a creature with the same mana value, put it onto the
+    // battlefield, then shuffle. Activate only as a sorcery."
+    synthesize_transfigure(face);
     synthesize_scavenge(face);
     // CR 702.128a / CR 702.129a: Embalm / Eternalize graveyard-activated
     // token-copy abilities (self-contained building block in its own module).
@@ -9036,15 +9132,25 @@ pub(crate) fn strip_level_gated_keywords(face: &mut CardFace) {
                     )
             )
         })
-        .flat_map(|stat| {
-            stat.modifications.iter().filter_map(|m| match m {
-                ContinuousModification::AddKeyword { keyword } => Some(keyword.clone()),
-                _ => None,
-            })
-        })
+        .flat_map(keyword_granted_by_level_gated_static)
         .collect();
 
     face.keywords.retain(|kw| !gated.contains(kw));
+}
+
+fn keyword_granted_by_level_gated_static(stat: &StaticDefinition) -> Vec<Keyword> {
+    let mut gated = stat
+        .modifications
+        .iter()
+        .filter_map(|m| match m {
+            ContinuousModification::AddKeyword { keyword } => Some(keyword.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if let Some(kw) = stat.mode.as_keyword() {
+        gated.push(kw);
+    }
+    gated
 }
 
 /// Build a `CardFace` from MTGJSON data, running the Oracle text parser and all synthesis.
@@ -9827,6 +9933,121 @@ mod transmute_synthesis_tests {
     fn synthesize_transmute_is_noop_without_keyword() {
         let mut face = CardFace::default();
         synthesize_transmute(&mut face);
+        assert!(face.abilities.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod transfigure_synthesis_tests {
+    use super::*;
+    use crate::types::ability::ActivationRestriction;
+
+    fn transfigure_face() -> CardFace {
+        CardFace {
+            keywords: vec![Keyword::Transfigure(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            })],
+            ..CardFace::default()
+        }
+    }
+
+    /// CR 702.71a: `synthesize_transfigure` installs one battlefield, sorcery-speed
+    /// activated ability whose cost is "{cost}, Sacrifice this permanent", whose
+    /// effect searches the library for a same-mana-value creature, and whose
+    /// sub-ability chain puts the found card onto the battlefield then shuffles.
+    #[test]
+    fn synthesize_transfigure_builds_same_mana_value_creature_tutor() {
+        let mut face = transfigure_face();
+        synthesize_transfigure(&mut face);
+
+        assert_eq!(
+            face.abilities.len(),
+            1,
+            "one transfigure ability per keyword"
+        );
+        let ability = face.abilities.first().expect("transfigure ability");
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        // CR 702.71a: functions on the battlefield (default activation_zone), unlike
+        // Transmute's Some(Hand).
+        assert_eq!(ability.activation_zone, None);
+        // CR 702.71a: "Activate only as a sorcery."
+        assert!(ability.sorcery_speed);
+        assert!(ability
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+
+        // Cost: Composite[Mana, Sacrifice this permanent (SelfRef, count 1)].
+        match &ability.cost {
+            Some(AbilityCost::Composite { costs }) => {
+                assert!(costs.iter().any(|c| matches!(c, AbilityCost::Mana { .. })));
+                assert!(costs.iter().any(|c| matches!(
+                    c,
+                    AbilityCost::Sacrifice {
+                        target: TargetFilter::SelfRef,
+                        count: 1,
+                    }
+                )));
+            }
+            other => panic!("expected Composite cost, got {other:?}"),
+        }
+
+        // Effect: SearchLibrary with a same-mana-value-as-source creature filter.
+        let Effect::SearchLibrary { filter, reveal, .. } = &*ability.effect else {
+            panic!("expected SearchLibrary, got {:?}", ability.effect);
+        };
+        assert!(!*reveal, "CR 702.71a: no reveal in transfigure");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "CR 702.71a: filter restricted to creature cards, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            // CR 702.71a: same mana value as THIS PERMANENT — Source,
+                            // never CostPaidObject (Sacrifice stamps no cost_paid_object).
+                            scope: ObjectScope::Source
+                        }
+                    }
+                }
+            )),
+            "filter must match a creature with the same mana value as the source, got {:?}",
+            tf.properties
+        );
+
+        // Sub-ability chain: put found card to battlefield (Library→Battlefield),
+        // then shuffle.
+        let put_on_battlefield = ability
+            .sub_ability
+            .as_ref()
+            .expect("put-on-battlefield sub-ability");
+        assert!(matches!(
+            &*put_on_battlefield.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                ..
+            }
+        ));
+        let shuffle = put_on_battlefield
+            .sub_ability
+            .as_ref()
+            .expect("shuffle sub-ability");
+        assert!(matches!(&*shuffle.effect, Effect::Shuffle { .. }));
+    }
+
+    #[test]
+    fn synthesize_transfigure_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_transfigure(&mut face);
         assert!(face.abilities.is_empty());
     }
 }
@@ -14802,22 +15023,11 @@ mod cumulative_upkeep_synthesis_tests {
     /// silent-no-op state until per-shape support lands.
     #[test]
     fn cumulative_upkeep_synthesizer_skips_unsupported_base_shapes() {
-        // Discard base — no current cumulative-upkeep card resolves through
-        // `AbilityCost::Discard` because the unless-payment pipeline can't pay
-        // it. Synthesizer must refuse to install.
-        let discard_kw = Keyword::CumulativeUpkeep(AbilityCost::Discard {
-            count: QuantityExpr::Fixed { value: 1 },
-            filter: None,
-            random: false,
-            self_ref: false,
-        });
-        assert_eq!(
-            KeywordTriggerInstaller::triggers_for(&discard_kw).len(),
-            0,
-            "Discard base must not install a cumulative-upkeep trigger"
-        );
-
-        // Exile base — same reasoning as Discard.
+        // Exile base — no current cumulative-upkeep card resolves through
+        // `AbilityCost::Exile` because the unless-payment pipeline can't pay
+        // it. Synthesizer must refuse to install. (Discard became supported
+        // once the per-counter discard payment chain landed — CR 702.24a — so
+        // Exile is now the canonical still-unsupported non-mana base shape.)
         let exile_kw = Keyword::CumulativeUpkeep(AbilityCost::Exile {
             count: 1,
             zone: None,
@@ -14830,17 +15040,16 @@ mod cumulative_upkeep_synthesis_tests {
         );
 
         // Composite of mixed shapes — Composite-of-Mana is supported, but
-        // Composite containing Discard/Exile is not.
+        // Composite containing an unsupported shape (Exile) is not.
         let mixed_composite_kw = Keyword::CumulativeUpkeep(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Mana {
                     cost: ManaCost::generic(1),
                 },
-                AbilityCost::Discard {
-                    count: QuantityExpr::Fixed { value: 1 },
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: None,
                     filter: None,
-                    random: false,
-                    self_ref: false,
                 },
             ],
         });
@@ -14854,16 +15063,15 @@ mod cumulative_upkeep_synthesis_tests {
         // PayCumulativeUpkeep trigger after synthesis runs.
         let mut face = CardFace::default();
         face.keywords
-            .push(Keyword::CumulativeUpkeep(AbilityCost::Discard {
-                count: QuantityExpr::Fixed { value: 1 },
+            .push(Keyword::CumulativeUpkeep(AbilityCost::Exile {
+                count: 1,
+                zone: None,
                 filter: None,
-                random: false,
-                self_ref: false,
             }));
         synthesize_cumulative_upkeep(&mut face);
         assert!(
             face.triggers.is_empty(),
-            "synthesize_cumulative_upkeep on a Discard base must install no triggers"
+            "synthesize_cumulative_upkeep on an Exile base must install no triggers"
         );
     }
 
@@ -14899,6 +15107,21 @@ mod cumulative_upkeep_synthesis_tests {
             KeywordTriggerInstaller::triggers_for(&sacrifice_kw).len(),
             1,
             "Sacrifice base must install exactly one cumulative-upkeep trigger"
+        );
+
+        // CR 702.24a: Discard base — Vexing Sphinx-shape. Supported once the
+        // per-counter discard payment chain (scaled_by + remaining re-prompt)
+        // landed; must install exactly one trigger.
+        let discard_kw = Keyword::CumulativeUpkeep(AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            random: false,
+            self_ref: false,
+        });
+        assert_eq!(
+            KeywordTriggerInstaller::triggers_for(&discard_kw).len(),
+            1,
+            "Discard base must install exactly one cumulative-upkeep trigger"
         );
 
         // OneOf-of-Mana — Jötun Owl Keeper-shape disjunction of mana costs.
@@ -16711,6 +16934,32 @@ mod sorcery_speed_invariant_tests {
 
         // Both gated keywords stripped; the LevelUp keyword survives.
         assert_eq!(face.keywords, vec![level_up]);
+    }
+
+    /// CR 711.4: Level-block standalone keyword static modes (Hada Spy Patrol's
+    /// "Shroud" line) must strip the matching base keyword.
+    #[test]
+    fn strip_level_gated_keywords_strips_static_mode_keyword_grants() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Shroud],
+            static_abilities: vec![StaticDefinition::new(StaticMode::Shroud)
+                .affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                ))
+                .condition(StaticCondition::HasCounters {
+                    counters: CounterMatch::OfType(CounterType::Generic("level".to_string())),
+                    minimum: 3,
+                    maximum: None,
+                })],
+            ..Default::default()
+        };
+
+        strip_level_gated_keywords(&mut face);
+
+        assert!(
+            face.keywords.is_empty(),
+            "Shroud must strip from base keywords"
+        );
     }
 
     /// Negative case: a `HasCounters` static on a NON-"level" generic counter

@@ -260,6 +260,13 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
         crate::game::layers::mark_layers_full(state);
         super::layers::prune_host_left_effects(state, object_id);
         super::layers::prune_affected_object_left_effects(state, object_id);
+        // CR 613.1 + CR 400.7: Copy effects are pruned above, but layer-derived
+        // characteristics (name, types, abilities) persist on the object until
+        // explicitly reset. Revert to printed baseline so graveyard/exile objects
+        // do not retain copied identity (Vesuva legend-rule sacrifice).
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.revert_layered_characteristics_to_base();
+        }
         for tapped in state.lands_tapped_for_mana.values_mut() {
             tapped.retain(|&id| id != object_id);
         }
