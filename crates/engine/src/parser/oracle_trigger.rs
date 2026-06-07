@@ -6445,6 +6445,13 @@ fn try_parse_event(
         )))
         .parse(input)
     }
+    fn parse_becomes_blocked_by_filter(input: &str) -> Option<TargetFilter> {
+        let (type_phrase, _) = alt((tag::<_, _, OracleError<'_>>(" by a "), tag(" by an ")))
+            .parse(input)
+            .ok()?;
+        let (filter, rest) = parse_type_phrase(type_phrase);
+        rest.trim().is_empty().then_some(filter)
+    }
     if let Ok((remaining, event)) = parse_simple_event.parse(rest) {
         let mut def = make_base();
         match event {
@@ -6460,17 +6467,7 @@ fn try_parse_event(
                 // further qualifier) were indistinguishable from the bare form.
                 // Only the singular-article form qualifies — a threshold like
                 // "by two or more creatures" stays the bare once-per-combat form.
-                let is_by_a_type = alt((tag::<_, _, OracleError<'_>>(" by a "), tag(" by an ")))
-                    .parse(remaining)
-                    .is_ok();
-                if is_by_a_type {
-                    if let Ok((after_by, ())) =
-                        value((), tag::<_, _, OracleError<'_>>(" by ")).parse(remaining)
-                    {
-                        let (blocker_filter, _) = parse_type_phrase(after_by);
-                        def.valid_target = Some(blocker_filter);
-                    }
-                }
+                def.valid_target = parse_becomes_blocked_by_filter(remaining);
             }
             SimpleEvent::BecomesTargetSpellOrAbility => {
                 def.mode = TriggerMode::BecomesTarget;
@@ -11193,6 +11190,7 @@ mod tests {
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::game_state::WaitingFor;
+    use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaCost, ManaType, ManaUnit};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::CastFrequency;
@@ -15116,6 +15114,44 @@ mod tests {
             }
             other => panic!("expected a creature blocker filter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn trigger_becomes_blocked_by_a_qualified_creature_preserves_blocker_filter() {
+        let def = parse_trigger_line(
+            "Whenever Quagmire Lamprey becomes blocked by a creature without flying, that creature gets a -1/-1 counter.",
+            "Quagmire Lamprey",
+        );
+
+        assert_eq!(def.mode, TriggerMode::BecomesBlocked);
+        match def.valid_target {
+            Some(TargetFilter::Typed(ref tf)) => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                assert!(
+                    tf.properties
+                        .iter()
+                        .any(|p| matches!(p, FilterProp::WithoutKeyword { value } if *value == Keyword::Flying)),
+                    "expected WithoutKeyword(Flying) in {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected a qualified creature blocker filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_becomes_blocked_by_two_or_more_creatures_stays_bare() {
+        let def = parse_trigger_line(
+            "Whenever Vicious Battlerager becomes blocked by two or more creatures, draw a card.",
+            "Vicious Battlerager",
+        );
+
+        assert_eq!(def.mode, TriggerMode::BecomesBlocked);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(
+            def.valid_target.is_none(),
+            "threshold wording must not be treated as a per-blocker qualifier"
+        );
     }
 
     #[test]

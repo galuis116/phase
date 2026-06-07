@@ -137,6 +137,59 @@ fn bushido_becomes_blocked_fires_once_when_double_blocked() {
     assert_eq!(state.objects[&attacker_id].toughness, Some(4));
 }
 
+/// CR 509.3d: "Whenever this creature becomes blocked by a creature" triggers
+/// once for each creature that blocks it.
+#[test]
+fn becomes_blocked_by_creature_fires_for_each_blocker() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker_id = scenario
+        .add_creature(P0, "Acolyte of the Inferno", 2, 2)
+        .from_oracle_text(
+            "Whenever Acolyte of the Inferno becomes blocked by a creature, \
+             Acolyte of the Inferno deals 2 damage to that creature.",
+        )
+        .id();
+    let blocker_a = scenario.add_creature(P1, "Bear A", 3, 3).id();
+    let blocker_b = scenario.add_creature(P1, "Bear B", 3, 3).id();
+    let mut runner = scenario.build();
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(attacker_id, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("trigger source should be able to attack");
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker_a, attacker_id), (blocker_b, attacker_id)],
+        })
+        .expect("both blockers should be able to block the trigger source");
+
+    match &runner.state().waiting_for {
+        WaitingFor::OrderTriggers { player, triggers } => {
+            assert_eq!(*player, P0);
+            assert_eq!(
+                triggers.len(),
+                2,
+                "CR 509.3d: by-a-creature trigger fires once for each blocker"
+            );
+        }
+        other => panic!("expected CR 603.3b OrderTriggers for two blocker triggers, got {other:?}"),
+    }
+
+    runner
+        .act(GameAction::OrderTriggers { order: vec![0, 1] })
+        .expect("submitting trigger order should succeed");
+    runner.advance_until_stack_empty();
+
+    let state = runner.state();
+    assert_eq!(state.objects[&blocker_a].damage_marked, 2);
+    assert_eq!(state.objects[&blocker_b].damage_marked, 2);
+}
+
 #[test]
 fn decayed_attacker_sacrifices_at_end_of_combat() {
     let mut scenario = GameScenario::new();
