@@ -4,7 +4,6 @@ use crate::types::ability::{
     EffectKind, FilterProp, PreventionAmount, PreventionScope, ReplacementDefinition,
     ResolvedAbility, TargetFilter, TargetRef,
 };
-use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -301,6 +300,7 @@ mod tests {
     use crate::types::ability::{
         PreventionAmount, PtValue, QuantityExpr, QuantityRef, ShieldKind, TypedFilter,
     };
+    use crate::types::card_type::CoreType;
     use crate::types::game_state::ChosenDamageSource;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
