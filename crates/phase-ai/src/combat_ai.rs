@@ -1389,7 +1389,15 @@ fn block_is_futile(
 
     let chump_count = chumpable_powers.len().min(blocker_toughnesses.len());
     let chump_absorption: i32 = chumpable_powers.iter().take(chump_count).sum();
-    let remaining_blocker_toughness: i32 = blocker_toughnesses.iter().skip(chump_count).sum();
+    // CR 510.1c: Chumping a non-trample attacker absorbs its full power regardless
+    // of the blocker's toughness, so chump with the SMALLEST blockers and reserve
+    // the LARGEST-toughness ones to soak trample. `blocker_toughnesses` is sorted
+    // descending, so the trample blockers are the leading `len - chump_count`
+    // entries. (Skipping them — using the smallest for trample — under-counted
+    // absorption and wrongly reported survivable boards as futile.)
+    let trample_blocker_count = blocker_toughnesses.len() - chump_count;
+    let remaining_blocker_toughness: i32 =
+        blocker_toughnesses.iter().take(trample_blocker_count).sum();
     let trample_absorption = trample_power.min(remaining_blocker_toughness);
 
     let max_absorption = chump_absorption + trample_absorption;
@@ -2995,6 +3003,34 @@ mod tests {
         assert!(
             !blockers.is_empty(),
             "5/5 wall must block 3/3 bear; got empty assignment"
+        );
+    }
+
+    /// CR 509.1 + CR 510.1c: `block_is_futile` must reserve the LARGEST-toughness
+    /// blockers to soak tramplers and chump with the smallest, since chumping a
+    /// non-trample attacker absorbs its full power regardless of the blocker's
+    /// toughness. A survivable assignment here (chump the 1/1 with the 1/1, block
+    /// the 5/5 trampler with the 10-toughness wall → 0 trample-through) must NOT
+    /// be reported as futile. The bug reserved the SMALLEST blockers for trample,
+    /// under-counting absorption and conceding survivable boards to lethal.
+    #[test]
+    fn block_is_futile_reserves_largest_blockers_for_trample() {
+        let mut state = setup();
+        state.players[1].life = 2;
+        let wall = add_creature(&mut state, PlayerId(1), "Wall", 0, 10, vec![]);
+        let small = add_creature(&mut state, PlayerId(1), "Small", 1, 1, vec![]);
+        let trampler = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Trampler",
+            5,
+            5,
+            vec![Keyword::Trample],
+        );
+        let bear = add_creature(&mut state, PlayerId(0), "Bear", 1, 1, vec![]);
+        assert!(
+            !block_is_futile(&state, PlayerId(1), &[trampler, bear], &[wall, small]),
+            "Wall absorbs the trampler and Small chumps the Bear (residual 0 < life 2); not futile"
         );
     }
 
