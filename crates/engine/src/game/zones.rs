@@ -317,6 +317,19 @@ pub fn move_to_zone(
     mut to: Zone,
     events: &mut Vec<GameEvent>,
 ) {
+    // CR 111.8: A token that has left the battlefield can't move to another zone
+    // or come back onto the battlefield — "if such a token would change zones, it
+    // remains in its current zone instead." It ceases to exist at the next SBA
+    // (CR 111.7, enforced in sba.rs). Without this guard a single-resolution
+    // flicker ("exile target permanent, then return it") on a token would return
+    // it before the cease-to-exist SBA runs. The Stack carve-out matches the
+    // CR 111.7 SBA so a copy of a spell still resolves off the stack normally.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.is_token && obj.zone != Zone::Battlefield && obj.zone != Zone::Stack {
+            return;
+        }
+    }
+
     // CR 903.9a: A fresh zone change resets the "declined zone return" flag
     // so the owner gets a new choice opportunity if the commander moves again.
     state.commander_declined_zone_return.remove(&object_id);
@@ -948,6 +961,44 @@ mod tests {
             Zone::Battlefield,
         );
         assert!(state.battlefield.contains(&id));
+    }
+
+    /// CR 111.8: A token that has left the battlefield can't move to another zone
+    /// or come back onto the battlefield; it remains in its current zone and
+    /// ceases to exist at the next SBA (CR 111.7). A single-resolution flicker
+    /// ("exile target permanent, then return it") on a token therefore must NOT
+    /// bring it back — modeled here as the two zone changes such an effect makes,
+    /// battlefield -> exile then exile -> battlefield, with no SBA in between.
+    #[test]
+    fn token_that_left_battlefield_cannot_return() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Cat".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().is_token = true;
+
+        let mut events = Vec::new();
+        // Flicker step 1: the token leaves the battlefield (exiled).
+        move_to_zone(&mut state, id, Zone::Exile, &mut events);
+        assert_eq!(state.objects[&id].zone, Zone::Exile);
+
+        // Flicker step 2 (same resolution, no SBA between): attempt to return it.
+        move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+
+        // CR 111.8: it stays in exile; it must not re-enter the battlefield.
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Exile,
+            "CR 111.8: a token that left the battlefield can't return"
+        );
+        assert!(
+            !state.battlefield.contains(&id),
+            "returned token must not be on the battlefield"
+        );
     }
 
     #[test]
