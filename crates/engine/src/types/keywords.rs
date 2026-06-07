@@ -236,6 +236,8 @@ pub enum KeywordKind {
     Recover,
     /// CR 702.102: Fuse — see `Keyword::Fuse`.
     Fuse,
+    /// CR 702.22: Bands with other [quality] — see `Keyword::BandsWithOther`.
+    BandsWithOther,
     Unknown,
 }
 
@@ -671,6 +673,10 @@ pub enum Keyword {
 
     // Simple keywords (no params)
     Banding,
+    /// CR 702.22: "Bands with other [quality]". The payload is the normalized
+    /// quality text, currently used for subtype qualities such as "Wolf" and
+    /// the historical "Legend" / "Legends" shape.
+    BandsWithOther(String),
     Epic,
     Fuse,
     Gravestorm,
@@ -1006,6 +1012,7 @@ impl Keyword {
             Keyword::Frenzy(_) => KeywordKind::Frenzy,
             Keyword::Tribute(_) => KeywordKind::Tribute,
             Keyword::Soulbond => KeywordKind::Soulbond,
+            Keyword::BandsWithOther(_) => KeywordKind::BandsWithOther,
             Keyword::Unearth(_) => KeywordKind::Unearth,
             Keyword::Convoke => KeywordKind::Convoke,
             Keyword::Waterbend => KeywordKind::Waterbend,
@@ -2017,6 +2024,18 @@ impl FromStr for Keyword {
             "friendsforever" => Ok(Keyword::Partner(PartnerType::FriendsForever)),
             "characterselect" => Ok(Keyword::Partner(PartnerType::CharacterSelect)),
             "banding" => Ok(Keyword::Banding),
+            s if s.starts_with("bandswithother:") => {
+                let quality = &s["bandswithother:".len()..];
+                Ok(Keyword::BandsWithOther(normalize_bands_with_other_quality(
+                    quality,
+                )))
+            }
+            s if s.starts_with("bandswithother") && s.len() > "bandswithother".len() => {
+                let quality = &s["bandswithother".len()..];
+                Ok(Keyword::BandsWithOther(normalize_bands_with_other_quality(
+                    quality,
+                )))
+            }
             "epic" => Ok(Keyword::Epic),
             "fuse" => Ok(Keyword::Fuse),
             "gravestorm" => Ok(Keyword::Gravestorm),
@@ -2097,6 +2116,44 @@ impl FromStr for Keyword {
             _ => Ok(Keyword::Unknown(s.to_string())),
         }
     }
+}
+
+pub fn normalize_bands_with_other_quality(raw: &str) -> String {
+    let trimmed = raw
+        .trim()
+        .trim_matches('.')
+        .trim_start_matches("other ")
+        .trim();
+    let words: Vec<String> = trimmed
+        .split_whitespace()
+        .map(|word| {
+            word.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_string()
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
+    let joined = words.join(" ");
+    let singular = match joined.to_ascii_lowercase().as_str() {
+        "legends" | "legendary creatures" | "legendary creature" => "Legend".to_string(),
+        "wolves" => "Wolf".to_string(),
+        "walls" => "Wall".to_string(),
+        other if other.ends_with("ies") && other.len() > 3 => {
+            format!("{}y", &joined[..joined.len() - 3])
+        }
+        other if other.ends_with('s') && other.len() > 1 => joined[..joined.len() - 1].to_string(),
+        _ => joined,
+    };
+    singular
+        .split_whitespace()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// CR 702.11d: Parse the quality after "hexproof from " into a HexproofFilter.
@@ -2293,6 +2350,11 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "StartYourEngines" => Ok(Keyword::StartYourEngines),
         "Soulbond" => Ok(Keyword::Soulbond),
         "Banding" => Ok(Keyword::Banding),
+        "BandsWithOther" => Ok(Keyword::BandsWithOther(
+            data.as_str()
+                .map(normalize_bands_with_other_quality)
+                .unwrap_or_default(),
+        )),
         "Epic" => Ok(Keyword::Epic),
         "Fuse" => Ok(Keyword::Fuse),
         "Gravestorm" => Ok(Keyword::Gravestorm),

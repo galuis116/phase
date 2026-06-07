@@ -19,7 +19,8 @@ use crate::types::ability::{
     TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{
-    BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost, Keyword, WardCost,
+    normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost,
+    Keyword, WardCost,
 };
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::zones::Zone;
@@ -384,6 +385,9 @@ fn parse_mtgjson_missing_standalone_keyword_line(line: &str) -> Option<Vec<Keywo
         // standalone keyword line MTGJSON does not surface in its `keywords` array,
         // so it must be recovered from the Oracle line here.
         Keyword::TotemArmor => Some(vec![keyword]),
+        // CR 702.22: "Bands with other [quality]" carries the quality in Oracle
+        // text; MTGJSON's keyword list has no typed payload to preserve it.
+        Keyword::BandsWithOther(_) => Some(vec![keyword]),
         _ => None,
     }
 }
@@ -1301,6 +1305,13 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         return Some(Keyword::TotemArmor);
     }
 
+    if let Ok((quality, _)) = tag::<_, _, OracleError<'_>>("bands with other ").parse(text) {
+        let normalized = normalize_bands_with_other_quality(quality);
+        if !normalized.is_empty() {
+            return Some(Keyword::BandsWithOther(normalized));
+        }
+    }
+
     // For parameterized keywords, find the first space to split name from parameter.
     // Oracle format: "protection from multicolored" → name="protection", rest="from multicolored"
     // Oracle format: "ward {2}" → name="ward", rest="{2}"
@@ -1390,6 +1401,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::StartYourEngines => "start your engines!".to_string(),
         Keyword::Soulbond => "soulbond".to_string(),
         Keyword::Banding => "banding".to_string(),
+        Keyword::BandsWithOther(quality) => format!("bands with other {}", quality.to_lowercase()),
         // CR 702.24a: Cumulative upkeep's display includes its base cost so
         // tooltips and AI hint text show the actual payment ("cumulative upkeep
         // — {1}", "cumulative upkeep — Pay 2 life", etc.) instead of a bare
@@ -1969,6 +1981,25 @@ mod tests {
             "ripple 2 — N is captured"
         );
         assert_eq!(parse_keyword_from_oracle("ripple 4 extra"), None);
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_bands_with_other_quality() {
+        assert_eq!(
+            parse_keyword_from_oracle("bands with other wolves"),
+            Some(Keyword::BandsWithOther("Wolf".to_string()))
+        );
+        assert_eq!(
+            parse_keyword_from_oracle("bands with other legends"),
+            Some(Keyword::BandsWithOther("Legend".to_string()))
+        );
+    }
+
+    #[test]
+    fn extract_keyword_line_bands_with_other_quality() {
+        let result = extract_keyword_line("Bands with other Wolves", &[])
+            .expect("bands with other should parse from Oracle keyword line");
+        assert_eq!(result, vec![Keyword::BandsWithOther("Wolf".to_string())]);
     }
 
     /// CR 702.48a: Offering — the Oracle line "<Subtype> offering (...)" carries
