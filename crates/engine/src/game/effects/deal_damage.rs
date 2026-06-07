@@ -1376,6 +1376,13 @@ mod tests {
             "Bear".to_string(),
             Zone::Battlefield,
         );
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
         let ability = make_ability(3, vec![TargetRef::Object(obj_id)]);
         let mut events = Vec::new();
 
@@ -2174,6 +2181,13 @@ mod tests {
             "Bear".to_string(),
             Zone::Battlefield,
         );
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
         let ability = make_ability_with_source(3, vec![TargetRef::Object(target_id)], source_id);
         let mut events = Vec::new();
 
@@ -2234,6 +2248,13 @@ mod tests {
             "Bear".to_string(),
             Zone::Battlefield,
         );
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
         let ability = make_ability_with_source(1, vec![TargetRef::Object(target_id)], source_id);
         let mut events = Vec::new();
 
