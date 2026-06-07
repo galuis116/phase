@@ -1216,8 +1216,10 @@ mod tests {
             "Grizzly Bears".to_string(),
             Zone::Battlefield,
         );
-        state.objects.get_mut(&target_id).unwrap().toughness = Some(2);
-        state.objects.get_mut(&target_id).unwrap().power = Some(2);
+        let target = state.objects.get_mut(&target_id).unwrap();
+        target.card_types.core_types.push(CoreType::Creature);
+        target.toughness = Some(2);
+        target.power = Some(2);
 
         // Player 0 starts with 3 energy (after a prior GainEnergy step in the chain).
         state.players[0].energy = 3;
