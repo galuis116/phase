@@ -4100,6 +4100,13 @@ fn apply_battlefield_cost_modifiers_inner(
     // function from the command zone for non-emblem objects; the per-static
     // `active_zones` filter below still enforces the static's declared zones
     // when the source is on the battlefield.
+    //
+    // CR 601.2f: the {0} floor is a property of the aggregate total
+    // (base + all increases - all reductions), applied once. Collect every
+    // matching modifier first, then apply ALL increases before ANY reductions, so
+    // a reduction's `saturating_sub` floor can never clamp generic to 0 ahead of a
+    // later increase (which would overcharge the spell, order-dependently).
+    let mut collected: Vec<(bool, ManaCost, u32)> = Vec::new();
     for (src_obj, def) in super::functioning_abilities::game_functioning_statics(state) {
         let bf_id = src_obj.id;
         let source_controller = src_obj.controller;
@@ -4195,9 +4202,20 @@ fn apply_battlefield_cost_modifiers_inner(
                 1
             };
 
-            // Apply the cost modification.
-            apply_cost_mod_to_mana(mana_cost, &base_amount, multiplier, is_raise);
+            // CR 601.2f: defer application so increases land before reductions.
+            collected.push((is_raise, base_amount, multiplier));
         }
+    }
+
+    // CR 601.2f: apply all cost increases first, then all reductions, so the
+    // single {0} floor (the `saturating_sub` in `apply_cost_mod_to_mana`) acts on
+    // base + increases. Reductions among themselves commute (each floors at 0), so
+    // their relative order is irrelevant.
+    for (_, base_amount, multiplier) in collected.iter().filter(|(is_raise, _, _)| *is_raise) {
+        apply_cost_mod_to_mana(mana_cost, base_amount, *multiplier, true);
+    }
+    for (_, base_amount, multiplier) in collected.iter().filter(|(is_raise, _, _)| !*is_raise) {
+        apply_cost_mod_to_mana(mana_cost, base_amount, *multiplier, false);
     }
 }
 
@@ -27345,6 +27363,93 @@ mod tests {
                 generic: 0,
                 shards: vec![],
             }
+        );
+    }
+
+    /// CR 601.2f: "The total cost is the mana cost ... plus all ... cost
+    /// increases, and minus all cost reductions. ... If the mana component of the
+    /// total cost is reduced to nothing by cost reduction effects, it is considered
+    /// to be {0}. It can't be reduced to less than {0}." The {0} floor applies once
+    /// to the aggregate — not per individual reduction interleaved with increases.
+    /// A {1} spell under a battlefield +{1} increase and a -{2} reduction must cost
+    /// {0} regardless of the order the statics are scanned. Scanning the reducer
+    /// first floored generic to 0, then the later increase added {1} back → {1}.
+    #[test]
+    fn battlefield_cost_increase_applies_before_reduction_floor() {
+        use crate::types::ability::{ControllerRef, StaticDefinition, TypedFilter};
+        use crate::types::statics::{CostModifyMode, StaticMode};
+
+        let mut state = GameState::new_two_player(42);
+
+        // The spell being cast: printed {1}, controlled by P0.
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Spell".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::generic(1);
+
+        let you_spells = || TargetFilter::Typed(TypedFilter::card().controller(ControllerRef::You));
+
+        // Reducer created FIRST → scanned first in battlefield order: spells you
+        // cast cost {2} less.
+        let reducer = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Medallion".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&reducer)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::generic(2),
+                    spell_filter: None,
+                    dynamic_count: None,
+                })
+                .affected(you_spells()),
+            );
+
+        // Raiser created SECOND: spells you cast cost {1} more.
+        let raiser = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Sphere".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&raiser)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Raise,
+                    amount: ManaCost::generic(1),
+                    spell_filter: None,
+                    dynamic_count: None,
+                })
+                .affected(you_spells()),
+            );
+
+        let cost = apply_cost_modifiers_to_base(&state, PlayerId(0), spell, ManaCost::generic(1))
+            .expect("cost computed");
+        // 1 + 1 (increase) - 2 (reduction) = 0, floored once.
+        assert_eq!(
+            cost,
+            ManaCost::Cost {
+                generic: 0,
+                shards: vec![],
+            },
+            "CR 601.2f: the {{0}} floor applies to the aggregate, not per reduction"
         );
     }
 
