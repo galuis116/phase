@@ -6451,6 +6451,26 @@ fn try_parse_event(
             SimpleEvent::BecomesBlocked => {
                 def.mode = TriggerMode::BecomesBlocked;
                 def.valid_card = Some(subject.clone());
+                // CR 509.3c vs 509.3d: a bare "becomes blocked" triggers once per
+                // combat, while "becomes blocked by a <type>" triggers once for
+                // each matching blocker. Capture the "by a/an <type phrase>"
+                // qualifier as the blocker filter so the runtime matcher can tell
+                // the two apart (a present `valid_target` => per-blocker). Without
+                // this, plain "becomes blocked by a creature" cards (which carry no
+                // further qualifier) were indistinguishable from the bare form.
+                // Only the singular-article form qualifies — a threshold like
+                // "by two or more creatures" stays the bare once-per-combat form.
+                let is_by_a_type = alt((tag::<_, _, OracleError<'_>>(" by a "), tag(" by an ")))
+                    .parse(remaining)
+                    .is_ok();
+                if is_by_a_type {
+                    if let Ok((after_by, ())) =
+                        value((), tag::<_, _, OracleError<'_>>(" by ")).parse(remaining)
+                    {
+                        let (blocker_filter, _) = parse_type_phrase(after_by);
+                        def.valid_target = Some(blocker_filter);
+                    }
+                }
             }
             SimpleEvent::BecomesTargetSpellOrAbility => {
                 def.mode = TriggerMode::BecomesTarget;
@@ -15071,6 +15091,31 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::BecomesBlocked);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        // CR 509.3c: bare "becomes blocked" has no blocker qualifier, so
+        // `valid_target` stays None — the runtime reads this as once-per-combat.
+        assert!(def.valid_target.is_none());
+    }
+
+    /// CR 509.3d: "becomes blocked by a creature" carries a blocker qualifier and
+    /// triggers once per matching blocker. The parser must populate `valid_target`
+    /// with the (creature) blocker filter so the runtime matcher distinguishes it
+    /// from the bare CR 509.3c form (which fires once per combat). Regression guard
+    /// for the ~29 plain "by a creature" cards (Quagmire Lamprey, Order of the
+    /// Alabaster Host, Cave Tiger, …) that would otherwise collapse to once-per-combat.
+    #[test]
+    fn trigger_becomes_blocked_by_a_creature_sets_blocker_filter() {
+        let def = parse_trigger_line(
+            "Whenever Quagmire Lamprey becomes blocked by a creature, that creature gets a -1/-1 counter.",
+            "Quagmire Lamprey",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesBlocked);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        match def.valid_target {
+            Some(TargetFilter::Typed(ref tf)) => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            }
+            other => panic!("expected a creature blocker filter, got {other:?}"),
+        }
     }
 
     #[test]
