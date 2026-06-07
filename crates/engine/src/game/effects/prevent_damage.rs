@@ -4,6 +4,7 @@ use crate::types::ability::{
     EffectKind, FilterProp, PreventionAmount, PreventionScope, ReplacementDefinition,
     ResolvedAbility, TargetFilter, TargetRef,
 };
+use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -710,6 +711,13 @@ mod tests {
             "Creature".to_string(),
             Zone::Battlefield,
         );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
 
         let ability = ResolvedAbility::new(
             Effect::PreventDamage {
