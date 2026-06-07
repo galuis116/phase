@@ -11,6 +11,13 @@ use crate::types::zones::Zone;
 use super::game_object::GameObject;
 use super::printed_cards::{apply_back_face_to_object, snapshot_object_face};
 
+/// CR 111.7 / CR 111.8: A token outside the battlefield ceases to exist at
+/// the next SBA, and can't change zones before then. Stack tokens are excluded
+/// so spell copies can finish resolving before the next SBA check.
+pub(super) fn token_is_outside_battlefield_and_stack(obj: &GameObject) -> bool {
+    obj.is_token && obj.zone != Zone::Battlefield && obj.zone != Zone::Stack
+}
+
 /// CR 603.10a + CR 603.6e: Capture a snapshot of every attachment on `obj` at the
 /// moment of the zone change. The snapshot records each attachment's current
 /// controller and kind (Aura/Equipment) so that look-back triggers of the form
@@ -324,10 +331,12 @@ pub fn move_to_zone(
     // flicker ("exile target permanent, then return it") on a token would return
     // it before the cease-to-exist SBA runs. The Stack carve-out matches the
     // CR 111.7 SBA so a copy of a spell still resolves off the stack normally.
-    if let Some(obj) = state.objects.get(&object_id) {
-        if obj.is_token && obj.zone != Zone::Battlefield && obj.zone != Zone::Stack {
-            return;
-        }
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(token_is_outside_battlefield_and_stack)
+    {
+        return;
     }
 
     // CR 903.9a: A fresh zone change resets the "declined zone return" flag
@@ -692,6 +701,15 @@ pub fn move_to_library_at_index(
     index: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) {
+    // CR 111.8: A token that has left the battlefield can't move to another zone.
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(token_is_outside_battlefield_and_stack)
+    {
+        return;
+    }
+
     // CR 903.9a: A fresh zone change resets the "declined zone return" flag.
     state.commander_declined_zone_return.remove(&object_id);
 
@@ -998,6 +1016,35 @@ mod tests {
         assert!(
             !state.battlefield.contains(&id),
             "returned token must not be on the battlefield"
+        );
+    }
+
+    /// CR 111.8: A token that has left the battlefield can't move into a
+    /// library before the next SBA removes it.
+    #[test]
+    fn token_that_left_battlefield_cannot_move_to_library_position() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Cat".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().is_token = true;
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Exile, &mut events);
+        move_to_library_position(&mut state, id, true, &mut events);
+
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Exile,
+            "CR 111.8: a token that left the battlefield can't move into a library"
+        );
+        assert!(
+            !state.players[0].library.contains(&id),
+            "token must not be inserted into its owner's library"
         );
     }
 
