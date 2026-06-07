@@ -329,6 +329,20 @@ pub(crate) fn apply_damage_after_replacement(
         return DamageResult::Applied(0);
     };
 
+    // CR 120.10: Excess damage to a planeswalker/battle is measured against its
+    // loyalty/defense *before* this damage was dealt. Damage application removes
+    // those counters (clamping at 0), which destroys the pre-hit value, so capture
+    // it here before mutating. (Creatures mark — not clamp — damage, so their
+    // excess is reconstructed from `damage_marked` below.)
+    let (loyalty_before, defense_before) = match t {
+        TargetRef::Object(obj_id) => state
+            .objects
+            .get(obj_id)
+            .map(|obj| (obj.loyalty, obj.defense))
+            .unwrap_or((None, None)),
+        TargetRef::Player(_) => (None, None),
+    };
+
     match t {
         TargetRef::Object(obj_id) => {
             if ctx.has_wither || ctx.has_infect {
@@ -466,15 +480,14 @@ pub(crate) fn apply_damage_after_replacement(
                         actual_amount.saturating_sub(lethal)
                     })
                 } else if obj.card_types.core_types.contains(&CoreType::Planeswalker) {
-                    // CR 120.10: Excess for planeswalkers = damage beyond pre-hit loyalty.
-                    // Loyalty was already decremented, so reconstruct pre-hit value.
-                    let pre_loyalty = obj.loyalty.unwrap_or(0) + actual_amount;
-                    Some(actual_amount.saturating_sub(pre_loyalty))
+                    // CR 120.10: Excess for a planeswalker = damage beyond the
+                    // loyalty it had before the damage was dealt (captured above,
+                    // since the loyalty counters have since been removed).
+                    Some(actual_amount.saturating_sub(loyalty_before.unwrap_or(0)))
                 } else if obj.card_types.core_types.contains(&CoreType::Battle) {
-                    // CR 120.10: Excess for battles = damage beyond pre-hit defense.
-                    // Defense was already decremented, so reconstruct pre-hit value.
-                    let pre_defense = obj.defense.unwrap_or(0) + actual_amount;
-                    Some(actual_amount.saturating_sub(pre_defense))
+                    // CR 120.10: Excess for a battle = damage beyond the defense it
+                    // had before the damage was dealt (captured above).
+                    Some(actual_amount.saturating_sub(defense_before.unwrap_or(0)))
                 } else {
                     Some(0)
                 }
@@ -2441,6 +2454,78 @@ mod tests {
             .unwrap();
         if let GameEvent::DamageDealt { excess, .. } = dmg_event {
             assert_eq!(*excess, 0);
+        } else {
+            panic!("expected DamageDealt event");
+        }
+    }
+
+    /// CR 120.10: excess damage to a planeswalker = damage beyond the loyalty it
+    /// had before the hit. 6 damage to a 3-loyalty planeswalker → 3 excess. The
+    /// loyalty counter is removed (clamped at 0) before excess is computed, so the
+    /// pre-hit loyalty must be captured beforehand; reconstructing it as
+    /// `post_loyalty + damage` yields 0 excess for any overkill.
+    #[test]
+    fn excess_damage_to_planeswalker() {
+        let mut state = GameState::new_two_player(42);
+        let pw_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Jace".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&pw_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.loyalty = Some(3);
+            obj.counters.insert(CounterType::Loyalty, 3);
+        }
+        let ability = make_ability(6, vec![TargetRef::Object(pw_id)]);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let dmg_event = events
+            .iter()
+            .find(|e| matches!(e, GameEvent::DamageDealt { .. }))
+            .unwrap();
+        if let GameEvent::DamageDealt { excess, .. } = dmg_event {
+            assert_eq!(*excess, 3, "6 damage - 3 loyalty = 3 excess");
+        } else {
+            panic!("expected DamageDealt event");
+        }
+    }
+
+    /// CR 120.10: excess damage to a battle = damage beyond its defense before the
+    /// hit. 5 damage to a 2-defense battle → 3 excess.
+    #[test]
+    fn excess_damage_to_battle() {
+        let mut state = GameState::new_two_player(42);
+        let battle_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Siege".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&battle_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Battle);
+            obj.defense = Some(2);
+            obj.base_defense = Some(2);
+            obj.counters.insert(CounterType::Defense, 2);
+        }
+        let ability = make_ability(5, vec![TargetRef::Object(battle_id)]);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let dmg_event = events
+            .iter()
+            .find(|e| matches!(e, GameEvent::DamageDealt { .. }))
+            .unwrap();
+        if let GameEvent::DamageDealt { excess, .. } = dmg_event {
+            assert_eq!(*excess, 3, "5 damage - 2 defense = 3 excess");
         } else {
             panic!("expected DamageDealt event");
         }
