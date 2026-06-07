@@ -9615,9 +9615,9 @@ mod devoid_synthesis_tests {
         assert!(devoid_cda(&face).is_none());
     }
 
-    /// Idempotent-shaped: a single Devoid keyword yields exactly one colorless CDA.
+    /// A single synthesis pass for one Devoid keyword yields one colorless CDA.
     #[test]
-    fn synthesize_devoid_cda_pushes_one_cda() {
+    fn synthesize_devoid_cda_single_pass_pushes_one_cda() {
         let mut face = CardFace {
             keywords: vec![Keyword::Devoid],
             ..CardFace::default()

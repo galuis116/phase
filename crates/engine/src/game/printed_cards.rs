@@ -68,6 +68,24 @@ pub fn printed_ref_from_face(card_face: &CardFace) -> Option<PrintedCardRef> {
         })
 }
 
+fn printed_colors_from_face(card_face: &CardFace) -> Vec<ManaColor> {
+    if let Some(colors) = &card_face.color_override {
+        return colors.clone();
+    }
+    // CR 702.114a + CR 604.3: Devoid is a characteristic-defining ability
+    // ("this object is colorless") that functions in all zones. MTGJSON normally
+    // supplies `color_override: Some([])` for devoid cards, so this branch is only
+    // a missing-data backstop; explicit color overrides remain authoritative.
+    if card_face
+        .keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Devoid))
+    {
+        return Vec::new();
+    }
+    derive_colors_from_mana_cost(&card_face.mana_cost)
+}
+
 pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     // CR 716.2b: capture the pre-call init flag so we can distinguish
     // first-time face application from re-application by
@@ -86,24 +104,7 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
         .as_ref()
         .and_then(|value| value.parse::<u32>().ok());
     let keywords = card_face.keywords.clone();
-    // CR 702.114a + CR 604.3: Devoid is a characteristic-defining ability ("this
-    // object is colorless") that functions in all zones. Off-battlefield color is
-    // read from the stored `color`/`base_color` (layers run only on the
-    // battlefield), so apply the colorless override at the base/printed level so a
-    // devoid card is colorless in hand, on the stack, in the graveyard, etc. The
-    // on-battlefield path is additionally driven by the `synthesize_devoid_cda`
-    // Layer-5 CDA, which a later "becomes [color]" effect can still override.
-    let color = if keywords
-        .iter()
-        .any(|k| matches!(k, crate::types::keywords::Keyword::Devoid))
-    {
-        Vec::new()
-    } else {
-        card_face
-            .color_override
-            .clone()
-            .unwrap_or_else(|| derive_colors_from_mana_cost(&card_face.mana_cost))
-    };
+    let color = printed_colors_from_face(card_face);
 
     obj.name = card_face.name.clone();
     obj.power = power;
@@ -208,19 +209,7 @@ pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &Ca
         .defense
         .as_ref()
         .and_then(|value| value.parse::<u32>().ok());
-    // CR 702.114a + CR 604.3: a devoid back face is colorless in all zones too.
-    let color = if card_face
-        .keywords
-        .iter()
-        .any(|k| matches!(k, crate::types::keywords::Keyword::Devoid))
-    {
-        Vec::new()
-    } else {
-        card_face
-            .color_override
-            .clone()
-            .unwrap_or_else(|| derive_colors_from_mana_cost(&card_face.mana_cost))
-    };
+    let color = printed_colors_from_face(card_face);
 
     back_face.name = card_face.name.clone();
     back_face.power = power;
@@ -1321,13 +1310,11 @@ mod tests {
         }
     }
 
-    /// CR 702.114a + CR 604.3: a card with Devoid is built colorless in every
-    /// zone, overriding the color its mana cost would otherwise give it. Off-
-    /// battlefield color is read from this stored `color`/`base_color`, so the
-    /// override must be applied at face-build time (not only via the Layer-5 CDA,
-    /// which runs on the battlefield).
+    /// CR 604.3: explicit all-zone color data is authoritative even when a face
+    /// also has Devoid. Production devoid cards normally enter through this path
+    /// with `color_override: Some([])`.
     #[test]
-    fn devoid_face_is_built_colorless() {
+    fn color_override_wins_for_devoid_face() {
         let mut face = test_face(
             "Touch of the Void",
             "touch-of-the-void-oracle-id",
@@ -1341,6 +1328,35 @@ mod tests {
         assert_eq!(
             derive_colors_from_mana_cost(&face.mana_cost),
             vec![ManaColor::Red]
+        );
+        face.color_override = Some(vec![ManaColor::Red]);
+        face.keywords.push(Keyword::Devoid);
+
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(0),
+            PlayerId(0),
+            face.name.clone(),
+            Zone::Hand,
+        );
+        apply_card_face_to_object(&mut obj, &face);
+
+        assert_eq!(obj.color, vec![ManaColor::Red]);
+        assert_eq!(obj.base_color, vec![ManaColor::Red]);
+    }
+
+    /// CR 702.114a + CR 604.3: if all-zone color data is missing, Devoid is a
+    /// backstop that builds the face colorless outside the battlefield too.
+    #[test]
+    fn devoid_face_without_color_override_falls_back_to_colorless() {
+        let mut face = test_face(
+            "Muraganda Eldrazi",
+            "muraganda-eldrazi-oracle-id",
+            vec![CoreType::Creature],
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 3,
+            },
         );
         face.keywords.push(Keyword::Devoid);
 
