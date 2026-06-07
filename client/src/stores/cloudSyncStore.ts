@@ -83,6 +83,13 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null;
  */
 let syncInFlight: Promise<void> | null = null;
 /**
+ * Latest trailing-edge sync requested by a caller that arrived while another
+ * sync was in flight. Each coalesced caller gets back a promise that resolves
+ * after its follow-up sync, not merely after the older snapshot drains.
+ */
+let nextSyncInFlight: Promise<void> | null = null;
+let nextSyncBase: Promise<void> | null = null;
+/**
  * Active realtime CDC channel for the current session. Held at module scope
  * so signIn/signOut can re-arm or tear down without going through `init()`.
  */
@@ -257,8 +264,27 @@ export const useCloudSyncStore = create<CloudSyncState>()(
 
       syncNow: async () => {
         // Coalesce concurrent callers onto the in-flight promise so the
-        // pull→push window can't be straddled by a stale snapshot.
-        if (syncInFlight) return syncInFlight;
+        // pull→push window can't be straddled by a stale snapshot. A caller that
+        // arrives mid-flight may have observed a newer remote revision than the
+        // running sync snapshotted, so chain a trailing sync and return that
+        // promise to the caller.
+        if (syncInFlight) {
+          if (nextSyncInFlight && nextSyncBase === syncInFlight) {
+            return nextSyncInFlight;
+          }
+          const base = syncInFlight;
+          const followUp = base
+            .then(() => get().syncNow())
+            .finally(() => {
+              if (nextSyncInFlight === followUp) {
+                nextSyncInFlight = null;
+                nextSyncBase = null;
+              }
+            });
+          nextSyncBase = base;
+          nextSyncInFlight = followUp;
+          return followUp;
+        }
         const provider = getCloudSyncProvider();
         const identity = provider?.identity() ?? null;
         if (!provider || !identity) return;
