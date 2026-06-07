@@ -129,6 +129,7 @@ pub mod reveal_hand;
 pub mod reveal_top;
 pub mod reveal_until;
 pub mod ring;
+pub mod ripple;
 pub mod roll_die;
 pub mod sacrifice;
 pub mod scry;
@@ -585,8 +586,10 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             track_exiled_by_source: ctx.track_exiled_by_source,
                             effect_kind,
                         });
-                    state.waiting_for =
-                        crate::game::replacement::replacement_choice_waiting_for(player, state);
+                    // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
+                    // may already have surfaced its own `EffectZoneChoice` during the
+                    // resumed member's entry.
+                    crate::game::replacement::park_waiting_for(state, player);
                     paused = true;
                     break;
                 }
@@ -619,6 +622,11 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             state,
             &mut events[events_before_drain..],
         );
+        // CR 614.13a: the resumed mass/targeted co-entry finished without pausing —
+        // the whole ChangeZone entry event is complete, so clear the pre-entry
+        // Devour snapshot. NOT cleared on the `paused` break above (a further
+        // devourer's sacrifice and the remaining members still need it).
+        let _ = state.devour_eligible_snapshot.take();
         events.push(GameEvent::EffectResolved {
             kind: effect_kind,
             source_id: ctx.source_id,
@@ -1978,6 +1986,7 @@ pub fn resolve_effect(
         // CR 702.85a: Cascade — synthesized from the keyword at trigger time;
         // resolver performs the exile-until loop and sets CascadeChoice.
         Effect::Cascade => cascade::resolve(state, ability, events),
+        Effect::Ripple { .. } => ripple::resolve(state, ability, events),
         // CR 702.94a: Miracle trigger resolution — offer the cast from hand.
         Effect::MiracleCast { ref cost } => {
             state.waiting_for = WaitingFor::CastOffer {
@@ -2216,27 +2225,19 @@ fn filter_references_tracked_set(filter: &TargetFilter) -> bool {
 }
 
 fn effect_uses_implicit_tracked_set_targets(effect: &Effect) -> bool {
-    match effect {
+    matches!(
+        effect,
         Effect::GrantCastingPermission {
             target: TargetFilter::TrackedSet { .. },
             ..
-        }
-        | Effect::CastCopyOfCard {
+        } | Effect::CastCopyOfCard {
             target: TargetFilter::TrackedSet { .. },
             ..
-        } => true,
-        // CR 406.6: Effects that enumerate the source's linked-exile set
-        // themselves (`cast_from_zone` / `put_on_top`) must NOT have the chain
-        // pre-inject the raw exiled IDs as their targets — that would bypass any
-        // composite filter on the linked set (e.g. Ripple's
-        // `And[ExiledBySource, SameName]` name match, CR 702.60a). Covers both
-        // the bare `ExiledBySource` (the prior `PutAtLibraryPosition` case) and
-        // composite `And[ExiledBySource, ...]` shapes.
-        Effect::CastFromZone { target, .. } | Effect::PutAtLibraryPosition { target, .. } => {
-            target.references_exiled_by_source()
+        } | Effect::PutAtLibraryPosition {
+            target: TargetFilter::ExiledBySource,
+            ..
         }
-        _ => false,
-    }
+    )
 }
 
 fn affected_objects_from_events(
@@ -4984,6 +4985,7 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::RevealedHasCardType {
             card_type,
             additional_filter,
+            subtype_filter,
         } => {
             let subject_id = state
                 .last_revealed_ids
@@ -4993,6 +4995,18 @@ pub(crate) fn evaluate_condition(
             let type_matches = subject_id
                 .map(|id| super::printed_cards::object_has_core_type(state, id, *card_type))
                 .unwrap_or(false);
+            // CR 205.3m: Match the revealed card's subtype against the subtype filter.
+            let subtype_matches = match subtype_filter.as_ref() {
+                None => true,
+                Some(filter) => subject_id.is_some_and(|id| {
+                    crate::game::filter::matches_target_filter(
+                        state,
+                        id,
+                        filter.as_ref(),
+                        &crate::game::filter::FilterContext::from_ability(ability),
+                    )
+                }),
+            };
             let filter_matches = match additional_filter {
                 // CR 205.3m: "of the chosen type" — check the revealed card's subtype
                 // against the source permanent's chosen creature type.
@@ -5017,7 +5031,7 @@ pub(crate) fn evaluate_condition(
                 }
                 None => true,
             };
-            type_matches && filter_matches
+            type_matches && subtype_matches && filter_matches
         }
         // CR 400.7 + CR 608.2c: source permanent entered the battlefield this turn.
         // For the "unless ~ entered this turn" sense, wrap with `Not`.
@@ -13320,6 +13334,7 @@ mod tests {
         let land_cond = AbilityCondition::RevealedHasCardType {
             card_type: CoreType::Land,
             additional_filter: None,
+            subtype_filter: None,
         };
 
         // Empty trackers — no reveal, no zone change: condition is false.
@@ -13419,6 +13434,7 @@ mod tests {
         .condition(AbilityCondition::RevealedHasCardType {
             card_type: CoreType::Land,
             additional_filter: None,
+            subtype_filter: None,
         });
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {

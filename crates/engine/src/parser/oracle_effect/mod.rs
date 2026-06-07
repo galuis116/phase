@@ -7076,6 +7076,19 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
                     *count = QuantityExpr::Fixed { value: 0 };
                     return clause;
                 }
+                let lower_put = text.to_lowercase();
+                if matches!(*target, TargetFilter::Any | TargetFilter::ParentTarget)
+                    && (nom_primitives::scan_contains(&lower_put, "put them on top")
+                        || nom_primitives::scan_contains(&lower_put, "put the exiled cards on top")
+                        || nom_primitives::scan_contains(&lower_put, "cards exiled this way"))
+                {
+                    *target = TargetFilter::ExiledBySource;
+                    if matches!(*count, QuantityExpr::Fixed { value: 1 }) {
+                        *count = QuantityExpr::Ref {
+                            qty: QuantityRef::CardsExiledBySource,
+                        };
+                    }
+                }
                 let extracted = (|| -> Option<(Option<TargetFilter>, Option<QuantityExpr>)> {
                     let lower = text.to_lowercase();
                     let (after_put, _) = tag::<_, _, OracleError<'_>>("put ")
@@ -17295,9 +17308,10 @@ mod tests {
         ChoiceType, ChosenSubtypeKind, CombatRelation, CombatRelationSubject, Comparator,
         ContinuousModification, ControllerRef, CopyRetargetPermission, CountScope, DoublePTMode,
         Duration, FilterProp, LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction,
-        ObjectProperty, ObjectScope, PaymentCost, PermissionGrantee, PlayerRelation, PtStat,
-        PtValue, PtValueScope, QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality,
-        TargetChoiceTiming, TypeFilter, TypedFilter, ZoneRef,
+        ObjectProperty, ObjectScope, PaymentCost, PermissionGrantee, PlayerRelation,
+        PreventionScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+        SearchSelectionConstraint, SharedQuality, TargetChoiceTiming, TypeFilter, TypedFilter,
+        ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -21605,6 +21619,38 @@ mod tests {
                 }
             }
             other => panic!("expected counted BounceAll, got {other:?}"),
+        }
+    }
+
+    /// Desynchronization (#2410): "that's not historic" must negate CR 700.6
+    /// historic, not degrade to `Non(Subtype("Historic"))` which matches every
+    /// permanent.
+    #[test]
+    fn effect_bounce_all_nonhistoric_nonland_permanents_desynchronization() {
+        let e =
+            parse_effect("Return each nonland permanent that's not historic to its owner's hand.");
+        match e {
+            Effect::BounceAll {
+                target: TargetFilter::Typed(filter),
+                ..
+            } => {
+                assert!(
+                    filter.type_filters.iter().any(|t| matches!(
+                        t,
+                        TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land)
+                    )),
+                    "nonland exclusion present, got {:?}",
+                    filter.type_filters
+                );
+                assert!(
+                    filter.properties.contains(&FilterProp::NotHistoric),
+                    "nonhistoric filter must be NotHistoric, got {:?}",
+                    filter.properties
+                );
+            }
+            other => {
+                panic!("expected BounceAll {{ Permanent, Non(Land), NotHistoric }}, got {other:?}")
+            }
         }
     }
 
@@ -29875,6 +29921,7 @@ mod tests {
             Some(AbilityCondition::RevealedHasCardType {
                 card_type: CoreType::Land,
                 additional_filter: None,
+                subtype_filter: None,
             })
         );
         assert!(matches!(
@@ -30067,6 +30114,7 @@ mod tests {
                 assert!(sub.condition == Some(AbilityCondition::RevealedHasCardType {
                     card_type: CoreType::Land,
                     additional_filter: None,
+                    subtype_filter: None,
                 }));
                 assert!(matches!(
                     *sub.effect,
@@ -30175,6 +30223,7 @@ mod tests {
                 condition: Box::new(AbilityCondition::RevealedHasCardType {
                     card_type: CoreType::Land,
                     additional_filter: None,
+                    subtype_filter: None,
                 }),
             })
         );
@@ -35199,6 +35248,7 @@ mod tests {
             Some(AbilityCondition::RevealedHasCardType {
                 card_type: CoreType::Creature,
                 additional_filter: Some(FilterProp::IsChosenCreatureType),
+                subtype_filter: None,
             }),
             "condition should check creature type + chosen type"
         );
@@ -35223,6 +35273,157 @@ mod tests {
         assert!(
             found_change_zone,
             "should have ChangeZone to Hand in sub-ability chain"
+        );
+    }
+
+    #[test]
+    fn scroll_rack_activated_effect_chain() {
+        let chain = parse_effect_chain(
+            "Exile any number of cards from your hand face down. Put that many cards from the top of your library into your hand. Then look at the exiled cards and put them on top of your library in any order.",
+            AbilityKind::Activated,
+        );
+        let mut current = Some(&chain);
+        let mut effects = Vec::new();
+        while let Some(def) = current {
+            effects.push(def.effect.as_ref().clone());
+            current = def.sub_ability.as_deref();
+        }
+        assert!(
+            effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::Mill {
+                        count: QuantityExpr::Ref {
+                            qty: QuantityRef::CardsExiledBySource,
+                        },
+                        destination: Zone::Hand,
+                        ..
+                    }
+                )
+            }),
+            "expected top-library move to hand tied to CardsExiledBySource, got {effects:?}"
+        );
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::Draw { .. })),
+            "CR 121.5: Scroll Rack puts cards into hand without drawing them"
+        );
+        assert!(
+            effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::PutAtLibraryPosition {
+                        target: TargetFilter::ExiledBySource,
+                        ..
+                    }
+                )
+            }),
+            "expected exiled cards put on library top, got {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::RevealHand {
+                        target: TargetFilter::ExiledBySource,
+                        ..
+                    }
+                )
+            }),
+            "expected private look at exiled cards, got {effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Unimplemented { .. })),
+            "chain must not contain Unimplemented effects"
+        );
+    }
+
+    #[test]
+    fn arachnogenesis_prevent_all_non_spider() {
+        let chain = parse_effect_chain(
+            "Create X 1/2 green Spider creature tokens with reach, where X is the number of creatures attacking you. Prevent all combat damage that would be dealt this turn by non-Spider creatures.",
+            AbilityKind::Spell,
+        );
+        let prevent = chain
+            .sub_ability
+            .as_ref()
+            .map(|s| s.effect.as_ref())
+            .expect("prevent clause sub-ability");
+        match prevent {
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic,
+                scope: PreventionScope::CombatDamage,
+                damage_source_filter: Some(TargetFilter::Typed(tf)),
+                ..
+            } => {
+                assert!(amount_dynamic.is_none());
+                assert!(tf.type_filters.iter().any(|t| matches!(
+                    t,
+                    TypeFilter::Non(inner) if matches!(inner.as_ref(), TypeFilter::Subtype(s) if s == "Spider")
+                )));
+            }
+            other => panic!("expected PreventDamage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kenessos_activated_subtype_or_condition() {
+        let chain = parse_effect_chain(
+            "Look at the top card of your library. If it's a Kraken, Leviathan, Octopus, or Serpent creature card, you may put it onto the battlefield. If you don't put the card onto the battlefield, you may put it on the bottom of your library.",
+            AbilityKind::Activated,
+        );
+        assert!(matches!(*chain.effect, Effect::Dig { .. }));
+        let sub = chain
+            .sub_ability
+            .as_ref()
+            .expect("conditional sub after Dig");
+        let Some(AbilityCondition::RevealedHasCardType {
+            card_type: CoreType::Creature,
+            subtype_filter: Some(subtype_filter),
+            ..
+        }) = &sub.condition
+        else {
+            panic!(
+                "expected creature subtype Or condition, got {:?}",
+                sub.condition
+            );
+        };
+        let TargetFilter::Or { filters } = subtype_filter.as_ref() else {
+            panic!("expected subtype Or filter, got {subtype_filter:?}");
+        };
+        assert_eq!(filters.len(), 4);
+        let subtypes: Vec<_> = filters
+            .iter()
+            .filter_map(|f| match f {
+                TargetFilter::Typed(tf) => tf.type_filters.iter().find_map(|t| match t {
+                    TypeFilter::Subtype(s) => Some(s.as_str()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+        for expected in ["Kraken", "Leviathan", "Octopus", "Serpent"] {
+            assert!(
+                subtypes.iter().any(|s| s.eq_ignore_ascii_case(expected)),
+                "missing subtype {expected} in {subtypes:?}"
+            );
+        }
+        fn has_unimplemented(def: &AbilityDefinition) -> bool {
+            matches!(def.effect.as_ref(), Effect::Unimplemented { .. })
+                || def
+                    .sub_ability
+                    .as_ref()
+                    .is_some_and(|sub| has_unimplemented(sub))
+                || def
+                    .else_ability
+                    .as_ref()
+                    .is_some_and(|sub| has_unimplemented(sub))
+        }
+        assert!(
+            !has_unimplemented(&chain),
+            "chain must not contain Unimplemented fragments"
         );
     }
 
@@ -42564,6 +42765,7 @@ mod snapshot_tests {
             Some(AbilityCondition::RevealedHasCardType {
                 card_type: CoreType::Land,
                 additional_filter: None,
+                subtype_filter: None,
             })
         );
         match &*put_land.effect {

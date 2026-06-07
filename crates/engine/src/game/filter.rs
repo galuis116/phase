@@ -179,6 +179,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::ToughnessGTPower
         | FilterProp::Modified
         | FilterProp::Historic
+        | FilterProp::NotHistoric
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
@@ -369,6 +370,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::ToughnessGTPower
         | FilterProp::Modified
         | FilterProp::Historic
+        | FilterProp::NotHistoric
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
         | FilterProp::EnteredThisTurn
@@ -2121,6 +2123,32 @@ fn spell_object_matches_property(
             ctx.spell_object_id
                 .is_some_and(|spell_id| spell_id != ctx.source_id)
         }),
+        // CR 601.2f: Spell cost modifiers may require the spell share a quality
+        // (e.g., card type) with a reference object such as an imprinted card.
+        FilterProp::SharesQuality {
+            quality,
+            reference,
+            relation,
+        } => {
+            let Some(context) = context else {
+                return false;
+            };
+            let Some(spell_id) = context.spell_object_id else {
+                return false;
+            };
+            let Some(spell_obj) = context.state.objects.get(&spell_id) else {
+                return false;
+            };
+            let source = source_context_from_spell_filter(context);
+            evaluate_shares_quality(
+                context.state,
+                spell_obj,
+                quality,
+                reference,
+                relation,
+                &source,
+            )
+        }
         _ => spell_record_matches_property(record, prop),
     }
 }
@@ -2190,6 +2218,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
                 || record.core_types.contains(&CoreType::Artifact)
                 || record.subtypes.iter().any(|s| s == "Saga")
         }
+        FilterProp::NotHistoric => !spell_record_matches_property(record, &FilterProp::Historic),
         FilterProp::ColorCount { comparator, count } => {
             comparator.evaluate(record.colors.len() as i32, i32::from(*count))
         }
@@ -2976,6 +3005,9 @@ fn matches_filter_prop(
                 || obj.card_types.core_types.contains(&CoreType::Artifact)
                 || obj.card_types.subtypes.iter().any(|s| s == "Saga")
         }
+        FilterProp::NotHistoric => {
+            !matches_filter_prop(&FilterProp::Historic, state, obj, object_id, source)
+        }
         // CR 510.1c: Match creatures whose toughness exceeds their power.
         FilterProp::ToughnessGTPower => {
             let power = obj.power.unwrap_or(0);
@@ -3002,30 +3034,7 @@ fn matches_filter_prop(
             quality,
             reference,
             relation,
-        } => {
-            let shares = reference.as_ref().is_none_or(|reference_filter| {
-                object_shares_quality_with_reference_filter(
-                    state,
-                    obj,
-                    quality,
-                    reference_filter,
-                    source,
-                )
-            });
-            match relation {
-                SharedQualityRelation::Shares => shares,
-                SharedQualityRelation::DoesNotShare => {
-                    !shares
-                        && (!matches!(quality, SharedQuality::Name)
-                            || !object_shared_quality_values(
-                                obj,
-                                quality,
-                                &state.all_creature_types,
-                            )
-                            .is_empty())
-                }
-            }
-        }
+        } => evaluate_shares_quality(state, obj, quality, reference, relation, source),
         // CR 120.6 + CR 120.9: "Was dealt damage this turn" is a historical fact,
         // not a query against current marked damage. CR 120.6 removes marked damage
         // when a permanent regenerates and during the cleanup step, so reading
@@ -3126,6 +3135,9 @@ fn zone_change_record_matches_property(
             record.supertypes.contains(&Supertype::Legendary)
                 || record.core_types.contains(&CoreType::Artifact)
                 || record.subtypes.iter().any(|s| s == "Saga")
+        }
+        FilterProp::NotHistoric => {
+            !zone_change_record_matches_property(&FilterProp::Historic, state, record, source)
         }
         // CR 201.2: Name match (case-insensitive) on the event-time object.
         FilterProp::Named { name } => record.name.eq_ignore_ascii_case(name),
@@ -3654,6 +3666,47 @@ fn parent_target_shared_quality_values(
                     lki_shared_quality_values(&snapshot.lki, quality, &state.all_creature_types)
                 })
         })
+}
+
+fn evaluate_shares_quality(
+    state: &GameState,
+    obj: &GameObject,
+    quality: &SharedQuality,
+    reference: &Option<Box<TargetFilter>>,
+    relation: &SharedQualityRelation,
+    source: &SourceContext<'_>,
+) -> bool {
+    let shares = reference.as_ref().is_none_or(|reference_filter| {
+        object_shares_quality_with_reference_filter(state, obj, quality, reference_filter, source)
+    });
+    match relation {
+        SharedQualityRelation::Shares => shares,
+        SharedQualityRelation::DoesNotShare => {
+            !shares
+                && (!matches!(quality, SharedQuality::Name)
+                    || !object_shared_quality_values(obj, quality, &state.all_creature_types)
+                        .is_empty())
+        }
+    }
+}
+
+fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceContext<'_> {
+    let source_obj = context.state.objects.get(&context.source_id);
+    SourceContext {
+        id: context.source_id,
+        controller: Some(context.source_controller),
+        attached_to: source_obj.and_then(|o| o.attached_to),
+        source_is_aura: source_obj
+            .is_some_and(|o| o.card_types.subtypes.iter().any(|s| s == "Aura")),
+        source_is_equipment: source_obj
+            .is_some_and(|o| o.card_types.subtypes.iter().any(|s| s == "Equipment")),
+        chosen_creature_type: source_obj.and_then(|o| o.chosen_creature_type()),
+        chosen_attributes: source_obj
+            .map(|o| o.chosen_attributes.as_slice())
+            .unwrap_or(&[]),
+        ability: None,
+        recipient_id: None,
+    }
 }
 
 fn object_shares_quality_with_reference_filter(

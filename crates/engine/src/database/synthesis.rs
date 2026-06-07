@@ -1007,6 +1007,28 @@ pub fn synthesize_changeling_cda(face: &mut CardFace) {
     }
 }
 
+/// CR 702.114a + CR 604.3: Devoid is a characteristic-defining ability —
+/// "This object is colorless." Synthesize a SelfRef color-overriding CDA
+/// (`SetColor { colors: [] }`, Layer 5 / CR 613.1e), mirroring
+/// `synthesize_changeling_cda`. This drives the on-battlefield color computation;
+/// a later "becomes [color]" effect (higher timestamp) can still override it.
+///
+/// CR 604.3 also requires Devoid to function in **all** zones, even outside the
+/// game. Off-battlefield color is read from the object's stored `color` /
+/// `base_color` rather than recomputed through layers, so the all-zones half is
+/// handled where those base characteristics are derived (`printed_cards.rs`
+/// builds a devoid face colorless), not here.
+pub fn synthesize_devoid_cda(face: &mut CardFace) {
+    if face.keywords.iter().any(|k| matches!(k, Keyword::Devoid)) {
+        face.static_abilities.push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::SetColor { colors: vec![] }])
+                .cda(),
+        );
+    }
+}
+
 /// CR 702.161a: Living metal — "During your turn, this permanent is an artifact
 /// creature in addition to its other types." Synthesize a SelfRef static that
 /// adds the Creature type (Layer 4, CR 613.1d) while it is the controller's turn,
@@ -1766,6 +1788,98 @@ pub fn synthesize_transmute(face: &mut CardFace) {
         .collect();
 
     face.abilities.extend(transmute_abilities);
+}
+
+/// CR 702.71a: Synthesize Transfigure into an activated ability on the card.
+///
+/// "Transfigure [cost]" means "[Cost], Sacrifice this permanent: Search your
+/// library for a creature card with the same mana value as this permanent and
+/// put it onto the battlefield. Then shuffle your library. Activate only as a
+/// sorcery." Mirrors `synthesize_transmute`, but (1) the cost sacrifices the
+/// source permanent instead of discarding it, (2) the same-mana-value filter
+/// reads the *source* permanent's mana value (`ObjectScope::Source`, not
+/// `CostPaidObject` — a Sacrifice cost never stamps `cost_paid_object`), (3) the
+/// found card is a creature and goes to the battlefield (not hand), and (4) the
+/// ability functions on the battlefield (default `activation_zone`, unlike
+/// Transmute's hand-only).
+pub fn synthesize_transfigure(face: &mut CardFace) {
+    let transfigure_abilities: Vec<AbilityDefinition> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| {
+            let Keyword::Transfigure(cost) = kw else {
+                return None;
+            };
+            // CR 702.71a: Composite cost — pay mana, then sacrifice this permanent.
+            let composite_cost = AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana { cost: cost.clone() },
+                    AbilityCost::Sacrifice {
+                        target: TargetFilter::SelfRef,
+                        count: 1,
+                    },
+                ],
+            };
+            // CR 702.71a: "a creature card with the same mana value as this
+            // permanent." ObjectScope::Source reads the (sacrificed) source's
+            // printed mana value (zone-stable, LKI-backed) — NOT CostPaidObject.
+            let filter =
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+                    FilterProp::Cmc {
+                        comparator: Comparator::EQ,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectManaValue {
+                                scope: ObjectScope::Source,
+                            },
+                        },
+                    },
+                ]));
+            // CR 702.71a: "Then shuffle your library."
+            let shuffle_def = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Shuffle {
+                    target: TargetFilter::Controller,
+                },
+            );
+            // CR 702.71a: "put it onto the battlefield" — Library→Battlefield.
+            let mut put_on_battlefield_def = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Library),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                },
+            );
+            put_on_battlefield_def.sub_ability = Some(Box::new(shuffle_def));
+            // CR 702.71a: "Search your library ... Activate only as a sorcery."
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::SearchLibrary {
+                    filter,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    reveal: false,
+                    target_player: None,
+                    selection_constraint: SearchSelectionConstraint::None,
+                    split: None,
+                    source_zones: vec![crate::types::zones::Zone::Library],
+                },
+            )
+            .cost(composite_cost)
+            .sorcery_speed();
+            def.sub_ability = Some(Box::new(put_on_battlefield_def));
+            Some(def)
+        })
+        .collect();
+
+    face.abilities.extend(transfigure_abilities);
 }
 
 /// CR 702.53a: "a card with the same mana value as the discarded card." The
@@ -8275,6 +8389,8 @@ pub fn synthesize_all(face: &mut CardFace) {
     // The Keyword::Crew(N) on the card provides display information.
     synthesize_ninjutsu_family(face);
     synthesize_changeling_cda(face);
+    // CR 702.114a: Devoid — colorless CDA.
+    synthesize_devoid_cda(face);
     synthesize_kicker(face);
     synthesize_buyback(face);
     synthesize_bargain(face);
@@ -8302,6 +8418,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // a card with the same mana value, reveal it, put it in hand, then shuffle.
     // Activate only as a sorcery."
     synthesize_transmute(face);
+    // CR 702.71a: Transfigure — "[Cost], Sacrifice this permanent: search your
+    // library for a creature with the same mana value, put it onto the
+    // battlefield, then shuffle. Activate only as a sorcery."
+    synthesize_transfigure(face);
     synthesize_scavenge(face);
     // CR 702.128a / CR 702.129a: Embalm / Eternalize graveyard-activated
     // token-copy abilities (self-contained building block in its own module).
@@ -9012,15 +9132,25 @@ pub(crate) fn strip_level_gated_keywords(face: &mut CardFace) {
                     )
             )
         })
-        .flat_map(|stat| {
-            stat.modifications.iter().filter_map(|m| match m {
-                ContinuousModification::AddKeyword { keyword } => Some(keyword.clone()),
-                _ => None,
-            })
-        })
+        .flat_map(keyword_granted_by_level_gated_static)
         .collect();
 
     face.keywords.retain(|kw| !gated.contains(kw));
+}
+
+fn keyword_granted_by_level_gated_static(stat: &StaticDefinition) -> Vec<Keyword> {
+    let mut gated = stat
+        .modifications
+        .iter()
+        .filter_map(|m| match m {
+            ContinuousModification::AddKeyword { keyword } => Some(keyword.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if let Some(kw) = stat.mode.as_keyword() {
+        gated.push(kw);
+    }
+    gated
 }
 
 /// Build a `CardFace` from MTGJSON data, running the Oracle text parser and all synthesis.
@@ -9555,6 +9685,65 @@ mod buyback_synthesis_tests {
 }
 
 #[cfg(test)]
+mod devoid_synthesis_tests {
+    use super::*;
+
+    fn devoid_cda(face: &CardFace) -> Option<&StaticDefinition> {
+        face.static_abilities.iter().find(|s| {
+            s.characteristic_defining
+                && s.affected == Some(TargetFilter::SelfRef)
+                && s.modifications
+                    .iter()
+                    .any(|m| matches!(m, ContinuousModification::SetColor { colors } if colors.is_empty()))
+        })
+    }
+
+    /// CR 702.114a: Devoid synthesizes a SelfRef colorless CDA (SetColor {[]}).
+    #[test]
+    fn synthesize_devoid_cda_pushes_colorless_cda() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Devoid],
+            ..CardFace::default()
+        };
+        synthesize_devoid_cda(&mut face);
+        assert!(
+            devoid_cda(&face).is_some(),
+            "devoid must push a SelfRef SetColor {{[]}} CDA; got {:?}",
+            face.static_abilities
+        );
+    }
+
+    /// No-op when the card has no Devoid keyword.
+    #[test]
+    fn synthesize_devoid_cda_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_devoid_cda(&mut face);
+        assert!(devoid_cda(&face).is_none());
+    }
+
+    /// A single synthesis pass for one Devoid keyword yields one colorless CDA.
+    #[test]
+    fn synthesize_devoid_cda_single_pass_pushes_one_cda() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Devoid],
+            ..CardFace::default()
+        };
+        synthesize_devoid_cda(&mut face);
+        let count = face
+            .static_abilities
+            .iter()
+            .filter(|s| {
+                s.characteristic_defining
+                    && s.modifications.iter().any(|m| {
+                        matches!(m, ContinuousModification::SetColor { colors } if colors.is_empty())
+                    })
+            })
+            .count();
+        assert_eq!(count, 1, "exactly one colorless CDA");
+    }
+}
+
+#[cfg(test)]
 mod bargain_synthesis_tests {
     use super::*;
 
@@ -9744,6 +9933,121 @@ mod transmute_synthesis_tests {
     fn synthesize_transmute_is_noop_without_keyword() {
         let mut face = CardFace::default();
         synthesize_transmute(&mut face);
+        assert!(face.abilities.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod transfigure_synthesis_tests {
+    use super::*;
+    use crate::types::ability::ActivationRestriction;
+
+    fn transfigure_face() -> CardFace {
+        CardFace {
+            keywords: vec![Keyword::Transfigure(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            })],
+            ..CardFace::default()
+        }
+    }
+
+    /// CR 702.71a: `synthesize_transfigure` installs one battlefield, sorcery-speed
+    /// activated ability whose cost is "{cost}, Sacrifice this permanent", whose
+    /// effect searches the library for a same-mana-value creature, and whose
+    /// sub-ability chain puts the found card onto the battlefield then shuffles.
+    #[test]
+    fn synthesize_transfigure_builds_same_mana_value_creature_tutor() {
+        let mut face = transfigure_face();
+        synthesize_transfigure(&mut face);
+
+        assert_eq!(
+            face.abilities.len(),
+            1,
+            "one transfigure ability per keyword"
+        );
+        let ability = face.abilities.first().expect("transfigure ability");
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        // CR 702.71a: functions on the battlefield (default activation_zone), unlike
+        // Transmute's Some(Hand).
+        assert_eq!(ability.activation_zone, None);
+        // CR 702.71a: "Activate only as a sorcery."
+        assert!(ability.sorcery_speed);
+        assert!(ability
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+
+        // Cost: Composite[Mana, Sacrifice this permanent (SelfRef, count 1)].
+        match &ability.cost {
+            Some(AbilityCost::Composite { costs }) => {
+                assert!(costs.iter().any(|c| matches!(c, AbilityCost::Mana { .. })));
+                assert!(costs.iter().any(|c| matches!(
+                    c,
+                    AbilityCost::Sacrifice {
+                        target: TargetFilter::SelfRef,
+                        count: 1,
+                    }
+                )));
+            }
+            other => panic!("expected Composite cost, got {other:?}"),
+        }
+
+        // Effect: SearchLibrary with a same-mana-value-as-source creature filter.
+        let Effect::SearchLibrary { filter, reveal, .. } = &*ability.effect else {
+            panic!("expected SearchLibrary, got {:?}", ability.effect);
+        };
+        assert!(!*reveal, "CR 702.71a: no reveal in transfigure");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "CR 702.71a: filter restricted to creature cards, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            // CR 702.71a: same mana value as THIS PERMANENT — Source,
+                            // never CostPaidObject (Sacrifice stamps no cost_paid_object).
+                            scope: ObjectScope::Source
+                        }
+                    }
+                }
+            )),
+            "filter must match a creature with the same mana value as the source, got {:?}",
+            tf.properties
+        );
+
+        // Sub-ability chain: put found card to battlefield (Library→Battlefield),
+        // then shuffle.
+        let put_on_battlefield = ability
+            .sub_ability
+            .as_ref()
+            .expect("put-on-battlefield sub-ability");
+        assert!(matches!(
+            &*put_on_battlefield.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                ..
+            }
+        ));
+        let shuffle = put_on_battlefield
+            .sub_ability
+            .as_ref()
+            .expect("shuffle sub-ability");
+        assert!(matches!(&*shuffle.effect, Effect::Shuffle { .. }));
+    }
+
+    #[test]
+    fn synthesize_transfigure_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_transfigure(&mut face);
         assert!(face.abilities.is_empty());
     }
 }
@@ -16632,6 +16936,32 @@ mod sorcery_speed_invariant_tests {
         assert_eq!(face.keywords, vec![level_up]);
     }
 
+    /// CR 711.4: Level-block standalone keyword static modes (Hada Spy Patrol's
+    /// "Shroud" line) must strip the matching base keyword.
+    #[test]
+    fn strip_level_gated_keywords_strips_static_mode_keyword_grants() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Shroud],
+            static_abilities: vec![StaticDefinition::new(StaticMode::Shroud)
+                .affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                ))
+                .condition(StaticCondition::HasCounters {
+                    counters: CounterMatch::OfType(CounterType::Generic("level".to_string())),
+                    minimum: 3,
+                    maximum: None,
+                })],
+            ..Default::default()
+        };
+
+        strip_level_gated_keywords(&mut face);
+
+        assert!(
+            face.keywords.is_empty(),
+            "Shroud must strip from base keywords"
+        );
+    }
+
     /// Negative case: a `HasCounters` static on a NON-"level" generic counter
     /// (e.g. "charge") must NOT strip its keyword — only `{LEVEL}`-gated statics
     /// (CR 711) are level abilities.
@@ -19798,6 +20128,20 @@ mod bloodthirst_synthesis_tests {
             base,
             vec![Keyword::Bloodthirst(BloodthirstValue::Fixed(3))],
             "parser-extracted Bloodthirst(3) must replace the MTGJSON default"
+        );
+    }
+
+    /// CR 702.60a: MTGJSON carries bare "Ripple", but Oracle carries "Ripple N".
+    /// The shared merge authority must replace the default with the parsed depth so
+    /// trigger collection sees a non-zero reveal count.
+    #[test]
+    fn merge_extracted_keywords_replaces_bare_ripple_default() {
+        let mut base = vec![Keyword::Ripple(1)];
+        merge_extracted_keywords(&mut base, vec![Keyword::Ripple(4)]);
+        assert_eq!(
+            base,
+            vec![Keyword::Ripple(4)],
+            "parser-extracted Ripple(4) must replace MTGJSON's bare Ripple default"
         );
     }
 

@@ -139,8 +139,7 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         Rule::Dredge(g) => Keyword::Dredge(int_or_gap(g, "Rule::Dredge", path)?),
         Rule::Modular(g) => Keyword::Modular(int_or_gap(g, "Rule::Modular", path)?),
         Rule::Mobilize(g) => Keyword::Mobilize(quantity::convert(g)?),
-        // CR 702.60a: Ripple N — the engine keyword now carries the reveal
-        // depth N as `Keyword::Ripple(u32)`, so convert the payload directly.
+        // CR 702.60a: Ripple N — engine now carries the parameterized count.
         Rule::Ripple(g) => Keyword::Ripple(int_or_gap(g, "Rule::Ripple", path)?),
         Rule::Saddle(g) => Keyword::Saddle(int_or_gap(g, "Rule::Saddle", path)?),
         Rule::Soulshift(g) => Keyword::Soulshift(int_or_gap(g, "Rule::Soulshift", path)?),

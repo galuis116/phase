@@ -298,11 +298,6 @@ pub(crate) fn extract_keyword_line(
             // Prefix match: Oracle text has more detail (e.g. "protection from red").
             // Extract the full parameterized keyword.
             if let Some(kw) = parse_keyword_from_oracle(&lower) {
-                if matches!(kw, Keyword::Ripple(_))
-                    && mtgjson_keyword_names.contains(&keyword_display_name(&kw))
-                {
-                    continue;
-                }
                 new_keywords.push(kw);
                 continue;
             }
@@ -1276,8 +1271,8 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
 
     // CR 702.60a: Ripple N — when you cast this spell, you may reveal the top N cards
     // of your library and cast any with the same name without paying their mana cost.
-    // The captured N is the reveal depth carried by `Keyword::Ripple(N)`.
-    // Cards: Surging Aether, Surging Dementia, Surging Might, Surging Sentinels.
+    // Cards: Surging Aether, Surging Dementia, Surging Might, Surging Sentinels;
+    // Thrumming Stone grants Ripple 4.
     if let Ok((_, n)) = all_consuming(preceded(
         tag::<_, _, OracleError<'_>>("ripple "),
         nom_primitives::parse_number,
@@ -1540,6 +1535,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::JumpStart => "jump-start".to_string(),
         Keyword::Cipher => "cipher".to_string(),
         Keyword::Transmute(_) => "transmute".to_string(),
+        Keyword::Transfigure(_) => "transfigure".to_string(),
         Keyword::Cleave(_) => "cleave".to_string(),
         Keyword::Undaunted => "undaunted".to_string(),
         Keyword::Station => "station".to_string(),
@@ -1953,19 +1949,19 @@ mod tests {
         );
     }
 
-    /// CR 702.60a: Ripple N triggers when the spell is cast. The captured N is
-    /// the reveal depth carried by `Keyword::Ripple(N)`; trailing text is rejected.
+    /// CR 702.60a: Ripple N triggers when the spell is cast. N is captured into
+    /// the parameterized `Keyword::Ripple(u32)`; trailing text is rejected.
     #[test]
     fn parse_keyword_from_oracle_ripple() {
         assert_eq!(
             parse_keyword_from_oracle("ripple 4"),
             Some(Keyword::Ripple(4)),
-            "ripple 4 (Surging Aether oracle text)"
+            "ripple 4 (Thrumming Stone grant)"
         );
         assert_eq!(
             parse_keyword_from_oracle("ripple 2"),
             Some(Keyword::Ripple(2)),
-            "ripple 2 — numeric variant captures N"
+            "ripple 2 — N is captured"
         );
         assert_eq!(parse_keyword_from_oracle("ripple 4 extra"), None);
     }
@@ -1994,15 +1990,16 @@ mod tests {
     }
 
     #[test]
-    fn extract_keyword_line_ripple_does_not_duplicate_mtgjson_keyword() {
+    fn extract_keyword_line_ripple_preserves_oracle_depth() {
         let mtgjson_kws = vec!["ripple".to_string()];
 
         let result = extract_keyword_line("Ripple 4", &mtgjson_kws)
             .expect("Ripple N line should be recognized as a keyword line");
 
-        assert!(
-            result.is_empty(),
-            "MTGJSON already carries Keyword::Ripple; Oracle validation must not add a duplicate"
+        assert_eq!(
+            result,
+            vec![Keyword::Ripple(4)],
+            "Oracle text carries the ripple depth that MTGJSON's bare keyword omits"
         );
     }
 
