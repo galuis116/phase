@@ -33,6 +33,100 @@ use super::stack;
 // Re-export so existing paths stay valid.
 pub use super::trigger_matchers::{build_trigger_registry, trigger_matcher, trigger_registry};
 
+/// CR 702.60a: Build the resolved ability for one Ripple instance (reveal
+/// depth `n`) on the spell `source_id` controlled by `controller`.
+///
+/// Composes existing building blocks rather than a bespoke resolver, mirroring
+/// how Cascade (CR 702.85a) and Etali (CR 701.13a + CR 118.9) are expressed:
+///
+/// 1. `ExileTop n` — reveal the top N cards by exiling them into the spell's
+///    per-resolution source-tracked exile set (CR 406.6). Off-zone "reveal"
+///    semantics are modeled via this tracked exile holding, the same shape
+///    Cascade uses, so the cast/bottom steps can address exactly those cards.
+/// 2. `CastFromZone { And[ExiledBySource, SameName], without_paying }` — grant
+///    a zero-cost casting permission to each revealed card whose name matches
+///    this spell (CR 201.2 + CR 118.9). This is the Etali / Improvisation
+///    Capstone "cast any number from among them" machinery; the controller
+///    casts the copies during their priority window, and a freely-cast copy
+///    that itself has ripple re-triggers naturally (CR 702.60b — Thrumming
+///    Stone recursion).
+/// 3. `PutAtLibraryPosition { And[ExiledBySource, Not(SameName)], Bottom }` —
+///    "put all revealed cards not cast this way on the bottom of your library
+///    in any order" (CR 401.4). The differently-named revealed cards can never
+///    be cast this way, so they bottom immediately.
+///
+/// RESIDUAL: a revealed same-named copy the controller declines to cast remains
+/// in the tracked exile holding rather than being bottomed this resolution
+/// (the LingeringPermission cast window defers the cast off-resolution, so the
+/// "not cast this way" set is not yet known when the bottom step runs). The
+/// common Surging-cycle / Thrumming Stone lines are unaffected (you cast every
+/// revealed copy, or none share a name).
+fn build_ripple_cast_ability(n: u32, source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
+    use crate::types::ability::{CardPlayMode, CastFromZoneDriver, FilterProp, LibraryPosition};
+
+    // CR 201.2 + CR 702.60a: "cards with the same name as this spell" —
+    // `FilterProp::SameName` reads the resolving ability's source (the ripple
+    // spell, still on the stack while its cast trigger resolves per CR 702.60a).
+    let same_name = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![],
+        controller: None,
+        properties: vec![FilterProp::SameName],
+    });
+
+    // CR 401.4: bottom the revealed cards that share no name with the spell.
+    let bottom_rest = ResolvedAbility::new(
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ExiledBySource,
+                    TargetFilter::Not {
+                        filter: Box::new(same_name.clone()),
+                    },
+                ],
+            },
+            count: QuantityExpr::Fixed { value: 0 },
+            position: LibraryPosition::Bottom,
+        },
+        Vec::new(),
+        source_id,
+        controller,
+    );
+
+    // CR 118.9: offer a free cast of each revealed same-named card.
+    let mut cast_same_named = ResolvedAbility::new(
+        Effect::CastFromZone {
+            target: TargetFilter::And {
+                filters: vec![TargetFilter::ExiledBySource, same_name],
+            },
+            without_paying_mana_cost: true,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+            duration: None,
+            driver: CastFromZoneDriver::LingeringPermission,
+        },
+        Vec::new(),
+        source_id,
+        controller,
+    );
+    cast_same_named.sub_ability = Some(Box::new(bottom_rest));
+
+    // CR 702.60a: reveal the top N (capped at library size by ExileTop).
+    let mut reveal = ResolvedAbility::new(
+        Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: n as i32 },
+            face_down: false,
+        },
+        Vec::new(),
+        source_id,
+        controller,
+    );
+    reveal.sub_ability = Some(Box::new(cast_same_named));
+    reveal
+}
+
 /// Function signature for trigger matchers: returns true if event matches the trigger.
 pub type TriggerMatcher = fn(
     event: &GameEvent,
@@ -1582,6 +1676,53 @@ fn collect_pending_triggers(
                     modal: None,
                     mode_abilities: vec![],
                     description: cascade_trig_def.description,
+                    may_trigger_origin: None,
+                    subject_match_count: None,
+                    die_result: None,
+                }));
+            }
+
+            // CR 702.60a/b: Ripple N — a "when you cast this spell" trigger
+            // (same shape as Cascade) that reveals the top N cards and offers a
+            // free cast of the revealed cards sharing this spell's name. Per
+            // CR 702.60b each ripple instance triggers separately, so collect a
+            // depth per instance. A 0-depth reveal is a no-op (it can only come
+            // from the bare MTGJSON keyword name, which carries no N); the
+            // Oracle-parsed `Ripple(N)` instance supplies the real depth.
+            let ripple_depths: Vec<u32> =
+                super::casting::effective_spell_keywords(state, *caster, *cast_obj_id)
+                    .iter()
+                    .filter_map(|keyword| match keyword {
+                        Keyword::Ripple(n) if *n > 0 => Some(*n),
+                        _ => None,
+                    })
+                    .collect();
+            for depth in ripple_depths {
+                let controller = state
+                    .objects
+                    .get(cast_obj_id)
+                    .map(|obj| obj.controller)
+                    .unwrap_or(*caster);
+                // CR 702.60a: Ripple fires only when "you cast this spell" —
+                // wire `WasCast` as the condition (belt-and-suspenders alongside
+                // the SpellCast event itself), mirroring Cascade.
+                let ripple_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
+                    .description("Ripple".to_string())
+                    .condition(TriggerCondition::WasCast { zone: None });
+                let ripple_ability = build_ripple_cast_ability(depth, *cast_obj_id, controller);
+                let timestamp = state.next_timestamp() as u32;
+                pending.push(PendingTriggerContext::single(PendingTrigger {
+                    source_id: *cast_obj_id,
+                    controller,
+                    condition: ripple_trig_def.condition,
+                    ability: ripple_ability,
+                    timestamp,
+                    target_constraints: Vec::new(),
+                    distribute: None,
+                    trigger_event: Some(event.clone()),
+                    modal: None,
+                    mode_abilities: vec![],
+                    description: ripple_trig_def.description,
                     may_trigger_origin: None,
                     subject_match_count: None,
                     die_result: None,
@@ -21484,6 +21625,183 @@ mod push_first_contract_tests {
         assert!(
             state.pending_trigger.is_none(),
             "no-legal-mode modal trigger must not leave a stashed pending_trigger",
+        );
+    }
+}
+
+#[cfg(test)]
+mod ripple_cast_trigger_tests {
+    use super::{build_ripple_cast_ability, process_triggers};
+    use crate::game::effects::resolve_ability_chain;
+    use crate::game::zones::create_object;
+    use crate::types::ability::CastingPermission;
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCost;
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    fn add_library_card(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        is_land: bool,
+    ) -> ObjectId {
+        use crate::types::card_type::CoreType;
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Library,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        if is_land {
+            obj.card_types.core_types.push(CoreType::Land);
+        } else {
+            obj.card_types.core_types.push(CoreType::Instant);
+        }
+        id
+    }
+
+    /// CR 702.60a + CR 118.9 + CR 401.4: resolving one Ripple instance reveals
+    /// the top N, grants a zero-cost cast permission to the revealed cards that
+    /// share the spell's name, and bottoms the revealed cards that do not.
+    #[test]
+    fn ripple_reveals_casts_same_named_and_bottoms_differently_named() {
+        let mut state = GameState::new_two_player(42);
+        // The ripple spell on the stack — `FilterProp::SameName` reads its name.
+        let spell = create_object(
+            &mut state,
+            CardId(1000),
+            PlayerId(0),
+            "Surging Flame".to_string(),
+            Zone::Stack,
+        );
+
+        // Library top-first: two same-named copies, two differently-named cards
+        // within the reveal window, and one card past the window.
+        let same1 = add_library_card(&mut state, PlayerId(0), "Surging Flame", false);
+        let other1 = add_library_card(&mut state, PlayerId(0), "Forest", true);
+        let same2 = add_library_card(&mut state, PlayerId(0), "Surging Flame", false);
+        let other2 = add_library_card(&mut state, PlayerId(0), "Bear", false);
+        let deeper = add_library_card(&mut state, PlayerId(0), "Deep Card", false);
+        state.players[0].library = crate::im::vector![same1, other1, same2, other2, deeper];
+
+        let ability = build_ripple_cast_ability(4, spell, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // CR 118.9: the two revealed same-named copies stay in exile carrying a
+        // zero-cost cast permission granted to the spell's controller.
+        for &same in &[same1, same2] {
+            assert_eq!(
+                state.objects[&same].zone,
+                Zone::Exile,
+                "revealed same-named copy must remain in exile to be cast"
+            );
+            let has_free_cast = state.objects[&same].casting_permissions.iter().any(|p| {
+                matches!(
+                    p,
+                    CastingPermission::ExileWithAltCost { cost, granted_to: Some(g), .. }
+                        if *cost == ManaCost::zero() && *g == PlayerId(0)
+                )
+            });
+            assert!(
+                has_free_cast,
+                "revealed same-named copy must carry a zero-cost cast permission, got {:?}",
+                state.objects[&same].casting_permissions
+            );
+        }
+
+        // CR 401.4: the two revealed differently-named cards bottom the library
+        // (they can never be cast this way), carrying no cast permission.
+        for &other in &[other1, other2] {
+            assert_eq!(
+                state.objects[&other].zone,
+                Zone::Library,
+                "revealed differently-named card must be put back into the library"
+            );
+            assert!(
+                state.objects[&other].casting_permissions.is_empty(),
+                "differently-named card must not be castable"
+            );
+            assert!(state.players[0].library.contains(&other));
+        }
+
+        // The card past the reveal window is untouched.
+        assert_eq!(state.objects[&deeper].zone, Zone::Library);
+    }
+
+    /// CR 702.60b: each Ripple instance triggers separately — a spell with two
+    /// ripple keywords generates two "when you cast this spell" triggers.
+    #[test]
+    fn ripple_generates_one_trigger_per_instance() {
+        let mut state = GameState::new_two_player(7);
+        let spell = create_object(
+            &mut state,
+            CardId(2000),
+            PlayerId(0),
+            "Surging Sentinels".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.mana_cost = ManaCost::generic(3);
+            obj.keywords.push(Keyword::Ripple(4));
+            obj.keywords.push(Keyword::Ripple(4));
+        }
+        // Empty library so the synthesized triggers resolve without a handshake.
+        state.players[0].library.clear();
+
+        let evts = vec![GameEvent::SpellCast {
+            card_id: CardId(2000),
+            controller: PlayerId(0),
+            object_id: spell,
+        }];
+        let ts_before = state.next_timestamp;
+        process_triggers(&mut state, &evts);
+
+        assert!(
+            state.next_timestamp >= ts_before + 2,
+            "two ripple keywords must advance next_timestamp by >=2 (one per instance), \
+             before={ts_before} after={}",
+            state.next_timestamp
+        );
+    }
+
+    /// A 0-depth Ripple (only the bare MTGJSON keyword name, no Oracle N) is a
+    /// no-op and must not generate a trigger.
+    #[test]
+    fn ripple_zero_depth_generates_no_trigger() {
+        let mut state = GameState::new_two_player(7);
+        let spell = create_object(
+            &mut state,
+            CardId(3000),
+            PlayerId(0),
+            "Nameless Ripple".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .keywords
+            .push(Keyword::Ripple(0));
+
+        let evts = vec![GameEvent::SpellCast {
+            card_id: CardId(3000),
+            controller: PlayerId(0),
+            object_id: spell,
+        }];
+        let ts_before = state.next_timestamp;
+        process_triggers(&mut state, &evts);
+
+        assert_eq!(
+            state.next_timestamp, ts_before,
+            "a 0-depth ripple must not synthesize a trigger"
         );
     }
 }

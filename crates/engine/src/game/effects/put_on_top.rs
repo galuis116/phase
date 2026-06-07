@@ -45,7 +45,13 @@ pub fn resolve(
         crate::game::targeting::resolved_targets(ability, &target_filter, state);
     let mut collected_targets =
         crate::game::effects::effect_object_targets(&target_filter, &effective_targets);
-    if collected_targets.is_empty() && matches!(target_filter, TargetFilter::ExiledBySource) {
+    // CR 406.6: Enumerate the source's per-resolution linked-exile set for any
+    // filter that references `ExiledBySource` — including composite shapes such
+    // as `And[ExiledBySource, Not(SameName)]` (Ripple's "bottom the revealed
+    // cards not cast this way"). Mirrors the composite-aware enumeration in
+    // `cast_from_zone`/`exile_from_top_until`; a bare `ExiledBySource` filter is
+    // the degenerate case, so existing callers are unaffected.
+    if collected_targets.is_empty() && target_filter.references_exiled_by_source() {
         let ctx = crate::game::filter::FilterContext::from_ability(ability);
         collected_targets = state
             .objects
@@ -128,7 +134,7 @@ pub fn resolve(
     let mut randomized_targets;
     let to_place = if expected == 0 {
         if matches!(position, LibraryPosition::Bottom)
-            && matches!(target_filter, TargetFilter::ExiledBySource)
+            && target_filter.references_exiled_by_source()
         {
             randomized_targets = collected_targets.clone();
             randomized_targets.shuffle(&mut state.rng);
@@ -159,7 +165,7 @@ pub fn resolve(
             }
         }
     }
-    if matches!(target_filter, TargetFilter::ExiledBySource) {
+    if target_filter.references_exiled_by_source() {
         state.exile_links.retain(|link| {
             link.source_id != ability.source_id || !to_place.contains(&link.exiled_id)
         });

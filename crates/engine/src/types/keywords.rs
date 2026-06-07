@@ -687,7 +687,12 @@ pub enum Keyword {
     Provoke,
     Rebound,
     Retrace,
-    Ripple,
+    /// CR 702.60a: Ripple N — "When you cast this spell, you may reveal the top
+    /// N cards of your library. You may cast any of those cards with the same
+    /// name as this spell without paying their mana costs. Put all revealed
+    /// cards not cast this way on the bottom of your library in any order." The
+    /// `u32` is the reveal depth N, parsed from the Oracle keyword line.
+    Ripple(u32),
     SplitSecond,
     Storm,
     /// CR 702.62a: Suspend N—{cost} — exile from hand with N time counters,
@@ -1141,7 +1146,7 @@ impl Keyword {
             | Keyword::ReadAhead
             | Keyword::Rebound
             | Keyword::Reinforce { .. }
-            | Keyword::Ripple
+            | Keyword::Ripple(_)
             | Keyword::Saddle(_)
             | Keyword::Scavenge(_)
             | Keyword::Soulshift(_)
@@ -2056,7 +2061,12 @@ impl FromStr for Keyword {
             "cumulative" => Ok(Keyword::CumulativeUpkeep(AbilityCost::Mana {
                 cost: ManaCost::zero(),
             })),
-            "ripple" => Ok(Keyword::Ripple),
+            // CR 702.60a: the bare MTGJSON keyword name carries no count; the
+            // reveal depth N is parsed from the Oracle keyword line ("Ripple N")
+            // into `Keyword::Ripple(N)`. A name-only occurrence defaults to 0
+            // (a 0-depth reveal is a no-op and is superseded by the Oracle-parsed
+            // instance at trigger time).
+            "ripple" => Ok(Keyword::Ripple(0)),
             "totem" => Ok(Keyword::Totem),
             // Unit keywords added for MTGJSON keyword name recognition
             "bargain" => Ok(Keyword::Bargain),
@@ -2342,7 +2352,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "CumulativeUpkeep" => Ok(Keyword::CumulativeUpkeep(AbilityCost::Mana {
             cost: ManaCost::zero(),
         })),
-        "Ripple" => Ok(Keyword::Ripple),
+        "Ripple" => Ok(Keyword::Ripple(uint(data))),
         "Totem" => Ok(Keyword::Totem),
         // Parameterized: ManaCost (new keywords)
         "Warp" => Ok(Keyword::Warp(mana(data)?)),
@@ -3426,7 +3436,7 @@ mod tests {
                 cost: ManaCost::zero()
             })
         );
-        assert_eq!(Keyword::from_str("Ripple").unwrap(), Keyword::Ripple);
+        assert_eq!(Keyword::from_str("Ripple").unwrap(), Keyword::Ripple(0));
         assert_eq!(Keyword::from_str("Totem").unwrap(), Keyword::Totem);
         // Warp is now parameterized — bare "Warp" without cost falls through to Unknown
         assert!(matches!(

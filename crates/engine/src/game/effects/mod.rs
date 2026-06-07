@@ -2216,19 +2216,27 @@ fn filter_references_tracked_set(filter: &TargetFilter) -> bool {
 }
 
 fn effect_uses_implicit_tracked_set_targets(effect: &Effect) -> bool {
-    matches!(
-        effect,
+    match effect {
         Effect::GrantCastingPermission {
             target: TargetFilter::TrackedSet { .. },
             ..
-        } | Effect::CastCopyOfCard {
+        }
+        | Effect::CastCopyOfCard {
             target: TargetFilter::TrackedSet { .. },
             ..
-        } | Effect::PutAtLibraryPosition {
-            target: TargetFilter::ExiledBySource,
-            ..
+        } => true,
+        // CR 406.6: Effects that enumerate the source's linked-exile set
+        // themselves (`cast_from_zone` / `put_on_top`) must NOT have the chain
+        // pre-inject the raw exiled IDs as their targets — that would bypass any
+        // composite filter on the linked set (e.g. Ripple's
+        // `And[ExiledBySource, SameName]` name match, CR 702.60a). Covers both
+        // the bare `ExiledBySource` (the prior `PutAtLibraryPosition` case) and
+        // composite `And[ExiledBySource, ...]` shapes.
+        Effect::CastFromZone { target, .. } | Effect::PutAtLibraryPosition { target, .. } => {
+            target.references_exiled_by_source()
         }
-    )
+        _ => false,
+    }
 }
 
 fn affected_objects_from_events(
