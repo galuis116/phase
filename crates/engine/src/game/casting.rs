@@ -3804,6 +3804,13 @@ pub(super) fn recompute_pending_cast_cost(
 /// covering the card's current zone (Hand for normal casting, Stack for the cost-
 /// determination step). Handles cards like Tolarian Terror where the cost reduction is
 /// inherent to the spell and must apply before the spell resolves.
+///
+/// Test-only isolation helper: production cost calculation now collects self-spell
+/// and battlefield modifiers together (CR 601.2f aggregate ordering) via
+/// `collect_self_spell_cost_modifiers` + `apply_cost_modifications_in_order` in
+/// `apply_non_floor_cost_modifiers`; this wrapper exists so tests can exercise the
+/// self-spell pass in isolation.
+#[cfg(test)]
 fn apply_self_spell_cost_modifiers(
     state: &GameState,
     caster: PlayerId,
@@ -3814,6 +3821,7 @@ fn apply_self_spell_cost_modifiers(
     apply_cost_modifications_in_order(mana_cost, &collected);
 }
 
+#[cfg(test)]
 pub(super) fn apply_self_spell_cost_modifiers_with_selected_targets(
     state: &GameState,
     caster: PlayerId,
@@ -4081,6 +4089,13 @@ fn spell_matches_cost_filter_with_selected_targets(
 /// Player scope is checked via the `affected` filter on the StaticDefinition (You = source's
 /// controller casts, Opponent = source's opponent casts, no controller = all players).
 /// Spell type is checked via the `spell_filter` field in the StaticMode variant.
+///
+/// Test-only isolation helper: production cost calculation now collects self-spell
+/// and battlefield modifiers together (CR 601.2f aggregate ordering) via
+/// `collect_battlefield_cost_modifiers` + `apply_cost_modifications_in_order` in
+/// `apply_non_floor_cost_modifiers`; this wrapper exists so tests can exercise the
+/// battlefield pass in isolation.
+#[cfg(test)]
 fn apply_battlefield_cost_modifiers(
     state: &GameState,
     caster: PlayerId,
@@ -4091,6 +4106,7 @@ fn apply_battlefield_cost_modifiers(
     apply_cost_modifications_in_order(mana_cost, &collected);
 }
 
+#[cfg(test)]
 pub(super) fn apply_battlefield_cost_modifiers_with_selected_targets(
     state: &GameState,
     caster: PlayerId,
