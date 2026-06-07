@@ -2605,6 +2605,13 @@ mod tests {
             "Bear".to_string(),
             Zone::Battlefield,
         );
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
         let ability = make_ability_with_source(2, vec![TargetRef::Object(target_id)], source_id);
         let mut events = Vec::new();
 
