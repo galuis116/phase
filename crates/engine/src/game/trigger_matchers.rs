@@ -2823,6 +2823,14 @@ pub(super) fn matching_becomes_blocked_events(
     state: &GameState,
 ) -> Vec<GameEvent> {
     if let GameEvent::BlockersDeclared { assignments } = event {
+        // CR 509.3d: the "becomes blocked by a creature [with quality]" form
+        // (carries a `valid_target` blocker filter) triggers once for each
+        // matching blocker. CR 509.3c: the bare "becomes blocked" form (no
+        // blocker qualifier, `valid_target: None`) triggers only once each combat
+        // for the attacker, regardless of how many creatures block it — so the
+        // matching assignments are collapsed to a single event per attacker.
+        let per_blocker = trigger.valid_target.is_some();
+        let mut emitted_attackers: Vec<ObjectId> = Vec::new();
         assignments
             .iter()
             .filter_map(|(blocker, attacker)| {
@@ -2831,13 +2839,26 @@ pub(super) fn matching_becomes_blocked_events(
                 } else {
                     *attacker == source_id
                 };
+                if !attacker_matches {
+                    return None;
+                }
                 let blocker_matches = match &trigger.valid_target {
                     Some(filter) => {
                         target_filter_matches_object(state, *blocker, filter, source_id)
                     }
                     None => true,
                 };
-                (attacker_matches && blocker_matches).then_some(GameEvent::BlockersDeclared {
+                if !blocker_matches {
+                    return None;
+                }
+                // CR 509.3c: only the first matching blocker fires the bare form.
+                if !per_blocker {
+                    if emitted_attackers.contains(attacker) {
+                        return None;
+                    }
+                    emitted_attackers.push(*attacker);
+                }
+                Some(GameEvent::BlockersDeclared {
                     assignments: vec![(*blocker, *attacker)],
                 })
             })
@@ -6712,6 +6733,62 @@ mod tests {
                     assignments: vec![(second_blocker, attacker)]
                 },
             ]
+        );
+    }
+
+    /// CR 509.3c: a bare "becomes blocked" trigger (no by-a-creature qualifier,
+    /// i.e. `valid_target: None` — Bushido CR 702.45a, Rampage CR 702.23a) triggers
+    /// only ONCE per combat for the attacker, even when multiple creatures block it.
+    /// The matcher must collapse a multi-blocker assignment to a single event;
+    /// firing once per blocker double-pumps Bushido (a double-blocked Bushido 2
+    /// would wrongly become 6/6 instead of 4/4) and over-counts Rampage.
+    #[test]
+    fn becomes_blocked_trigger_fires_once_for_bare_form_when_multi_blocked() {
+        let mut state = setup();
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bushido Samurai".to_string(),
+            Zone::Battlefield,
+        );
+        let first_blocker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "First Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        let second_blocker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Second Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [attacker, first_blocker, second_blocker] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        // Bare "becomes blocked": self-scoped, no blocker qualifier (valid_target None).
+        let trigger = make_trigger(TriggerMode::BecomesBlocked).valid_card(TargetFilter::SelfRef);
+        let event = GameEvent::BlockersDeclared {
+            assignments: vec![(first_blocker, attacker), (second_blocker, attacker)],
+        };
+
+        let matched = matching_becomes_blocked_events(&event, &trigger, attacker, &state);
+
+        assert_eq!(
+            matched,
+            vec![GameEvent::BlockersDeclared {
+                assignments: vec![(first_blocker, attacker)]
+            }],
+            "CR 509.3c: bare 'becomes blocked' fires once per combat, not once per blocker"
         );
     }
 
