@@ -7683,6 +7683,165 @@ fn is_devour_etb_replacement(replacement: &ReplacementDefinition, expected_n: u3
     *count == expected_count
 }
 
+/// CR 702.38a: Amplify N — "As this permanent enters, reveal any number of
+/// cards from your hand that share a creature type with it. This permanent
+/// enters with N +1/+1 counters on it for each card revealed this way. You
+/// can't reveal this card or any other cards that are entering the battlefield
+/// at the same time as this card."
+///
+/// CR 614.1c: an "as [this permanent] enters" clause is a replacement effect,
+/// so Amplify is synthesized as a `ReplacementEvent::Moved` replacement on
+/// `SelfRef` whose execute is a `PutCounter` of N +1/+1 counters per qualifying
+/// card — the same ETB-with-counters shape as `synthesize_bloodthirst`. CR
+/// 702.38b: because the counters are added by the enter replacement, they are
+/// present as the permanent enters (counting for ETB triggers and combat).
+///
+/// Count modeling (deterministic reveal-all): the rules let the controller
+/// reveal *any number* of qualifying cards, but in the engine revealing is
+/// strictly beneficial — each revealed card only adds counters, with no modeled
+/// cost to revealing — so optimal play always reveals every qualifying card.
+/// The count is therefore resolved deterministically as `N x (cards in your
+/// hand that share a creature type with this permanent)` via
+/// `QuantityRef::ObjectCount` over a `SharesQuality { CreatureType, reference:
+/// SelfRef }` hand filter — the same shared-creature-type comparison the engine
+/// already performs (cf. `conspire_tap_filter`'s shared-color filter). This
+/// produces the counter outcome of optimal play without a speculative
+/// interactive hand-reveal choice; a future interactive reveal (to model the
+/// rare choice to reveal fewer cards) is a contained follow-up. It is a
+/// documented approximation in the spirit of Suspend's "doesn't use the stack".
+///
+/// CR 702.38b: each Amplify instance functions independently and is cumulative;
+/// one replacement is emitted per `Keyword::Amplify(n)` instance, grouped by N.
+/// Per-N idempotency (`is_amplify_etb_replacement`) emits only the delta so
+/// re-running synthesis is a no-op.
+pub fn synthesize_amplify(face: &mut CardFace) {
+    let amplify_values: Vec<u32> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| match kw {
+            Keyword::Amplify(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    if amplify_values.is_empty() {
+        return;
+    }
+
+    for &n in &amplify_values {
+        let needed = amplify_values.iter().filter(|m| **m == n).count();
+        let existing = face
+            .replacements
+            .iter()
+            .filter(|r| is_amplify_etb_replacement(r, n))
+            .count();
+        if existing >= needed {
+            continue;
+        }
+
+        let put_counters = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: amplify_counter_quantity(n),
+                target: TargetFilter::SelfRef,
+            },
+        )
+        .description(format!(
+            "This permanent enters with {n} +1/+1 counter{} for each card in \
+             your hand that shares a creature type with it.",
+            if n == 1 { "" } else { "s" }
+        ));
+
+        let replacement = ReplacementDefinition {
+            event: ReplacementEvent::Moved,
+            execute: Some(Box::new(put_counters)),
+            valid_card: Some(TargetFilter::SelfRef),
+            description: Some(format!(
+                "CR 702.38a + CR 614.1c: Amplify {n} — as this creature enters, \
+                 reveal any number of cards from your hand that share a creature \
+                 type with it; it enters with {n} +1/+1 counter{} for each card \
+                 revealed this way.",
+                if n == 1 { "" } else { "s" }
+            )),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
+        };
+        face.replacements.push(replacement);
+    }
+}
+
+/// CR 702.38a: "cards from your hand that share a creature type with it" — cards
+/// in the controller's hand whose creature types intersect the entering
+/// permanent's. `FilterProp::Another` excludes this card itself from hand-entry
+/// paths; `SharesQuality`'s `reference` resolves `SelfRef` to the
+/// replacement source (the entering permanent), mirroring `conspire_tap_filter`.
+/// `TypedFilter::card()` (not `creature()`) so a non-creature card with a
+/// creature type (e.g. a Tribal instant) can qualify, exactly as the rule reads.
+fn amplify_revealable_filter() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::card()
+            .controller(ControllerRef::You)
+            .properties(vec![
+                FilterProp::InZone { zone: Zone::Hand },
+                FilterProp::Another,
+                FilterProp::SharesQuality {
+                    quality: crate::types::ability::SharedQuality::CreatureType,
+                    reference: Some(Box::new(TargetFilter::SelfRef)),
+                    relation: crate::types::ability::SharedQualityRelation::Shares,
+                },
+            ]),
+    )
+}
+
+/// CR 702.38a + CR 122.1: N +1/+1 counters for each qualifying revealed card.
+/// `QuantityRef::ObjectCount` counts the qualifying hand cards; for N > 1 it is
+/// scaled by `factor: n` ("N counters per card"). Mirrors the
+/// `bloodthirst_counter_quantity` / Devour quantity shape so the synthesizer and
+/// the idempotency predicate share one source of truth.
+fn amplify_counter_quantity(n: u32) -> QuantityExpr {
+    let object_count = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: amplify_revealable_filter(),
+        },
+    };
+    if n == 1 {
+        object_count
+    } else {
+        QuantityExpr::Multiply {
+            factor: n as i32,
+            inner: Box::new(object_count),
+        }
+    }
+}
+
+/// Idempotency-shape predicate for `synthesize_amplify`'s ETB replacement. True
+/// iff `replacement` is a `Moved` replacement on `SelfRef` whose execute is a
+/// `PutCounter` of `expected_n` P1P1 counters on `SelfRef` with the Amplify
+/// per-card quantity for `expected_n`.
+///
+/// `expected_n` is load-bearing: the `Multiply` factor (N > 1) / bare
+/// `ObjectCount` (N == 1) discriminates the count, so a card carrying both a
+/// printed enters-with-K replacement and `Keyword::Amplify(N != K)` does not
+/// dedupe.
+fn is_amplify_etb_replacement(replacement: &ReplacementDefinition, expected_n: u32) -> bool {
+    if !matches!(replacement.event, ReplacementEvent::Moved)
+        || !matches!(replacement.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return false;
+    }
+    let Some(execute) = replacement.execute.as_deref() else {
+        return false;
+    };
+    let Effect::PutCounter {
+        counter_type,
+        count,
+        target: TargetFilter::SelfRef,
+    } = &*execute.effect
+    else {
+        return false;
+    };
+    *counter_type == CounterType::Plus1Plus1 && *count == amplify_counter_quantity(expected_n)
+}
+
 /// CR 702.62a: Suspend N—{cost} synthesizes three abilities for every face
 /// carrying `Keyword::Suspend { count, cost }`:
 ///
@@ -8117,6 +8276,11 @@ pub fn synthesize_all(face: &mut CardFace) {
     // choice → PutCounter of N P1P1 counters per creature sacrificed. Each
     // instance functions independently (CR 113.2c).
     synthesize_devour(face);
+    // CR 702.38a + CR 614.1c: Amplify N — as-enters replacement adding N P1P1
+    // counters per card in hand sharing a creature type with the entering
+    // permanent (deterministic reveal-all of the strictly-beneficial reveal).
+    // Each instance functions independently (CR 702.38b).
+    synthesize_amplify(face);
     // CR 702.62a: Suspend — hand-activated alt-cost + upkeep counter-removal +
     // last-counter free-cast. Runs after Evoke to keep alt-cost synthesizers
     // grouped; idempotent so order against Cycling/Madness is irrelevant.
@@ -20026,6 +20190,183 @@ mod devour_synthesis_tests {
         let mut face = CardFace::default();
         synthesize_devour(&mut face);
         assert!(face.replacements.is_empty());
+    }
+
+    fn face_with_amplify(n: u32) -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Amplify(n));
+        face
+    }
+
+    /// CR 702.38a: Amplify 1 synthesizes one `Moved`/`SelfRef` replacement whose
+    /// execute is `PutCounter(P1P1, SelfRef)` with a bare `ObjectCount` quantity
+    /// over the controller's-hand shared-creature-type filter, and no condition.
+    #[test]
+    fn synthesize_amplify_1_adds_objectcount_etb_replacement() {
+        let mut face = face_with_amplify(1);
+        synthesize_amplify(&mut face);
+
+        let replacement = face
+            .replacements
+            .iter()
+            .find(|r| is_amplify_etb_replacement(r, 1))
+            .expect("amplify should synthesize an ETB-with-counters replacement");
+
+        assert!(matches!(replacement.event, ReplacementEvent::Moved));
+        assert!(matches!(
+            replacement.valid_card,
+            Some(TargetFilter::SelfRef)
+        ));
+        assert_eq!(replacement.condition, None);
+
+        let execute = replacement
+            .execute
+            .as_deref()
+            .expect("ETB replacement requires execute body");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("amplify ETB execute body should be Effect::PutCounter");
+        };
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
+        assert!(matches!(target, TargetFilter::SelfRef));
+
+        // N == 1: bare ObjectCount over the shared-creature-type hand filter.
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = count
+        else {
+            panic!("amplify 1 count should be a bare ObjectCount ref");
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("amplify filter should be a TypedFilter");
+        };
+        assert!(
+            typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Hand })),
+            "filter must be restricted to the controller's hand"
+        );
+        assert!(
+            typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Another)),
+            "filter must exclude the entering Amplify card itself"
+        );
+        assert!(
+            typed.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::SharesQuality {
+                    quality: crate::types::ability::SharedQuality::CreatureType,
+                    reference: Some(_),
+                    relation: crate::types::ability::SharedQualityRelation::Shares,
+                }
+            )),
+            "filter must require sharing a creature type with the source"
+        );
+    }
+
+    /// CR 702.38a: Amplify N (> 1) scales the per-card count by `factor: n`
+    /// ("N +1/+1 counters for each card revealed").
+    #[test]
+    fn synthesize_amplify_n_scales_count_by_factor() {
+        let mut face = face_with_amplify(3);
+        synthesize_amplify(&mut face);
+
+        let replacement = face
+            .replacements
+            .iter()
+            .find(|r| is_amplify_etb_replacement(r, 3))
+            .expect("amplify 3 should synthesize a replacement");
+        let execute = replacement.execute.as_deref().expect("execute body");
+        let Effect::PutCounter { count, .. } = &*execute.effect else {
+            panic!("expected PutCounter");
+        };
+        let QuantityExpr::Multiply { factor, inner } = count else {
+            panic!("amplify 3 count should be a Multiply");
+        };
+        assert_eq!(*factor, 3);
+        assert!(matches!(
+            **inner,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn synthesize_amplify_is_idempotent() {
+        let mut face = face_with_amplify(2);
+        synthesize_amplify(&mut face);
+        synthesize_amplify(&mut face);
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| is_amplify_etb_replacement(r, 2))
+                .count(),
+            1,
+            "ETB replacement should be deduped"
+        );
+    }
+
+    #[test]
+    fn synthesize_amplify_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_amplify(&mut face);
+        assert!(face.replacements.is_empty());
+    }
+
+    /// CR 702.38b: each Amplify instance is cumulative and functions
+    /// independently — one replacement per instance, discriminated by N.
+    #[test]
+    fn synthesize_amplify_emits_one_replacement_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Amplify(1));
+        face.keywords.push(Keyword::Amplify(2));
+        synthesize_amplify(&mut face);
+
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| is_amplify_etb_replacement(r, 1))
+                .count(),
+            1,
+            "exactly one Amplify(1) ETB replacement"
+        );
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|r| is_amplify_etb_replacement(r, 2))
+                .count(),
+            1,
+            "exactly one Amplify(2) ETB replacement"
+        );
+    }
+
+    /// Per-N predicate guard: an Amplify(1) replacement must not satisfy the
+    /// Amplify(2) idempotency check (the `Multiply` factor discriminates count),
+    /// so a hypothetical card with both instances receives both replacements.
+    #[test]
+    fn is_amplify_etb_replacement_distinguishes_n() {
+        let mut face = face_with_amplify(1);
+        synthesize_amplify(&mut face);
+        assert!(face
+            .replacements
+            .iter()
+            .any(|r| is_amplify_etb_replacement(r, 1)));
+        assert!(
+            !face
+                .replacements
+                .iter()
+                .any(|r| is_amplify_etb_replacement(r, 2)),
+            "Amplify(1) replacement must not match the Amplify(2) predicate"
+        );
     }
 }
 
