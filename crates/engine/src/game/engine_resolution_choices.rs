@@ -1053,6 +1053,7 @@ pub(super) fn handle_resolution_choice(
                 selectable_cards,
                 kept_destination,
                 rest_destination,
+                enter_tapped,
                 ..
             },
             GameAction::SelectCards { cards: kept },
@@ -1119,6 +1120,11 @@ pub(super) fn handle_resolution_choice(
             }
             for &obj_id in &kept {
                 zones::move_to_zone(state, obj_id, kept_zone, events);
+                if enter_tapped && kept_zone == Zone::Battlefield {
+                    if let Some(obj) = state.objects.get_mut(&obj_id) {
+                        obj.tapped = true;
+                    }
+                }
             }
             // CR 701.33 + CR 701.18: Publish the kept (revealed) cards as a
             // tracked set so downstream sub_abilities can route them by type
@@ -2004,6 +2010,27 @@ pub(super) fn handle_resolution_choice(
                         zone
                     )));
                 }
+            }
+
+            // CR 614.13a (snapshot lifetime): a *single-pick* `ChangeZone` devour
+            // entry paused on its as-enters sacrifice WITHOUT stashing a
+            // `pending_change_zone_iteration` (only the mass/targeted loop stashes
+            // one). So when this sacrifice resolves and no iteration is pending,
+            // the single-pick entry's event is over and the pre-entry Devour
+            // snapshot's lifetime ends here — mirroring the synchronous Done-branch
+            // `take()` in `change_zone::resolve`. The snapshot only gated the
+            // (already-built, already-chosen) eligible pool, so clearing it now
+            // cannot unconstrain this devourer's own pool. When an iteration IS
+            // pending (mass/targeted co-entry, or a nested move during a mass
+            // pause), the snapshot is still needed by the remaining members and is
+            // cleared by `drain_pending_change_zone_iteration` instead — so this
+            // never over-clears a live mass snapshot. No-op when no Devour is in
+            // flight (`snapshot == None`).
+            if matches!(effect_kind, EffectKind::Sacrifice)
+                && state.devour_eligible_snapshot.is_some()
+                && state.pending_change_zone_iteration.is_none()
+            {
+                let _ = state.devour_eligible_snapshot.take();
             }
 
             if chosen.is_empty() {

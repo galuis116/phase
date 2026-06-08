@@ -171,6 +171,20 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
         obj.class_level = Some(1);
     }
 
+    // CR 306.5c + CR 310.4c: Rehydration must not clobber live counter-tracked
+    // loyalty/defense. `rehydrate_game_from_card_db` re-applies printed faces
+    // mid-game (multiplayer sync); the counter map is authoritative on the
+    // battlefield, while off-battlefield loyalty/defense intentionally remains
+    // the printed value per CR 306.5a / CR 310.4a.
+    if was_initialized && obj.zone == Zone::Battlefield {
+        if let Some(&loyalty_counters) = obj.counters.get(&CounterType::Loyalty) {
+            obj.loyalty = Some(loyalty_counters);
+        }
+        if let Some(&defense_counters) = obj.counters.get(&CounterType::Defense) {
+            obj.defense = Some(defense_counters);
+        }
+    }
+
     // CR 719.1: Initialize Case solve state from the card face.
     if card_face.card_type.subtypes.iter().any(|s| s == "Case") {
         if let Some(ref sc) = card_face.solve_condition {
@@ -1917,6 +1931,114 @@ mod tests {
             state.objects.get(&object_id).unwrap().class_level,
             Some(3),
             "CR 716.2b: rehydration must preserve the advanced level"
+        );
+    }
+
+    /// CR 306.5c: Rehydration must preserve live loyalty counters on battlefield
+    /// planeswalkers (Daretti, Scrap Savant regression).
+    #[test]
+    fn rehydrate_preserves_planeswalker_loyalty_counters() {
+        let mut face = test_face(
+            "Daretti, Scrap Savant",
+            "daretti-scrap-savant-oracle-id",
+            vec![CoreType::Planeswalker],
+            ManaCost::default(),
+        );
+        face.loyalty = Some("3".to_string());
+        let export = serde_json::json!({
+            "daretti, scrap savant": serde_json::to_value(&face).unwrap(),
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&export).expect("export db should parse");
+
+        let mut state = GameState::new_two_player(42);
+        let pw_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Daretti, Scrap Savant".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&pw_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.base_loyalty = Some(3);
+            obj.loyalty = Some(1);
+            obj.counters.insert(CounterType::Loyalty, 1);
+            obj.base_characteristics_initialized = true;
+            obj.printed_ref = printed_ref_from_face(&face);
+            obj.base_printed_ref = obj.printed_ref.clone();
+        }
+
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        assert_eq!(
+            state.objects.get(&pw_id).unwrap().loyalty,
+            Some(1),
+            "rehydration must not reset loyalty to printed base when counters differ"
+        );
+        assert_eq!(
+            state
+                .objects
+                .get(&pw_id)
+                .unwrap()
+                .counters
+                .get(&CounterType::Loyalty),
+            Some(&1)
+        );
+    }
+
+    /// CR 310.4c: Rehydration must preserve live defense counters on battlefield
+    /// battles, matching the planeswalker loyalty path.
+    #[test]
+    fn rehydrate_preserves_battle_defense_counters() {
+        let mut face = test_face(
+            "Invasion of Testoria",
+            "invasion-of-testoria-oracle-id",
+            vec![CoreType::Battle],
+            ManaCost::default(),
+        );
+        face.defense = Some("5".to_string());
+        let export = serde_json::json!({
+            "invasion of testoria": serde_json::to_value(&face).unwrap(),
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&export).expect("export db should parse");
+
+        let mut state = GameState::new_two_player(42);
+        let battle_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Invasion of Testoria".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&battle_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Battle);
+            obj.base_defense = Some(5);
+            obj.defense = Some(2);
+            obj.counters.insert(CounterType::Defense, 2);
+            obj.base_characteristics_initialized = true;
+            obj.printed_ref = printed_ref_from_face(&face);
+            obj.base_printed_ref = obj.printed_ref.clone();
+        }
+
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        assert_eq!(
+            state.objects.get(&battle_id).unwrap().defense,
+            Some(2),
+            "rehydration must not reset defense to printed base when counters differ"
+        );
+        assert_eq!(
+            state
+                .objects
+                .get(&battle_id)
+                .unwrap()
+                .counters
+                .get(&CounterType::Defense),
+            Some(&2)
         );
     }
 
