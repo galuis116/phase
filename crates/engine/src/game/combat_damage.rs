@@ -296,13 +296,11 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
                 .get(&attacker_info.object_id)
                 .into_iter()
                 .flatten()
-                .any(|&bid| {
-                    crate::game::combat::has_banding_damage_assignment_relation(
-                        state,
-                        bid,
-                        attacker_info.object_id,
-                    )
-                });
+                .any(|&bid| crate::game::combat::has_banding(state, bid))
+                || crate::game::combat::has_bands_with_other_damage_assignment_group(
+                    state,
+                    &blocker_ids,
+                );
             if blocked_by_banding {
                 controller = attacker_info.defending_player;
             }
@@ -421,15 +419,13 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
         // how the blocking creature's damage is divided among the attackers it's
         // blocking. This only matters when the blocker is blocking 2+ attackers.
         let active_player_divides = attacker_ids.len() >= 2
-            && attacker_ids.iter().any(|&aid| {
-                crate::game::combat::has_banding(state, aid)
-                    || attacker_ids.iter().any(|&other| {
-                        other != aid
-                            && crate::game::combat::has_banding_damage_assignment_relation(
-                                state, aid, other,
-                            )
-                    })
-            });
+            && (attacker_ids
+                .iter()
+                .any(|&aid| crate::game::combat::has_banding(state, aid))
+                || crate::game::combat::has_bands_with_other_damage_assignment_group(
+                    state,
+                    attacker_ids,
+                ));
 
         if active_player_divides {
             return Some(WaitingFor::AssignBlockerDamage {
@@ -1117,10 +1113,23 @@ mod tests {
         state.combat = Some(combat);
     }
 
+    fn add_wolf_subtype(state: &mut GameState, id: ObjectId) {
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Wolf".to_string());
+    }
+
     fn grant_bands_with_other_wolves(state: &mut GameState, id: ObjectId) {
-        let obj = state.objects.get_mut(&id).unwrap();
-        obj.card_types.subtypes.push("Wolf".to_string());
-        obj.keywords
+        add_wolf_subtype(state, id);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .keywords
             .push(Keyword::BandsWithOther("Wolf".to_string()));
     }
 
@@ -1705,11 +1714,11 @@ mod tests {
     #[test]
     fn bands_with_other_blocker_reroutes_attacker_damage_assignment() {
         let mut state = setup();
-        let attacker = create_creature(&mut state, PlayerId(0), "Wolf Attacker", 5, 5);
+        let attacker = create_creature(&mut state, PlayerId(0), "Attacker", 5, 5);
         let blocker1 = create_creature(&mut state, PlayerId(1), "Wolf Blocker", 2, 2);
-        let blocker2 = create_creature(&mut state, PlayerId(1), "Bear Blocker", 2, 2);
-        grant_bands_with_other_wolves(&mut state, attacker);
+        let blocker2 = create_creature(&mut state, PlayerId(1), "Plain Wolf Blocker", 2, 2);
         grant_bands_with_other_wolves(&mut state, blocker1);
+        add_wolf_subtype(&mut state, blocker2);
         setup_combat(
             &mut state,
             vec![attacker],
@@ -1737,7 +1746,7 @@ mod tests {
         let attacker2 = create_creature(&mut state, PlayerId(0), "Wolf B", 2, 2);
         let blocker = create_creature(&mut state, PlayerId(1), "Guard", 3, 3);
         grant_bands_with_other_wolves(&mut state, attacker1);
-        grant_bands_with_other_wolves(&mut state, attacker2);
+        add_wolf_subtype(&mut state, attacker2);
         setup_combat(
             &mut state,
             vec![attacker1, attacker2],

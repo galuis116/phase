@@ -1610,6 +1610,7 @@ impl fmt::Display for Keyword {
             Keyword::Fear => write!(f, "Fear"),
             Keyword::Horsemanship => write!(f, "Horsemanship"),
             Keyword::Infect => write!(f, "Infect"),
+            Keyword::BandsWithOther(quality) => write!(f, "Bands with other {quality}"),
             // Debug-fallback for variants that don't have an explicit
             // user-facing label yet. Unambiguous (no two `Keyword`
             // variants share Debug output) but not necessarily pretty —
@@ -2892,6 +2893,14 @@ mod tests {
         assert_eq!(
             Keyword::Landwalk("Artifact".to_string()).to_string(),
             "Artifact Landwalk"
+        );
+    }
+
+    #[test]
+    fn display_bands_with_other_uses_oracle_spelling() {
+        assert_eq!(
+            Keyword::BandsWithOther("Wolf".to_string()).to_string(),
+            "Bands with other Wolf"
         );
     }
 

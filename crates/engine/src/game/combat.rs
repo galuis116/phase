@@ -1688,43 +1688,49 @@ fn object_matches_bands_with_other_quality(
         .any(|subtype| subtype.eq_ignore_ascii_case(quality))
 }
 
-fn shared_bands_with_other_quality(state: &GameState, a: ObjectId, b: ObjectId) -> Option<&str> {
-    bands_with_other_qualities(state, a)
+fn has_bands_with_other_quality(state: &GameState, object_id: ObjectId, quality: &str) -> bool {
+    bands_with_other_qualities(state, object_id)
         .into_iter()
-        .find(|quality| {
-            object_matches_bands_with_other_quality(state, a, quality)
-                && object_matches_bands_with_other_quality(state, b, quality)
-                && bands_with_other_qualities(state, b)
-                    .into_iter()
-                    .any(|other| other.eq_ignore_ascii_case(quality))
-        })
+        .any(|other| other.eq_ignore_ascii_case(quality))
 }
 
 /// CR 702.22j/k: Damage-assignment control also applies to "bands with other"
-/// when the relevant creatures share the keyword's quality.
-pub fn has_banding_damage_assignment_relation(
+/// when the relevant blocker/attacker set contains a qualifying keyword-holder
+/// and another creature of the same quality.
+pub fn has_bands_with_other_damage_assignment_group(
     state: &GameState,
-    source: ObjectId,
-    paired: ObjectId,
+    creatures: &[ObjectId],
 ) -> bool {
-    has_banding(state, source) || shared_bands_with_other_quality(state, source, paired).is_some()
+    creatures.iter().any(|&holder| {
+        bands_with_other_qualities(state, holder)
+            .into_iter()
+            .any(|quality| {
+                object_matches_bands_with_other_quality(state, holder, quality)
+                    && creatures.iter().any(|&other| {
+                        other != holder
+                            && object_matches_bands_with_other_quality(state, other, quality)
+                    })
+            })
+    })
 }
 
 fn validate_bands_with_other_declaration(
     state: &GameState,
     members: &[ObjectId],
 ) -> Result<(), String> {
-    let Some(&first) = members.first() else {
+    if members.is_empty() {
         return Err("empty bands-with-other declaration".to_string());
-    };
-    for quality in bands_with_other_qualities(state, first) {
-        if members.iter().all(|&member| {
-            object_matches_bands_with_other_quality(state, member, quality)
-                && bands_with_other_qualities(state, member)
-                    .into_iter()
-                    .any(|other| other.eq_ignore_ascii_case(quality))
-        }) {
-            return Ok(());
+    }
+    for &holder in members {
+        for quality in bands_with_other_qualities(state, holder) {
+            if object_matches_bands_with_other_quality(state, holder, quality)
+                && has_bands_with_other_quality(state, holder, quality)
+                && members
+                    .iter()
+                    .all(|&member| object_matches_bands_with_other_quality(state, member, quality))
+            {
+                return Ok(());
+            }
         }
     }
     Err("band must satisfy ordinary banding or a shared bands-with-other quality".to_string())
@@ -3571,10 +3577,23 @@ mod tests {
         assert_eq!(combat.attackers[0].band_id, Some(1));
     }
 
+    fn add_wolf_subtype(state: &mut GameState, id: ObjectId) {
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Wolf".to_string());
+    }
+
     fn grant_bands_with_other_wolves(state: &mut GameState, id: ObjectId) {
-        let obj = state.objects.get_mut(&id).unwrap();
-        obj.card_types.subtypes.push("Wolf".to_string());
-        obj.keywords
+        add_wolf_subtype(state, id);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .keywords
             .push(Keyword::BandsWithOther("Wolf".to_string()));
     }
 
@@ -3584,7 +3603,7 @@ mod tests {
         let wolf_a = create_creature(&mut state, PlayerId(0), "Wolf A", 2, 2);
         let wolf_b = create_creature(&mut state, PlayerId(0), "Wolf B", 2, 2);
         grant_bands_with_other_wolves(&mut state, wolf_a);
-        grant_bands_with_other_wolves(&mut state, wolf_b);
+        add_wolf_subtype(&mut state, wolf_b);
 
         let target = AttackTarget::Player(PlayerId(1));
         declare_attackers_with_bands(
