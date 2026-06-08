@@ -2674,9 +2674,9 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         for &obj_id in &state.battlefield {
             if let Some(obj) = state.objects.get(&obj_id) {
                 if obj.controller == player {
-                    for (i, ability_def) in obj.abilities.iter().enumerate() {
+                    for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
                         if ability_def.kind == crate::types::ability::AbilityKind::Activated
-                            && !crate::game::mana_abilities::is_mana_ability(ability_def)
+                            && !crate::game::mana_abilities::is_mana_ability(&ability_def)
                             && casting::can_activate_ability_now(state, player, obj_id, i)
                         {
                             actions.push(candidate(
@@ -2748,10 +2748,10 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         for &obj_id in &state.players[player.0 as usize].hand {
             if let Some(obj) = state.objects.get(&obj_id) {
                 if obj.controller == player {
-                    for (i, ability_def) in obj.abilities.iter().enumerate() {
+                    for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
                         if ability_def.kind == crate::types::ability::AbilityKind::Activated
                             && ability_def.activation_zone == Some(crate::types::zones::Zone::Hand)
-                            && !crate::game::mana_abilities::is_mana_ability(ability_def)
+                            && !crate::game::mana_abilities::is_mana_ability(&ability_def)
                             && casting::can_activate_ability_now(state, player, obj_id, i)
                         {
                             actions.push(candidate(
@@ -2780,11 +2780,11 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                 // doesn't have a controller) can activate its activated
                 // ability." Restrict candidates to the acting player.
                 if obj.controller == player {
-                    for (i, ability_def) in obj.abilities.iter().enumerate() {
+                    for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
                         if ability_def.kind == crate::types::ability::AbilityKind::Activated
                             && ability_def.activation_zone
                                 == Some(crate::types::zones::Zone::Graveyard)
-                            && !crate::game::mana_abilities::is_mana_ability(ability_def)
+                            && !crate::game::mana_abilities::is_mana_ability(&ability_def)
                             && casting::can_activate_ability_now(state, player, obj_id, i)
                         {
                             actions.push(candidate(

@@ -49,6 +49,62 @@ use super::targeting;
 
 const FORETELL_SPECIAL_ACTION_COST: u32 = 2;
 
+fn runtime_granted_activated_abilities(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Vec<AbilityDefinition> {
+    let Some(obj) = state.objects.get(&source_id) else {
+        return Vec::new();
+    };
+    if obj.zone != Zone::Hand {
+        return Vec::new();
+    }
+
+    crate::game::off_zone_characteristics::effective_off_zone_keywords(state, source_id)
+        .into_iter()
+        .filter(|keyword| {
+            matches!(keyword, Keyword::Cycling(_) | Keyword::Typecycling { .. })
+                && !obj.base_keywords.iter().any(|printed| printed == keyword)
+        })
+        .filter_map(|keyword| crate::database::synthesis::cycling_ability_for_keyword(&keyword))
+        .collect()
+}
+
+pub fn activated_ability_definitions(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Vec<(usize, AbilityDefinition)> {
+    let Some(obj) = state.objects.get(&source_id) else {
+        return Vec::new();
+    };
+    let printed_len = obj.abilities.len();
+    let mut abilities: Vec<(usize, AbilityDefinition)> =
+        obj.abilities.iter().cloned().enumerate().collect();
+    abilities.extend(
+        runtime_granted_activated_abilities(state, source_id)
+            .into_iter()
+            .enumerate()
+            .map(|(offset, ability)| (printed_len + offset, ability)),
+    );
+    abilities
+}
+
+fn activation_ability_definition(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> Option<AbilityDefinition> {
+    let obj = state.objects.get(&source_id)?;
+    if let Some(ability) = obj.abilities.get(ability_index) {
+        return Some(ability.clone());
+    }
+
+    let offset = ability_index.checked_sub(obj.abilities.len())?;
+    runtime_granted_activated_abilities(state, source_id)
+        .into_iter()
+        .nth(offset)
+}
+
 pub(crate) fn variable_speed_payment_range(cost: &AbilityCost, max_speed: u8) -> Option<(u8, u8)> {
     match cost {
         AbilityCost::PaySpeed {
@@ -10948,19 +11004,22 @@ pub fn can_activate_ability_now(
     let Some(obj) = state.objects.get(&source_id) else {
         return false;
     };
-    if obj.controller != player || ability_index >= obj.abilities.len() {
+    if obj.controller != player {
         return false;
     }
+    let Some(mut ability_def) = activation_ability_definition(state, source_id, ability_index)
+    else {
+        return false;
+    };
 
     // CR 702.61a + CR 702.61b: While a spell with split second is on the stack,
     // players can't activate abilities that aren't mana abilities.
     if super::keywords::stack_has_split_second(state)
-        && !super::mana_abilities::is_mana_ability(&obj.abilities[ability_index])
+        && !super::mana_abilities::is_mana_ability(&ability_def)
     {
         return false;
     }
 
-    let mut ability_def = obj.abilities[ability_index].clone();
     // CR 602.1: Check activation zone — default to battlefield.
     let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
     if obj.zone != required_zone {
@@ -11180,13 +11239,12 @@ pub fn handle_activate_ability(
     if obj.controller != player {
         return Err(EngineError::NotYourPriority);
     }
-    if ability_index >= obj.abilities.len() {
+    let Some(mut ability_def) = activation_ability_definition(state, source_id, ability_index)
+    else {
         return Err(EngineError::InvalidAction(
             "Invalid ability index".to_string(),
         ));
-    }
-
-    let mut ability_def = obj.abilities[ability_index].clone();
+    };
     // CR 602.1: Check activation zone — default to battlefield.
     let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
     if obj.zone != required_zone {

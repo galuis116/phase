@@ -1600,128 +1600,129 @@ pub fn compute_oathbreaker(mtgjson: &super::mtgjson::AtomicCard, face: &CardFace
 /// Typecycling: "[Cost], Discard this card: Search library for a [type] card,
 ///   reveal it, put it into your hand. Then shuffle."
 ///
-/// DEFERRED RUNTIME GAP (CR 702.29e + CR 113.6b) — Homing Sliver class:
+/// RUNTIME-GRANTED PATH (CR 702.29e + CR 113.6b) — Homing Sliver class:
 /// This build-time synthesis reads only the face's INTRINSIC printed keywords.
 /// A Typecycling/Cycling keyword GRANTED at runtime by a continuous effect
 /// (Homing Sliver: "Each Sliver card in each player's hand has slivercycling
 /// {3}.") lands on the recipient's runtime keyword set (CR 113.6b zone-of-
-/// function + `TargetFilter::extract_in_zone` resolves it in the Hand zone), but
-/// is NOT synthesized into a runtime-activatable ability — synthesis never runs
-/// over runtime-granted keywords. Closing this needs a general runtime
-/// granted-keyword -> activatable-ability primitive (not card-specific), which
-/// is deferred. The parser/grant half is correct and covered by
-/// `static_homing_sliver_grants_typecycling_to_slivers_in_hand` in
-/// `parser/oracle_static/tests.rs`.
+/// function + `TargetFilter::extract_in_zone` resolves it in the Hand zone).
+/// Those grants are converted on demand by `game::casting` through
+/// `cycling_ability_for_keyword`, keeping printed and runtime-granted cycling
+/// ability shapes identical.
 pub fn synthesize_cycling(face: &mut CardFace) {
     let cycling_abilities: Vec<AbilityDefinition> = face
         .keywords
         .iter()
-        .filter_map(|kw| match kw {
-            // CR 702.29a: Basic cycling — discard self, draw a card.
-            // Cost may be mana ("cycling {2}") or non-mana ("cycling—pay 2 life").
-            Keyword::Cycling(cycling_cost) => {
-                // CR 702.29a: "Discard THIS card" — self_ref = true.
-                let discard_self = AbilityCost::Discard {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    filter: None,
-                    random: false,
-                    self_ref: true,
-                };
-                let composite_cost = match cycling_cost {
-                    CyclingCost::Mana(cost) => AbilityCost::Composite {
-                        costs: vec![AbilityCost::Mana { cost: cost.clone() }, discard_self],
-                    },
-                    CyclingCost::NonMana(ac) => match ac {
-                        // Flatten an already-Composite non-mana cost so the discard joins
-                        // the existing sub-costs instead of nesting.
-                        AbilityCost::Composite { costs } => {
-                            let mut flat = costs.clone();
-                            flat.push(discard_self);
-                            AbilityCost::Composite { costs: flat }
-                        }
-                        other => AbilityCost::Composite {
-                            costs: vec![other.clone(), discard_self],
-                        },
-                    },
-                };
-                let mut def = AbilityDefinition::new(
-                    AbilityKind::Activated,
-                    Effect::Draw {
-                        count: QuantityExpr::Fixed { value: 1 },
-                        target: TargetFilter::Controller,
-                    },
-                )
-                .cost(composite_cost);
-                def.activation_zone = Some(Zone::Hand);
-                Some(def)
-            }
-            // CR 702.29e: Typecycling — discard self, search library for [type] card.
-            Keyword::Typecycling { cost, subtype } => {
-                let composite_cost = AbilityCost::Composite {
-                    costs: vec![
-                        AbilityCost::Mana { cost: cost.clone() },
-                        AbilityCost::Discard {
-                            count: QuantityExpr::Fixed { value: 1 },
-                            filter: None,
-                            random: false,
-                            self_ref: true,
-                        },
-                    ],
-                };
-                let filter = typecycling_subtype_to_filter(subtype);
-                let shuffle_def = AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::Shuffle {
-                        target: TargetFilter::Controller,
-                    },
-                );
-                let mut put_in_hand_def = AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::ChangeZone {
-                        origin: Some(Zone::Library),
-                        destination: Zone::Hand,
-                        target: TargetFilter::Any,
-                        owner_library: false,
-                        enter_transformed: false,
-                        enters_under: None,
-                        enter_tapped: false,
-                        enters_attacking: false,
-                        up_to: false,
-                        enter_with_counters: vec![],
-                        face_down_profile: None,
-                    },
-                );
-                put_in_hand_def.sub_ability = Some(Box::new(shuffle_def));
-                let mut def = AbilityDefinition::new(
-                    AbilityKind::Activated,
-                    Effect::SearchLibrary {
-                        filter,
-                        count: QuantityExpr::Fixed { value: 1 },
-                        reveal: true,
-                        target_player: None,
-                        selection_constraint: SearchSelectionConstraint::None,
-                        split: None,
-                        source_zones: vec![crate::types::zones::Zone::Library],
-                    },
-                )
-                .cost(composite_cost);
-                def.activation_zone = Some(Zone::Hand);
-                def.sub_ability = Some(Box::new(put_in_hand_def));
-                Some(def)
-            }
-            _ => None,
-        })
+        .filter_map(cycling_ability_for_keyword)
         .collect();
+    face.abilities.extend(cycling_abilities);
+}
+
+/// CR 702.29a/e: Build the activated ability represented by a Cycling or
+/// Typecycling keyword. Used both by printed-card synthesis and by runtime
+/// grants such as Homing Sliver.
+pub fn cycling_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefinition> {
+    let mut def = match keyword {
+        // CR 702.29a: Basic cycling — discard self, draw a card.
+        // Cost may be mana ("cycling {2}") or non-mana ("cycling—pay 2 life").
+        Keyword::Cycling(cycling_cost) => {
+            // CR 702.29a: "Discard THIS card" — self_ref = true.
+            let discard_self = AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                random: false,
+                self_ref: true,
+            };
+            let composite_cost = match cycling_cost {
+                CyclingCost::Mana(cost) => AbilityCost::Composite {
+                    costs: vec![AbilityCost::Mana { cost: cost.clone() }, discard_self],
+                },
+                CyclingCost::NonMana(ac) => match ac {
+                    // Flatten an already-Composite non-mana cost so the discard joins
+                    // the existing sub-costs instead of nesting.
+                    AbilityCost::Composite { costs } => {
+                        let mut flat = costs.clone();
+                        flat.push(discard_self);
+                        AbilityCost::Composite { costs: flat }
+                    }
+                    other => AbilityCost::Composite {
+                        costs: vec![other.clone(), discard_self],
+                    },
+                },
+            };
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .cost(composite_cost);
+            def.activation_zone = Some(Zone::Hand);
+            def
+        }
+        // CR 702.29e: Typecycling — discard self, search library for [type] card.
+        Keyword::Typecycling { cost, subtype } => {
+            let composite_cost = AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana { cost: cost.clone() },
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: None,
+                        random: false,
+                        self_ref: true,
+                    },
+                ],
+            };
+            let filter = typecycling_subtype_to_filter(subtype);
+            let shuffle_def = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Shuffle {
+                    target: TargetFilter::Controller,
+                },
+            );
+            let mut put_in_hand_def = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Library),
+                    destination: Zone::Hand,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                },
+            );
+            put_in_hand_def.sub_ability = Some(Box::new(shuffle_def));
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::SearchLibrary {
+                    filter,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    reveal: true,
+                    target_player: None,
+                    selection_constraint: SearchSelectionConstraint::None,
+                    split: None,
+                    source_zones: vec![crate::types::zones::Zone::Library],
+                },
+            )
+            .cost(composite_cost);
+            def.activation_zone = Some(Zone::Hand);
+            def.sub_ability = Some(Box::new(put_in_hand_def));
+            def
+        }
+        _ => return None,
+    };
 
     // CR 702.29a + CR 702.29c + CR 702.29e: Tag every synthesized cycling /
     // typecycling ability with `AbilityTag::Cycling` so that activating it emits
     // a `GameEvent::Cycled` ("When you cycle this card" triggers, CR 702.29c).
-    let mut cycling_abilities = cycling_abilities;
-    for def in &mut cycling_abilities {
-        def.ability_tag = Some(AbilityTag::Cycling);
-    }
-
-    face.abilities.extend(cycling_abilities);
+    def.ability_tag = Some(AbilityTag::Cycling);
+    Some(def)
 }
 
 /// CR 702.53a: Synthesize Transmute into an activated ability that functions
