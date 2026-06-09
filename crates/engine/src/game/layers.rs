@@ -6649,6 +6649,83 @@ mod tests {
         );
     }
 
+    /// CR 702.151b + CR 613.1d: A reconfigure Equipment is a creature while
+    /// unattached, stops being a creature while attached to a creature, and
+    /// becomes a creature again when unattached. Drives the synthesized
+    /// `synthesize_reconfigure` Layer-4 RemoveType static through
+    /// `evaluate_layers`. This is the discriminating test for the type-removal
+    /// fix: it flips to a hard failure if Step 2 of the fix is reverted (the
+    /// Equipment would remain a creature while attached).
+    #[test]
+    fn reconfigure_equipment_loses_creature_type_while_attached() {
+        use crate::database::synthesis::synthesize_reconfigure;
+        use crate::game::effects::attach::{attach_to, unattach};
+        use crate::types::card::CardFace;
+        use crate::types::keywords::Keyword;
+
+        // Synthesize the reconfigure statics from the typed keyword (real path).
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Reconfigure(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        }));
+        synthesize_reconfigure(&mut face);
+
+        let mut state = setup();
+        // The reconfigure Equipment is itself an Artifact Creature (Equipment).
+        let equip = make_creature(&mut state, "Reconfigure Equipment", 0, 0, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&equip).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            // Apply the synthesized continuous static onto the base set so the
+            // Step-1 layer reset preserves it across passes.
+            obj.base_static_definitions = Arc::new(face.static_abilities.clone());
+        }
+        let host = make_creature(&mut state, "Host Creature", 2, 2, PlayerId(0));
+
+        // Unattached: still a creature.
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects[&equip]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "unattached reconfigure Equipment is a creature"
+        );
+
+        // Attached to a creature: stops being a creature (CR 702.151b).
+        attach_to(&mut state, equip, host);
+        evaluate_layers(&mut state);
+        assert!(
+            !state.objects[&equip]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "CR 702.151b: attached reconfigure Equipment stops being a creature"
+        );
+        // Still an Artifact Equipment — only the Creature type is removed.
+        assert!(
+            state.objects[&equip]
+                .card_types
+                .core_types
+                .contains(&CoreType::Artifact),
+            "only the Creature type is removed (Layer 4 RemoveType)"
+        );
+
+        // Unattached again: a creature once more.
+        unattach(&mut state, equip);
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects[&equip]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "unattaching restores the creature type"
+        );
+    }
+
     #[test]
     fn test_type_change_reverts_to_base_when_source_leaves() {
         let mut state = setup();

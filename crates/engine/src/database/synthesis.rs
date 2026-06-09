@@ -560,8 +560,13 @@ pub fn synthesize_reconfigure(face: &mut CardFace) {
                 AbilityKind::Activated,
                 Effect::Attach {
                     attachment: TargetFilter::SelfRef,
+                    // CR 702.151a: "another target creature you control" —
+                    // FilterProp::Another excludes the source (a reconfigure
+                    // Equipment is itself a creature while unattached).
                     target: TargetFilter::Typed(
-                        TypedFilter::creature().controller(ControllerRef::You),
+                        TypedFilter::creature()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::Another]),
                     ),
                 },
             )
@@ -588,6 +593,41 @@ pub fn synthesize_reconfigure(face: &mut CardFace) {
         );
     }
     face.abilities.extend(abilities);
+
+    // CR 702.151b + CR 613.1d: while a reconfigure Equipment is attached to a
+    // creature, it stops being a creature (Layer 4 type removal). Synthesized as a
+    // self-scoped continuous static gated on `SourceAttachedToCreature`, mirroring
+    // `synthesize_impending`. Gated on keyword presence (the `for kw` loop above has
+    // no early return) and pushed once via an `already_has_static` idempotency guard.
+    if face
+        .keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Reconfigure(_)))
+    {
+        let static_condition = StaticCondition::SourceAttachedToCreature;
+        let already_has_static = face.static_abilities.iter().any(|static_def| {
+            static_def.affected == Some(TargetFilter::SelfRef)
+                && static_def.condition == Some(static_condition.clone())
+                && static_def
+                    .modifications
+                    .contains(&ContinuousModification::RemoveType {
+                        core_type: CoreType::Creature,
+                    })
+        });
+        if !already_has_static {
+            face.static_abilities.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .condition(static_condition)
+                    .modifications(vec![ContinuousModification::RemoveType {
+                        core_type: CoreType::Creature,
+                    }])
+                    .description(
+                        "CR 702.151b + CR 613.1d: a reconfigure Equipment stops being a creature while attached to a creature (Layer 4 type removal).".to_string(),
+                    ),
+            );
+        }
+    }
 }
 
 /// CR 702.167a/b: Craft is an activated ability "[Cost], Exile this permanent,
@@ -17282,6 +17322,62 @@ mod sorcery_speed_invariant_tests {
                 )),
             "unattach mode is legal only while attached to a creature (CR 702.151a)"
         );
+
+        // CR 702.151a: "another target creature you control" — the attach
+        // target filter must carry `FilterProp::Another` so a reconfigure
+        // Equipment (itself a creature while unattached) can't self-target.
+        match &*face.abilities[0].effect {
+            Effect::Attach { target, .. } => match target {
+                TargetFilter::Typed(tf) => assert!(
+                    tf.properties.contains(&FilterProp::Another),
+                    "reconfigure attach target excludes the source (CR 702.151a)"
+                ),
+                other => panic!("expected Typed attach target, got {other:?}"),
+            },
+            other => panic!("expected Effect::Attach, got {other:?}"),
+        }
+    }
+
+    /// CR 702.151b + CR 613.1d: reconfigure synthesizes a self-scoped continuous
+    /// Layer-4 type-removal static (RemoveType Creature) gated on
+    /// `SourceAttachedToCreature`, and re-synthesis must not duplicate it.
+    #[test]
+    fn synthesize_reconfigure_adds_type_removal_static_and_is_idempotent() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Reconfigure(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        }));
+        synthesize_reconfigure(&mut face);
+
+        let matching = |face: &CardFace| {
+            face.static_abilities
+                .iter()
+                .filter(|sd| {
+                    sd.affected == Some(TargetFilter::SelfRef)
+                        && sd.condition == Some(StaticCondition::SourceAttachedToCreature)
+                        && sd
+                            .modifications
+                            .contains(&ContinuousModification::RemoveType {
+                                core_type: CoreType::Creature,
+                            })
+                })
+                .count()
+        };
+        assert_eq!(
+            matching(&face),
+            1,
+            "reconfigure adds the type-removal static (CR 702.151b)"
+        );
+
+        let static_count = face.static_abilities.len();
+        synthesize_reconfigure(&mut face);
+        assert_eq!(
+            face.static_abilities.len(),
+            static_count,
+            "re-synthesis does not duplicate the type-removal static"
+        );
+        assert_eq!(matching(&face), 1, "still exactly one type-removal static");
     }
 
     /// CR 702.167a/b: Parsing the Oracle line "craft with creature {4}{b}" must
