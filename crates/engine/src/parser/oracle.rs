@@ -11,16 +11,17 @@ use serde::{Deserialize, Serialize};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction, ChoiceType,
-    ChosenSubtypeKind, ContinuousModification, DelayedTriggerCondition, Effect, ManaProduction,
-    ModalChoice, ParsedCondition, QuantityExpr, ReplacementDefinition, SolveCondition,
-    SpellCastingOption, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypedFilter,
+    ChosenSubtypeKind, ContinuousModification, DelayedTriggerCondition, Effect, FilterProp,
+    ManaProduction, ModalChoice, ParsedCondition, QuantityExpr, QuantityRef, ReplacementDefinition,
+    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{ActivationCadence, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::replacements::ReplacementEvent;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
@@ -726,6 +727,141 @@ fn parse_static_line_with_graveyard_keyword_continuation(line: &str) -> Vec<Stat
 
 /// CR 607.2d: Reconcile self-chosen type statics with the source's linked
 /// persisted choice.
+/// CR 614.1c + CR 608.2d: Cards like Banner of Kinship parse "as ~ enters,
+/// choose a creature type" and "~ enters with a fellowship counter … for each
+/// creature you control of the chosen type" as two Moved replacements. The
+/// counter count depends on the persisted choice, so it must chain after the
+/// `Choose` post-entry effect — not fold into `enter_with_counters` during the
+/// replacement pipeline.
+fn reconcile_choose_then_chosen_dependent_etb_counters(result: &mut ParsedAbilities) {
+    let choose_idx = result.replacements.iter().position(|replacement| {
+        replacement.event == ReplacementEvent::Moved
+            && replacement
+                .execute
+                .as_ref()
+                .is_some_and(|def| is_persisted_as_enters_choice(def))
+    });
+    let counter_idx = result.replacements.iter().position(|replacement| {
+        replacement.event == ReplacementEvent::Moved
+            && replacement
+                .execute
+                .as_ref()
+                .is_some_and(|def| is_chosen_dependent_self_etb_counter(def))
+    });
+    let (Some(choose_idx), Some(counter_idx)) = (choose_idx, counter_idx) else {
+        return;
+    };
+    if choose_idx == counter_idx {
+        return;
+    }
+
+    let counter_repl = result.replacements.remove(counter_idx);
+    let choose_idx = if counter_idx < choose_idx {
+        choose_idx - 1
+    } else {
+        choose_idx
+    };
+    let Some(counter_exec) = counter_repl.execute else {
+        return;
+    };
+    let choose_repl = &mut result.replacements[choose_idx];
+    if let Some(ref mut choose_exec) = choose_repl.execute {
+        append_sub_ability(choose_exec, *counter_exec);
+    }
+}
+
+fn is_persisted_as_enters_choice(def: &AbilityDefinition) -> bool {
+    matches!(&*def.effect, Effect::Choose { persist: true, .. })
+}
+
+fn is_chosen_dependent_self_etb_counter(def: &AbilityDefinition) -> bool {
+    match &*def.effect {
+        Effect::PutCounter {
+            target: TargetFilter::SelfRef,
+            count,
+            ..
+        }
+        | Effect::AddCounter {
+            target: TargetFilter::SelfRef,
+            count,
+            ..
+        } => quantity_expr_uses_chosen_filter(count),
+        _ => false,
+    }
+}
+
+fn quantity_expr_uses_chosen_filter(expr: &QuantityExpr) -> bool {
+    quantity_expr_uses_filter_prop(expr, &|prop| {
+        matches!(
+            prop,
+            FilterProp::IsChosenCreatureType | FilterProp::IsChosenColor
+        )
+    })
+}
+
+fn quantity_expr_uses_filter_prop(
+    expr: &QuantityExpr,
+    pred: &impl Fn(&FilterProp) -> bool,
+) -> bool {
+    match expr {
+        QuantityExpr::Ref { qty } => quantity_ref_uses_filter_prop(qty, pred),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_filter_prop(inner, pred),
+        QuantityExpr::Sum { exprs } => exprs
+            .iter()
+            .any(|inner| quantity_expr_uses_filter_prop(inner, pred)),
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::UpTo { max } => quantity_expr_uses_filter_prop(max, pred),
+        QuantityExpr::Power { exponent, .. } => quantity_expr_uses_filter_prop(exponent, pred),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_uses_filter_prop(left, pred)
+                || quantity_expr_uses_filter_prop(right, pred)
+        }
+    }
+}
+
+fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) -> bool) -> bool {
+    match qty {
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::Aggregate { filter, .. }
+        | QuantityRef::ControlledByEachPlayer { filter, .. }
+        | QuantityRef::DistinctColorsAmongPermanents { filter }
+        | QuantityRef::DistinctCounterKindsAmong { filter }
+        | QuantityRef::EnteredThisTurn { filter } => target_filter_uses_filter_prop(filter, pred),
+        QuantityRef::DistinctCardTypes {
+            source: crate::types::ability::CardTypeSetSource::Objects { filter },
+        } => target_filter_uses_filter_prop(filter, pred),
+        _ => false,
+    }
+}
+
+fn target_filter_uses_filter_prop(
+    filter: &TargetFilter,
+    pred: &impl Fn(&FilterProp) -> bool,
+) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(pred),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|inner| target_filter_uses_filter_prop(inner, pred)),
+        TargetFilter::Not { filter } => target_filter_uses_filter_prop(filter, pred),
+        _ => false,
+    }
+}
+
+fn append_sub_ability(chain: &mut AbilityDefinition, tail: AbilityDefinition) {
+    let mut cursor = chain;
+    while let Some(ref mut next) = cursor.sub_ability {
+        cursor = next;
+    }
+    cursor.sub_ability = Some(Box::new(tail));
+}
+
 fn reconcile_self_chosen_type_statics(result: &mut ParsedAbilities, types: &[String]) {
     let Some(chosen_kind) = chosen_subtype_kind_from_persisted_choice(result)
         .or_else(|| chosen_kind_from_card_types(types))
@@ -3393,6 +3529,7 @@ pub(crate) fn parse_oracle_ir(
         i += 1;
     }
 
+    reconcile_choose_then_chosen_dependent_etb_counters(&mut result);
     reconcile_self_chosen_type_statics(&mut result, types);
 
     // Architectural rule: the parser must never silently discard Oracle
@@ -16784,6 +16921,44 @@ mod tests {
             ),
             "ETB execute must be ChangeZone→Exile"
         );
+    }
+
+    #[test]
+    fn banner_of_kinship_composes_choose_and_chosen_dependent_counters() {
+        let oracle = "As this artifact enters, choose a creature type. This artifact enters with a \
+                      fellowship counter on it for each creature you control of the chosen type.\n\
+                      Creatures you control of the chosen type get +1/+1 for each fellowship counter \
+                      on this artifact.";
+        let result = parse(oracle, "Banner of Kinship", &[], &["Artifact"], &[]);
+
+        assert_eq!(
+            result.replacements.len(),
+            1,
+            "choose + chosen-dependent ETB counters must compose into one replacement"
+        );
+        let execute = result.replacements[0]
+            .execute
+            .as_ref()
+            .expect("composed replacement must have execute");
+        assert!(matches!(
+            &*execute.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::CreatureType,
+                persist: true,
+            }
+        ));
+        let counter = execute
+            .sub_ability
+            .as_ref()
+            .expect("PutCounter must chain after Choose");
+        assert!(matches!(
+            &*counter.effect,
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::Generic(ref name),
+                target: TargetFilter::SelfRef,
+                ..
+            } if name == "fellowship"
+        ));
     }
 }
 

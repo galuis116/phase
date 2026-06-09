@@ -3763,11 +3763,35 @@ fn extract_etb_counters(
     source_id: ObjectId,
     event: &ProposedEvent,
 ) -> Vec<(CounterType, u32)> {
-    let exec = match ability {
-        Some(e) => e,
-        None => return Vec::new(),
-    };
-    let mut counters = match &*exec.effect {
+    let mut counters = Vec::new();
+    let mut current = ability;
+    // CR 614.1c: Only walk the event-modifier prefix of the ability chain.
+    // `Effect::Choose` and other post-entry work live after that prefix and
+    // must not have their `PutCounter` counts folded into `enter_with_counters`
+    // before the choice resolves (Banner of Kinship: fellowship counters keyed
+    // to the chosen creature type).
+    while let Some(exec) = current {
+        if !EventModifiers::is_event_modifier_effect(&exec.effect) {
+            break;
+        }
+        counters.extend(extract_etb_counters_from_effect(
+            &exec.effect,
+            state,
+            source_id,
+            event,
+        ));
+        current = exec.sub_ability.as_deref();
+    }
+    counters
+}
+
+fn extract_etb_counters_from_effect(
+    effect: &Effect,
+    state: &GameState,
+    source_id: ObjectId,
+    event: &ProposedEvent,
+) -> Vec<(CounterType, u32)> {
+    match effect {
         Effect::PutCounter {
             counter_type,
             count,
@@ -3835,14 +3859,7 @@ fn extract_etb_counters(
             })
             .collect(),
         _ => Vec::new(),
-    };
-    counters.extend(extract_etb_counters(
-        exec.sub_ability.as_deref(),
-        state,
-        source_id,
-        event,
-    ));
-    counters
+    }
 }
 
 /// CR 614.1c + CR 614.12: ProposedEvent modifications that a replacement ability would
@@ -4997,7 +5014,7 @@ mod tests {
     use crate::game::game_object::{AttachTarget, GameObject};
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, Effect, FilterProp,
-        QuantityExpr, QuantityModification, ReplacementDefinition, ReplacementMode,
+        QuantityExpr, QuantityModification, QuantityRef, ReplacementDefinition, ReplacementMode,
         ReplacementPlayerScope, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
@@ -5047,6 +5064,59 @@ mod tests {
                 (CounterType::Plus1Plus1, 1),
                 (CounterType::Generic("shield".to_string()), 1)
             ]
+        );
+    }
+
+    #[test]
+    fn choose_then_chosen_dependent_counter_defers_to_post_replacement() {
+        let choose = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Choose {
+                choice_type: crate::types::ability::ChoiceType::CreatureType,
+                persist: true,
+            },
+        );
+        let mut execute = choose;
+        execute.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Generic("fellowship".to_string()),
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(crate::types::ability::ControllerRef::You)
+                                .properties(vec![FilterProp::IsChosenCreatureType]),
+                        ),
+                    },
+                },
+                target: TargetFilter::SelfRef,
+            },
+        )));
+        let repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(execute)
+            .valid_card(TargetFilter::SelfRef);
+        let mut state = test_state_with_object(ObjectId(10), Zone::Hand, vec![repl]);
+        let mut events = Vec::new();
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(10), Zone::Hand, Zone::Battlefield, None);
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::ZoneChange {
+            enter_with_counters,
+            ..
+        }) = result
+        else {
+            panic!("expected Execute with ZoneChange, got {result:?}");
+        };
+
+        assert!(
+            enter_with_counters.is_empty(),
+            "chosen-dependent counters must not fold pre-choice"
+        );
+        assert!(
+            state.post_replacement_continuation.is_some(),
+            "Choose + chosen-dependent PutCounter must stash post-replacement work"
         );
     }
 
