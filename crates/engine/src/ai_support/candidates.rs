@@ -4129,9 +4129,11 @@ mod tests {
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, BasicLandType,
         ChoiceType, ChosenAttribute, ChosenSubtypeKind, ContinuousModification, Effect, EffectKind,
-        ManaContribution, ManaProduction, QuantityExpr, StaticDefinition, TargetFilter, TargetRef,
+        FilterProp, ManaContribution, ManaProduction, QuantityExpr, StaticDefinition, TargetFilter,
+        TargetRef, TypedFilter,
     };
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::zones::Zone;
 
@@ -4380,6 +4382,78 @@ mod tests {
                 door: RoomDoor::Left,
             } if *object_id == room
         )));
+    }
+
+    #[test]
+    fn priority_actions_offer_runtime_granted_typecycling_from_homing_sliver() {
+        let mut state = GameState::new_two_player(42);
+        let p0 = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = p0;
+        state.priority_player = p0;
+        state.waiting_for = WaitingFor::Priority { player: p0 };
+
+        let homing_sliver = create_object(
+            &mut state,
+            CardId(100),
+            p0,
+            "Homing Sliver".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&homing_sliver)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::card()
+                            .subtype("Sliver".to_string())
+                            .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Typecycling {
+                            cost: ManaCost::NoCost,
+                            subtype: "Sliver".to_string(),
+                        },
+                    }]),
+            );
+
+        let hand_sliver = create_object(
+            &mut state,
+            CardId(101),
+            p0,
+            "Striking Sliver".to_string(),
+            Zone::Hand,
+        );
+        let printed_len = {
+            let obj = state.objects.get_mut(&hand_sliver).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Sliver".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.abilities.len()
+        };
+
+        assert!(
+            crate::game::off_zone_characteristics::off_zone_has_keyword_kind(
+                &state,
+                hand_sliver,
+                KeywordKind::Typecycling,
+            ),
+            "Homing Sliver static should grant Typecycling to the Sliver card in hand"
+        );
+
+        let actions = priority_actions(&state, p0);
+        assert!(actions.iter().any(|candidate| {
+            matches!(
+                candidate.action,
+                GameAction::ActivateAbility {
+                    source_id,
+                    ability_index,
+                } if source_id == hand_sliver && ability_index == printed_len
+            )
+        }));
     }
 
     #[test]

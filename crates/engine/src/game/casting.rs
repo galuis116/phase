@@ -49,7 +49,7 @@ use super::targeting;
 
 const FORETELL_SPECIAL_ACTION_COST: u32 = 2;
 
-fn runtime_granted_activated_abilities(
+fn runtime_granted_cycling_abilities(
     state: &GameState,
     source_id: ObjectId,
 ) -> Vec<AbilityDefinition> {
@@ -81,7 +81,7 @@ pub fn activated_ability_definitions(
     let mut abilities: Vec<(usize, AbilityDefinition)> =
         obj.abilities.iter().cloned().enumerate().collect();
     abilities.extend(
-        runtime_granted_activated_abilities(state, source_id)
+        runtime_granted_cycling_abilities(state, source_id)
             .into_iter()
             .enumerate()
             .map(|(offset, ability)| (printed_len + offset, ability)),
@@ -100,7 +100,7 @@ fn activation_ability_definition(
     }
 
     let offset = ability_index.checked_sub(obj.abilities.len())?;
-    runtime_granted_activated_abilities(state, source_id)
+    runtime_granted_cycling_abilities(state, source_id)
         .into_iter()
         .nth(offset)
 }
