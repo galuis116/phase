@@ -14,10 +14,11 @@ use crate::types::zones::Zone;
 /// The fully-resolved identity of a conjured card for one `ConjureCard` entry.
 enum ConjuredIdentity {
     /// A specific named card; `face` is its printed `CardFace` from the registry
-    /// (`None` when the card is not in the registry).
+    /// (`None` when the card is not in the registry). Boxed to keep the enum
+    /// small (clippy::large_enum_variant).
     Named {
         name: String,
-        face: Option<CardFace>,
+        face: Option<Box<CardFace>>,
     },
     /// CR 707.2: a duplicate of a referenced card — the referenced card's current
     /// copiable values, applied to the conjured card so it has real
@@ -65,7 +66,11 @@ pub fn resolve(
         let identity = match &conjure_card.source {
             ConjureSource::Named { name } => ConjuredIdentity::Named {
                 name: name.clone(),
-                face: state.card_face_registry.get(&name.to_lowercase()).cloned(),
+                face: state
+                    .card_face_registry
+                    .get(&name.to_lowercase())
+                    .cloned()
+                    .map(Box::new),
             },
             ConjureSource::Duplicate { duplicate_of } => {
                 match resolve_duplicate_reference(state, ability, duplicate_of)
