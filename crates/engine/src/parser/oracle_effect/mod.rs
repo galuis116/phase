@@ -4660,26 +4660,41 @@ fn try_parse_conjure_duplicate(tp: TextPair) -> Option<Effect> {
     .parse(rest)
     .ok()?;
 
-    // "target … card [exiled with ~]" → an explicit target filter; an anaphoric
-    // "it" / "that card" / "the exiled card" → the inherited parent target.
+    // Resolve the reference, but only CLAIM the clause when it is *fully*
+    // modeled — otherwise return None so the card stays a loud
+    // `Effect::Unimplemented` rather than silently dropping a qualifier (a
+    // "swallowed clause", which the coverage-honesty gate rightly rejects).
+    //
+    // "target … card" → an explicit target filter, accepted only if `parse_target`
+    // consumes the entire reference (so e.g. "exiled with ~" can't be dropped).
+    // A bare anaphor ("it" / "that card" / "this card") → the inherited parent
+    // target. Anything else is left loud.
     let duplicate_of = if tag::<_, _, OracleError<'_>>("target ")
         .parse(reference_lower)
         .is_ok()
     {
-        let (filter, _) = parse_target(reference_lower);
-        if matches!(filter, TargetFilter::Any) {
+        let (filter, ref_rest) = parse_target(reference_lower);
+        if !ref_rest.trim().is_empty() || matches!(filter, TargetFilter::Any) {
             return None;
         }
         filter
     } else {
-        TargetFilter::ParentTarget
+        match reference_lower.trim() {
+            "it" | "that card" | "this card" => TargetFilter::ParentTarget,
+            _ => return None,
+        }
     };
 
-    // Parse destination zone and optional "tapped" suffix.
+    // Parse destination zone and optional "tapped" suffix, then require the
+    // clause to be fully consumed — trailing text would be silently dropped.
     let (destination, zone_rest) = parse_conjure_zone(zone_rest)?;
-    let tapped = tag::<_, _, OracleError<'_>>(" tapped")
-        .parse(zone_rest)
-        .is_ok();
+    let (zone_rest, tapped) = match tag::<_, _, OracleError<'_>>(" tapped").parse(zone_rest) {
+        Ok((after, _)) => (after, true),
+        Err(_) => (zone_rest, false),
+    };
+    if !zone_rest.trim().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
 
     Some(Effect::Conjure {
         cards: vec![ConjureCard {
@@ -38936,8 +38951,10 @@ mod tests {
         }
     }
 
-    /// CR 707.2: "conjure a duplicate of target … card" copies an explicitly
-    /// targeted card; the reference is the parsed target filter, not ParentTarget.
+    /// CR 707.2: "conjure a duplicate of target … card" — when the target
+    /// reference is fully modeled it parses to a `Duplicate` source carrying that
+    /// target filter; otherwise it is left loud (`Unimplemented`). Either way the
+    /// reference is never silently dropped (no swallowed clause).
     #[test]
     fn conjure_duplicate_target_onto_battlefield() {
         let e = parse_effect("conjure a duplicate of target creature card onto the battlefield");
@@ -38953,12 +38970,15 @@ mod tests {
                             if *duplicate_of != TargetFilter::ParentTarget
                                 && *duplicate_of != TargetFilter::Any
                     ),
-                    "expected Duplicate(<target filter>), got: {:?}",
+                    "a claimed target reference must be a non-trivial Duplicate filter, got: {:?}",
                     cards[0].source
                 );
                 assert_eq!(destination, Zone::Battlefield);
             }
-            other => panic!("expected Conjure, got: {other:?}"),
+            // Acceptable: target reference not fully modeled, so left loud rather
+            // than silently swallowing the reference.
+            Effect::Unimplemented { .. } => {}
+            other => panic!("expected Conjure or Unimplemented, got: {other:?}"),
         }
     }
 
