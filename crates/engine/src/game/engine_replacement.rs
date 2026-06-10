@@ -3,6 +3,8 @@ use crate::types::ability::{
     AbilityDefinition, Effect, PostReplacementContinuation, ResolvedAbility, TargetFilter,
     TargetRef,
 };
+#[cfg(test)]
+use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{GameState, WaitingFor};
@@ -1384,8 +1386,10 @@ mod tests {
             src.replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Moved)
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
-                    Effect::Tap {
+                    Effect::SetTapState {
                         target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
                     },
                 ))
                 .destination_zone(Zone::Battlefield)
@@ -2337,8 +2341,10 @@ mod tests {
         // Legacy slots also populated (corrupted/hybrid input).
         state.legacy_post_replacement_effect = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Untap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             },
         )));
 

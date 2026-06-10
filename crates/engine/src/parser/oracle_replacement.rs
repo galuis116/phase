@@ -30,10 +30,10 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
     Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
     DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect,
-    FilterProp, ManaModification, ManaReplacementScope, PlayerFilter, PreventionAmount,
-    QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, ReplacementPlayerScope, StaticCondition, TargetFilter, TypeFilter,
-    TypedFilter,
+    EffectScope, FilterProp, ManaModification, ManaReplacementScope, PlayerFilter,
+    PreventionAmount, QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, StaticCondition,
+    TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
@@ -168,8 +168,10 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
             ReplacementDefinition::new(ReplacementEvent::Moved)
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
-                    Effect::Tap {
+                    Effect::SetTapState {
                         target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
                     },
                 ))
                 .valid_card(TargetFilter::SelfRef)
@@ -947,8 +949,10 @@ fn parse_reveal_land_tail(
 fn unconditional_tap_self_ability() -> AbilityDefinition {
     AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::Tap {
+        Effect::SetTapState {
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         },
     )
 }
@@ -963,8 +967,10 @@ fn tap_self_unless_controls_matching_ability(filter: &TargetFilter) -> AbilityDe
     let bound_filter = inject_controller(filter.clone(), ControllerRef::You);
     AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::Tap {
+        Effect::SetTapState {
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         },
     )
     .condition(crate::types::ability::AbilityCondition::Not {
@@ -996,8 +1002,10 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
 
     let tap_self = AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::Tap {
+        Effect::SetTapState {
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         },
     );
 
@@ -1100,8 +1108,10 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     let execute = if enters_tapped {
         AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         )
         .sub_ability(choose)
@@ -1223,8 +1233,10 @@ fn parse_clone_replacement(
     let execute_effect = if enter_tapped {
         AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         )
         .sub_ability(copy_effect)
@@ -1510,8 +1522,10 @@ fn parse_enters_tapped_unless(
         ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)
@@ -1550,8 +1564,10 @@ fn parse_enters_tapped_if_controls(
         ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
-                Effect::Tap {
+                Effect::SetTapState {
                     target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)
@@ -1909,8 +1925,10 @@ fn parse_enters_with_counters(
             let execute = if has_enters_tapped_phrase(work_text) {
                 AbilityDefinition::new(
                     AbilityKind::Spell,
-                    Effect::Tap {
+                    Effect::SetTapState {
                         target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
                     },
                 )
                 .sub_ability(choice)
@@ -2016,8 +2034,10 @@ fn parse_enters_with_counters(
     let execute = if has_enters_tapped_phrase(work_text) {
         AbilityDefinition::new(
             AbilityKind::Spell,
-            Effect::Tap {
+            Effect::SetTapState {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             },
         )
         .sub_ability(put_counter)
@@ -2692,12 +2712,16 @@ fn build_external_entry_replacement(
     }
 
     let effect = if enters_tapped {
-        Effect::Tap {
+        Effect::SetTapState {
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
         }
     } else {
-        Effect::Untap {
+        Effect::SetTapState {
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
+            state: TapStateChange::Untap,
         }
     };
 
@@ -6413,8 +6437,10 @@ mod tests {
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
     }
@@ -6904,8 +6930,10 @@ mod tests {
             let decline = decline.as_ref().unwrap();
             assert!(matches!(
                 *decline.effect,
-                Effect::Tap {
-                    target: TargetFilter::SelfRef
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 }
             ));
         } else {
@@ -6961,8 +6989,10 @@ mod tests {
             ));
             assert!(matches!(
                 *decline.sub_ability.as_ref().unwrap().effect,
-                Effect::Tap {
-                    target: TargetFilter::SelfRef
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 }
             ));
         }
@@ -6993,8 +7023,10 @@ mod tests {
         let decline = on_decline.as_ref().unwrap();
         assert!(matches!(
             *decline.effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
     }
@@ -7054,8 +7086,10 @@ mod tests {
         let decline = on_decline.as_ref().expect("on_decline must be present");
         assert!(matches!(
             *decline.effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         let cond = decline
@@ -7207,8 +7241,10 @@ mod tests {
         assert!(
             matches!(
                 *execute.effect,
-                Effect::Tap {
-                    target: TargetFilter::SelfRef
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 }
             ),
             "primary effect must be Tap {{ SelfRef }} (enter_tapped modifier), got {:?}",
@@ -7311,8 +7347,10 @@ mod tests {
         assert!(matches!(def.mode, ReplacementMode::Mandatory));
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         match &def.condition {
@@ -7351,8 +7389,10 @@ mod tests {
         // execute must be Some(Tap) so the mandatory pipeline can apply it
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
     }
@@ -7370,8 +7410,10 @@ mod tests {
         let execute = def.execute.as_ref().expect("execute ability");
         assert!(matches!(
             *execute.effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         let sub = execute.sub_ability.as_ref().expect("counter sub_ability");
@@ -7406,8 +7448,10 @@ mod tests {
         // "it enters tapped" → Tap wrapper with the counter as its sub_ability.
         assert!(matches!(
             *execute.effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         let sub = execute.sub_ability.as_ref().expect("counter sub_ability");
@@ -8645,8 +8689,10 @@ mod tests {
         assert_eq!(def.destination_zone, Some(Zone::Battlefield));
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         match &def.valid_card {
@@ -8730,8 +8776,10 @@ mod tests {
         assert_eq!(def.destination_zone, Some(Zone::Battlefield));
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
-            Effect::Untap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             }
         ));
         match &def.valid_card {
@@ -8758,8 +8806,10 @@ mod tests {
         );
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
-            Effect::Untap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Untap,
             }
         ));
         assert!(def.valid_card.is_some(), "expected other-permanents filter");
@@ -8780,8 +8830,10 @@ mod tests {
         );
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         assert!(def.valid_card.is_some(), "expected other-permanents filter");
@@ -8801,8 +8853,10 @@ mod tests {
         assert!(matches!(def.mode, ReplacementMode::Mandatory));
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         match &def.condition {
@@ -9006,8 +9060,10 @@ mod tests {
         assert!(matches!(def.mode, ReplacementMode::Mandatory));
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         match &def.condition {
@@ -9455,8 +9511,10 @@ mod tests {
         assert!(
             matches!(
                 &*execute.effect,
-                Effect::Tap {
-                    target: TargetFilter::SelfRef
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
                 }
             ),
             "top-level execute must be Tap {{ SelfRef }}, got {:?}",
@@ -9488,8 +9546,10 @@ mod tests {
         let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
             &*execute.effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         let sub = execute.sub_ability.as_ref().unwrap();
@@ -9518,8 +9578,10 @@ mod tests {
         let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
             &*execute.effect,
-            Effect::Tap {
-                target: TargetFilter::SelfRef
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
             }
         ));
         let sub = execute.sub_ability.as_ref().unwrap();
