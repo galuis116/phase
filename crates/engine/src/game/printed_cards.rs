@@ -1,7 +1,8 @@
 use crate::database::CardDatabase;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, ContinuousModification, CopiableValues, CounterSourceRider,
-    Effect, PtValue, ReplacementDefinition, ReplacementMode, StaticDefinition, TriggerDefinition,
+    AbilityCost, AbilityDefinition, ConjureSource, ContinuousModification, CopiableValues,
+    CounterSourceRider, Effect, PtValue, ReplacementDefinition, ReplacementMode, StaticDefinition,
+    TriggerDefinition,
 };
 use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef};
 use crate::types::card_type::CoreType;
@@ -640,8 +641,13 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
     match effect {
         Effect::Intensify { .. } => {}
         Effect::Conjure { cards, .. } => {
+            // Only named-conjure has a static card name to seed into the face
+            // registry. Duplicate-conjure copies a card already in play (its face
+            // travels on the referenced object), so there is nothing to preload.
             for conjure_card in cards {
-                out.push(conjure_card.name.clone());
+                if let ConjureSource::Named { name } = &conjure_card.source {
+                    out.push(name.clone());
+                }
             }
         }
         // A spellbook draft conjures the chosen card, but the list lives on the
@@ -2140,7 +2146,9 @@ mod tests {
             AbilityKind::Spell,
             Effect::Conjure {
                 cards: vec![ConjureCard {
-                    name: target_name.to_string(),
+                    source: ConjureSource::Named {
+                        name: target_name.to_string(),
+                    },
                     count: QuantityExpr::Fixed { value: 1 },
                 }],
                 destination,
@@ -2331,7 +2339,9 @@ mod tests {
         def.cost = Some(AbilityCost::EffectCost {
             effect: Box::new(Effect::Conjure {
                 cards: vec![ConjureCard {
-                    name: "cost".to_string(),
+                    source: ConjureSource::Named {
+                        name: "cost".to_string(),
+                    },
                     count: QuantityExpr::Fixed { value: 1 },
                 }],
                 destination: Zone::Hand,
@@ -2342,7 +2352,9 @@ mod tests {
             cost: AbilityCost::EffectCost {
                 effect: Box::new(Effect::Conjure {
                     cards: vec![ConjureCard {
-                        name: "unless_pay_ability".to_string(),
+                        source: ConjureSource::Named {
+                            name: "unless_pay_ability".to_string(),
+                        },
                         count: QuantityExpr::Fixed { value: 1 },
                     }],
                     destination: Zone::Hand,
@@ -2509,7 +2521,9 @@ mod tests {
             cost: AbilityCost::EffectCost {
                 effect: Box::new(Effect::Conjure {
                     cards: vec![ConjureCard {
-                        name: "unless_pay_trigger".to_string(),
+                        source: ConjureSource::Named {
+                            name: "unless_pay_trigger".to_string(),
+                        },
                         count: QuantityExpr::Fixed { value: 1 },
                     }],
                     destination: Zone::Hand,
@@ -2539,7 +2553,9 @@ mod tests {
             cost: AbilityCost::EffectCost {
                 effect: Box::new(Effect::Conjure {
                     cards: vec![ConjureCard {
-                        name: "repl_maycost_cost".to_string(),
+                        source: ConjureSource::Named {
+                            name: "repl_maycost_cost".to_string(),
+                        },
                         count: QuantityExpr::Fixed { value: 1 },
                     }],
                     destination: Zone::Hand,

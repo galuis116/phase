@@ -1,7 +1,9 @@
 use crate::game::printed_cards::apply_card_face_to_object;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{
+    ConjureSource, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::CardId;
@@ -32,10 +34,24 @@ pub fn resolve(
         let count =
             resolve_quantity_with_targets(state, &conjure_card.count, ability).max(0) as u32;
 
+        // Resolve the conjured card's identity. `Named` is a literal card name;
+        // `Duplicate` (CR 707.2) resolves the referenced card and copies its
+        // identity by name. An unresolved reference (the referenced card is
+        // gone) conjures nothing.
+        let card_name = match &conjure_card.source {
+            ConjureSource::Named { name } => name.clone(),
+            ConjureSource::Duplicate { duplicate_of } => {
+                match resolve_duplicate_card_name(state, ability, duplicate_of) {
+                    Some(name) => name,
+                    None => continue,
+                }
+            }
+        };
+
         // Look up the card face data from the registry (populated at game init).
         let card_face = state
             .card_face_registry
-            .get(&conjure_card.name.to_lowercase())
+            .get(&card_name.to_lowercase())
             .cloned();
 
         for _ in 0..count {
@@ -43,7 +59,7 @@ pub fn resolve(
                 state,
                 CardId(0),
                 ability.controller,
-                conjure_card.name.clone(),
+                card_name.clone(),
                 destination,
             );
 
@@ -108,7 +124,7 @@ pub fn resolve(
 
             events.push(GameEvent::ObjectConjured {
                 object_id: obj_id,
-                name: conjure_card.name.clone(),
+                name: card_name.clone(),
             });
         }
     }
@@ -121,11 +137,26 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 707.2: Resolve a duplicate-conjure reference to the name of the card being
+/// copied. The reference is either the inherited parent target ("it" / "that
+/// card") or an explicit target ("target … card exiled with ~"); either way it
+/// resolves to a single object whose name identifies the card to conjure.
+fn resolve_duplicate_card_name(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    reference: &TargetFilter,
+) -> Option<String> {
+    let resolved = crate::game::targeting::resolved_targets(ability, reference, state);
+    let object_ids = crate::game::effects::effect_object_targets(reference, &resolved);
+    let obj_id = object_ids.into_iter().next()?;
+    state.objects.get(&obj_id).map(|obj| obj.name.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ConjureCard, QuantityExpr};
-    use crate::types::identifiers::ObjectId;
+    use crate::types::ability::{ConjureCard, QuantityExpr, TargetRef};
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
     #[test]
@@ -134,7 +165,9 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Conjure {
                 cards: vec![ConjureCard {
-                    name: "Verdant Dread".to_string(),
+                    source: ConjureSource::Named {
+                        name: "Verdant Dread".to_string(),
+                    },
                     count: QuantityExpr::Fixed { value: 1 },
                 }],
                 destination: Zone::Battlefield,
@@ -167,5 +200,51 @@ mod tests {
         assert_eq!(state.zone_changes_this_turn[0].object_id, zone_change.0);
         assert_eq!(state.zone_changes_this_turn[0].from_zone, None);
         assert_eq!(state.zone_changes_this_turn[0].to_zone, Zone::Battlefield);
+    }
+
+    /// CR 707.2: "conjure a duplicate of <reference>" copies the referenced
+    /// card by name into the destination — a new, distinct real card object.
+    #[test]
+    fn duplicate_conjure_copies_referenced_card_by_name() {
+        let mut state = GameState::new_two_player(7);
+        // A referenced card (in exile) whose identity should be duplicated.
+        let referenced = crate::game::zones::create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Exile,
+        );
+        // The conjure ability inherits the referenced card as its target, so the
+        // anaphoric `ParentTarget` reference resolves to it.
+        let ability = ResolvedAbility::new(
+            Effect::Conjure {
+                cards: vec![ConjureCard {
+                    source: ConjureSource::Duplicate {
+                        duplicate_of: TargetFilter::ParentTarget,
+                    },
+                    count: QuantityExpr::Fixed { value: 1 },
+                }],
+                destination: Zone::Hand,
+                tapped: false,
+            },
+            vec![TargetRef::Object(referenced)],
+            ObjectId(99),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // A new "Grizzly Bears" card (distinct from the referenced one) is now in hand.
+        let conjured: Vec<_> = state.players[0]
+            .hand
+            .iter()
+            .filter(|id| state.objects[id].name == "Grizzly Bears" && **id != referenced)
+            .collect();
+        assert_eq!(
+            conjured.len(),
+            1,
+            "duplicate-conjure should create exactly one copy by the referenced card's name"
+        );
     }
 }
