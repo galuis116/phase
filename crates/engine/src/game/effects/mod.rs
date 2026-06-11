@@ -164,6 +164,7 @@ pub mod solve_case;
 pub mod specialize;
 pub mod speed_effects;
 pub mod spellbook;
+pub mod turn_face_up;
 // Tests for `spellbook` live in a sibling file (declared here, not in
 // `spellbook.rs`, so `spellbook.rs` stays implementation-only).
 #[cfg(test)]
@@ -2104,6 +2105,7 @@ pub fn resolve_effect(
         Effect::Bolster { .. } => bolster::resolve(state, ability, events),
         Effect::Manifest { .. } => manifest::resolve(state, ability, events),
         Effect::ManifestDread => manifest_dread::resolve(state, ability, events),
+        Effect::TurnFaceUp { .. } => turn_face_up::resolve(state, ability, events),
         Effect::ExtraTurn { .. } => extra_turn::resolve(state, ability, events),
         Effect::GrantExtraLoyaltyActivations { .. } => {
             grant_extra_loyalty_activations::resolve(state, ability, events)
