@@ -4342,6 +4342,10 @@ fn static_comma_rule_statics_share_subject() {
         StaticMode::Other("CantBeSacrificed".to_string())
     );
     assert_eq!(defs[2].mode, StaticMode::CantAttack);
+    assert_eq!(
+        defs[2].attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::Owner)
+    );
     assert!(defs
         .iter()
         .all(|def| def.affected == Some(TargetFilter::SelfRef)));
