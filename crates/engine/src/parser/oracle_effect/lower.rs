@@ -2522,7 +2522,7 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
                 player: crate::types::player::PlayerId(0),
             },
         ),
-        // CR 603.7a + CR 104.3a: anaphoric "that turn's end step" — the extra
+        // CR 603.7a + CR 104.3e: anaphoric "that turn's end step" — the extra
         // turn granted by the parent clause (the controller's next turn), so
         // the controller's next end step. Suffix companion of the prefix arm
         // in `strip_temporal_prefix`. Used by Final Fortune / Last Chance /
@@ -2584,7 +2584,7 @@ pub(super) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                 },
                 tag("at the beginning of your next end step, "),
             ),
-            // CR 603.7a + CR 104.3a: "at the beginning of that turn's end step"
+            // CR 603.7a + CR 104.3e: "at the beginning of that turn's end step"
             // is the anaphoric form used by the extra-turn-with-a-cost cards
             // (Final Fortune, Last Chance, Warrior's Oath, Chance for Glory):
             // "Take an extra turn after this one. At the beginning of that
@@ -5298,7 +5298,7 @@ mod tests {
         );
     }
 
-    /// CR 603.7a + CR 104.3a: the anaphoric "at the beginning of that turn's end
+    /// CR 603.7a + CR 104.3e: the anaphoric "at the beginning of that turn's end
     /// step" (extra-turn-with-a-cost cards) is recognized by both temporal
     /// recognizers, mapping to the controller's next end step — identical to the
     /// existing "your next end step" arm.
