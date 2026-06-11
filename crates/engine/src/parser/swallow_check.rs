@@ -1705,6 +1705,41 @@ fn cleaned_twice_is_only_dynamic_marker(cleaned: &str) -> bool {
     .any(|marker| cleaned.contains(marker))
 }
 
+/// CR 702.168 + CR 608.2c: "[you may] exile a card. If you do, it becomes
+/// plotted." The "if you do" gate is the optional-exile linkage — structurally
+/// represented by the `GrantCastingPermission { CastingPermission::Plotted }`
+/// chained off the (optional) exile, which only takes effect when the exile
+/// happened. It is not an uncaptured game-state condition (the coverage-side
+/// `line_has_condition_text` likewise excludes "if you do" wholesale).
+fn def_tree_has_plotted_grant(def: &AbilityDefinition) -> bool {
+    if let Effect::GrantCastingPermission {
+        permission: crate::types::ability::CastingPermission::Plotted { .. },
+        ..
+    } = &*def.effect
+    {
+        return true;
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_plotted_grant(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_plotted_grant(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities.iter().any(def_tree_has_plotted_grant)
+}
+
+fn any_ability_has_plotted_grant(parsed: &ParsedAbilities) -> bool {
+    parsed.abilities.iter().any(def_tree_has_plotted_grant)
+        || parsed
+            .triggers
+            .iter()
+            .any(|t| t.execute.as_deref().is_some_and(def_tree_has_plotted_grant))
+}
+
 // ── Detector G: Condition_If ────────────────────────────────────────────
 
 /// CR 608.2c: "if [condition], [effect]" — conditional gate. Must be
@@ -1753,6 +1788,12 @@ fn detect_condition_if(
         return;
     }
     if any_static_has_target_gated_cost_modification(parsed) {
+        return;
+    }
+    // CR 702.168: "[you may] exile a card. If you do, it becomes plotted." —
+    // the "if you do" is the optional-exile linkage, represented by the
+    // chained `Plotted` casting-permission grant (see `any_ability_has_plotted_grant`).
+    if any_ability_has_plotted_grant(parsed) {
         return;
     }
     // Strip CR-implicit "if" phrases that aren't real conditional gates
@@ -3389,6 +3430,29 @@ mod tests {
             &["Creature"],
         );
         assert!(!has_swallowed_detector(&green_slime, "Condition_If"));
+    }
+
+    /// CR 702.168 + CR 608.2c: "You may exile a card … If you do, it becomes
+    /// plotted." — the "if you do" gate is the optional-exile linkage,
+    /// represented by the chained `GrantCastingPermission { Plotted }`, so the
+    /// `Condition_If` detector must not flag Make Your Own Luck / Kellan Joins Up.
+    #[test]
+    fn condition_if_accepts_if_you_do_becomes_plotted() {
+        let myol = parse_named(
+            "Look at the top three cards of your library. You may exile a nonland card from \
+             among them. If you do, it becomes plotted. Put the rest into your hand.",
+            "Make Your Own Luck",
+            &["Sorcery"],
+        );
+        assert!(!has_swallowed_detector(&myol, "Condition_If"));
+
+        let kellan = parse_named(
+            "When this creature enters, you may exile a nonland card with mana value 3 or less \
+             from your hand. If you do, it becomes plotted.",
+            "Kellan Joins Up",
+            &["Creature"],
+        );
+        assert!(!has_swallowed_detector(&kellan, "Condition_If"));
     }
 
     /// CR 707.10c: Mirrorpool's "you may choose new targets for the copy" is
