@@ -10077,6 +10077,65 @@ mod tests {
     }
 
     #[test]
+    fn astarion_end_step_modal_target_relative_life_modes() {
+        // CR 603.1 + CR 700.2 + CR 115.1: Astarion, the Decadent — an end-step
+        // "choose one" modal trigger whose two named modes each reference a
+        // life-this-turn quantity. Previously the Feed mode dropped to
+        // `Unimplemented` (the third-person "the amount of life they lost this
+        // turn" anaphor never reached a recognizer), leaving the whole modal
+        // trigger inert. Both modes must now parse, and the Feed mode's amount
+        // must resolve through `PlayerScope::Target` (the target opponent's own
+        // life lost), not the controller's.
+        use crate::types::ability::{Effect, PlayerScope, QuantityExpr, QuantityRef};
+        let r = parse(
+            "Deathtouch, lifelink\nAt the beginning of your end step, choose one —\n• Feed — Target opponent loses life equal to the amount of life they lost this turn.\n• Friends — You gain life equal to the amount of life you gained this turn.",
+            "Astarion, the Decadent",
+            &[],
+            &["Creature"],
+            &["Vampire", "Noble"],
+        );
+        assert_eq!(r.triggers.len(), 1);
+        let execute = r.triggers[0]
+            .execute
+            .as_ref()
+            .expect("end-step trigger should have execute");
+        let modal = execute.modal.as_ref().expect("execute should be modal");
+        assert_eq!(modal.mode_count, 2);
+        assert_eq!(execute.mode_abilities.len(), 2);
+
+        // Feed: target opponent loses life equal to *their own* life lost this
+        // turn — the amount resolves through `PlayerScope::Target`, and a target
+        // filter is present (it is no longer an `Unimplemented` drop).
+        match execute.mode_abilities[0].effect.as_ref() {
+            Effect::LoseLife { amount, target } => {
+                assert_eq!(
+                    *amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeLostThisTurn {
+                            player: PlayerScope::Target,
+                        },
+                    },
+                );
+                assert!(target.is_some(), "Feed mode targets the opponent");
+            }
+            other => panic!("Feed mode must be LoseLife, got {other:?}"),
+        }
+
+        // Friends: you gain life equal to the life you gained this turn.
+        match execute.mode_abilities[1].effect.as_ref() {
+            Effect::GainLife { amount, .. } => assert_eq!(
+                *amount,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                },
+            ),
+            other => panic!("Friends mode must be GainLife, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn non_modal_spell_has_no_modal_metadata() {
         let r = parse(
             "Deal 3 damage to any target.",
