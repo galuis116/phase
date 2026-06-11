@@ -453,6 +453,14 @@ pub(crate) enum ImperativeFamilyAst {
         target: TargetFilter,
         count: QuantityExpr,
     },
+    /// CR 406.3 + CR 701.20a: Turn an exiled face-down card face up via a
+    /// resolving effect (not the morph special action). The Imprint "flip"
+    /// cards — Clone Shell, Summoner's Egg, Compleated Clone Shell, The Creation
+    /// of Avacyn — say "turn the exiled card(s) face up"; `target` references
+    /// the card(s) the source exiled.
+    TurnFaceUp {
+        target: TargetFilter,
+    },
     BecomeMonarch,
     /// CR 701.49: "venture into the dungeon"
     VentureIntoDungeon,
