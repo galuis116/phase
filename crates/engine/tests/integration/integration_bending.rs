@@ -5,7 +5,8 @@ use engine::ai_support::candidate_actions;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityCost, Effect, EffectScope, QuantityExpr, ResolvedAbility, TapStateChange, TargetFilter,
+    AbilityCost, Effect, EffectScope, PtValue, QuantityExpr, ResolvedAbility, TapStateChange,
+    TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -93,8 +94,8 @@ fn test_generic_animate_does_not_register_earthbend() {
 
     let ability = ResolvedAbility::new(
         Effect::Animate {
-            power: Some(4),
-            toughness: Some(4),
+            power: Some(PtValue::Fixed(4)),
+            toughness: Some(PtValue::Fixed(4)),
             types: vec!["Creature".to_string()],
             remove_types: vec![],
             target: TargetFilter::None,
@@ -1235,8 +1236,8 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
 
     let animate_ability = ResolvedAbility {
         effect: Effect::Animate {
-            power: Some(2),
-            toughness: Some(2),
+            power: Some(PtValue::Fixed(2)),
+            toughness: Some(PtValue::Fixed(2)),
             types: vec!["Creature".to_string()],
             remove_types: vec![],
             target: TargetFilter::Typed(engine::types::ability::TypedFilter {
@@ -1250,8 +1251,8 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
         sub_ability: Some(Box::new(search_ability)),
         ..ResolvedAbility::new(
             Effect::Animate {
-                power: Some(2),
-                toughness: Some(2),
+                power: Some(PtValue::Fixed(2)),
+                toughness: Some(PtValue::Fixed(2)),
                 types: vec!["Creature".to_string()],
                 remove_types: vec![],
                 target: TargetFilter::Typed(engine::types::ability::TypedFilter {
@@ -2042,8 +2043,8 @@ fn build_earthbend_ability(
 
     let mut animate = ResolvedAbility::new(
         Effect::Animate {
-            power: Some(0),
-            toughness: Some(0),
+            power: Some(PtValue::Fixed(0)),
+            toughness: Some(PtValue::Fixed(0)),
             types: vec!["Creature".to_string()],
             remove_types: vec![],
             target: animate_target,
