@@ -902,7 +902,7 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
 
     let after_mana = after_mana.trim_start();
 
-    // CR 601.2f conditional flat form: "... less to activate if [condition]" /
+    // CR 602.2b + CR 601.2f conditional flat form: "... less to activate if [condition]" /
     // "... less to cast if [condition]". The reduction is a flat {amount_per}
     // (count = Fixed(1)) gated by `condition`. Checked before the "for each"
     // form; if the "if " marker is present but the condition does not parse,
@@ -2194,7 +2194,7 @@ mod tests {
         }
     }
 
-    /// CR 601.2f: the conditional flat form "costs {N} less to activate if
+    /// CR 602.2b + CR 601.2f: the conditional flat form "costs {N} less to activate if
     /// [condition]" parses to a `CostReduction` with `count = Fixed(1)` and a
     /// `condition` gate (Esquire of the King, Razorlash Transmogrant, …) — the
     /// previously-dropped `Effect:this` clause.

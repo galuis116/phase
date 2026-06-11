@@ -11670,7 +11670,7 @@ fn apply_cost_reduction(
     source_id: ObjectId,
 ) {
     if let Some(ref reduction) = ability_def.cost_reduction {
-        // CR 601.2f: A conditional flat reduction ("costs {N} less … if [cond]")
+        // CR 602.2b + CR 601.2f: A conditional flat reduction ("costs {N} less … if [cond]")
         // applies only when its gate holds at cost-determination time. `None` =
         // unconditional (the "for each" scaling form and all legacy reductions).
         let condition_met = reduction.condition.as_ref().is_none_or(|cond| {
@@ -41505,7 +41505,7 @@ mod tests {
         );
     }
 
-    /// CR 601.2f: a conditional flat cost reduction ("costs {N} less to activate
+    /// CR 602.2b + CR 601.2f: a conditional flat cost reduction ("costs {N} less to activate
     /// if [condition]") reduces the activation cost only when the gate holds.
     /// Esquire of the King class: "{cost}: … This ability costs {2} less to
     /// activate if you control a legendary creature."
