@@ -70,7 +70,7 @@ pub fn apply_face_down_creature_characteristics(
     obj.base_card_types = obj.card_types.clone();
     obj.mana_cost = ManaCost::NoCost;
     obj.base_mana_cost = ManaCost::NoCost;
-    // CR 702.170a: A cloaked permanent enters with ward {2}; plain manifest/morph
+    // CR 701.58a: A cloaked permanent enters with ward {2}; plain manifest/morph
     // grants no keywords. The ward rides the face-down state and is replaced by
     // the real card's keywords when the card is turned face up.
     let face_down_keywords: Vec<Keyword> = match &profile.ward {
@@ -331,7 +331,7 @@ pub fn manifest(
     )
 }
 
-/// CR 702.170a: Cloak puts the top card of library onto the battlefield face
+/// CR 701.58a: Cloak puts the top card of library onto the battlefield face
 /// down as a 2/2 creature **with ward {2}**. Like manifest, a cloaked creature
 /// card can later be turned face up for its mana cost.
 pub fn cloak(

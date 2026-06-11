@@ -6137,7 +6137,7 @@ pub struct FaceDownProfile {
     /// CR 205.1a: Creature subtypes the effect grants ("Cyberman").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subtypes: Vec<String>,
-    /// CR 702.170a: Ward granted to the face-down permanent. `None` for plain
+    /// CR 701.58a: Ward granted to the face-down permanent. `None` for plain
     /// manifest/morph; `Some(Ward {2})` for cloak (and is also the correct home
     /// for disguise's ward). Applied as a `Keyword::Ward` on entry and cleared
     /// when the card is turned face up (the real card's keywords take over).
@@ -6159,7 +6159,7 @@ impl FaceDownProfile {
         }
     }
 
-    /// CR 702.170a: The cloak face-down characteristics — a vanilla 2/2 creature
+    /// CR 701.58a: The cloak face-down characteristics — a vanilla 2/2 creature
     /// with ward {2}. Otherwise identical to [`Self::vanilla_2_2`]; the card can
     /// still be turned face up for its mana cost if it's a creature card.
     pub fn cloaked_2_2() -> Self {
@@ -8021,7 +8021,7 @@ pub enum Effect {
     /// CR 701.62a: Manifest dread — look at top 2 cards of library, manifest one,
     /// put the rest into graveyard. Uses interactive WaitingFor::ManifestDreadChoice.
     ManifestDread,
-    /// CR 702.170a: Cloak — put card(s) onto the battlefield face down as a 2/2
+    /// CR 701.58a: Cloak — put card(s) onto the battlefield face down as a 2/2
     /// creature **with ward {2}**, turnable face up for its mana cost if it's a
     /// creature card. Distinct from `Manifest` (CR 701.40a): cloak grants ward
     /// and is a separate keyword action for "cloak"-referencing text. `target`
@@ -10000,7 +10000,7 @@ pub enum EffectKind {
     Adapt,
     Manifest,
     ManifestDread,
-    /// CR 702.170a: Cloak (face-down 2/2 with ward {2}).
+    /// CR 701.58a: Cloak (face-down 2/2 with ward {2}).
     Cloak,
     ExtraTurn,
     GrantExtraLoyaltyActivations,

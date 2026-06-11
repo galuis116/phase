@@ -23960,7 +23960,7 @@ mod tests {
 
     #[test]
     fn effect_cloak_top_card() {
-        // CR 702.170a: Cryptic Coat / Ransom Note — "cloak the top card of your library".
+        // CR 701.58a: Cryptic Coat / Ransom Note — "cloak the top card of your library".
         let e = parse_effect("Cloak the top card of your library");
         assert!(
             matches!(
@@ -23986,6 +23986,15 @@ mod tests {
                 }
             ),
             "expected Cloak {{ Controller, count: 2 }}, got: {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_cloak_rejects_unsupported_source_suffix() {
+        let e = parse_effect("Cloak the top card of their library");
+        assert!(
+            matches!(e, Effect::Unimplemented { .. }),
+            "unsupported cloak source must not default to Controller: {e:?}"
         );
     }
 

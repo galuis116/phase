@@ -3,7 +3,7 @@ use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
-/// CR 702.170a: Cloak — put the top card of a player's library onto the
+/// CR 701.58a: Cloak — put the top card of a player's library onto the
 /// battlefield face down as a 2/2 creature **with ward {2}**. Like manifest
 /// (CR 701.40a), a cloaked creature card can later be turned face up for its
 /// mana cost; the sole behavioral difference is the ward {2} the cloaked
@@ -29,7 +29,8 @@ pub fn resolve(
 
     let player = super::resolve_player_for_context_ref(state, ability, &target);
 
-    // CR 701.40e (applied by analogy to cloak): cloak cards one at a time.
+    // CR 701.58e: If an effect instructs a player to cloak multiple cards from
+    // a single library, those cards are cloaked one at a time.
     for _ in 0..count {
         let has_cards = state
             .players
@@ -52,4 +53,54 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{QuantityExpr, TargetFilter};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::{Keyword, WardCost};
+    use crate::types::mana::ManaCost;
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    #[test]
+    fn cloak_top_card_enters_face_down_with_ward_two() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let card = create_object(
+            &mut state,
+            CardId(70158),
+            player,
+            "Cloaked Card".to_string(),
+            Zone::Library,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Cloak {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            ObjectId(999),
+            player,
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = &state.objects[&card];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert!(obj.face_down);
+        assert_eq!(obj.power, Some(2));
+        assert_eq!(obj.toughness, Some(2));
+        assert!(obj.keywords.iter().any(|keyword| matches!(
+            keyword,
+            Keyword::Ward(WardCost::Mana(cost)) if *cost == ManaCost::generic(2)
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged { object_id, to, .. } if *object_id == card && *to == Zone::Battlefield)));
+    }
 }

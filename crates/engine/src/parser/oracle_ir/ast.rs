@@ -447,7 +447,7 @@ pub(crate) enum ImperativeFamilyAst {
     },
     /// CR 701.62a: Manifest dread.
     ManifestDread,
-    /// CR 702.170a: Cloak the top card(s) of a library — face-down 2/2 with
+    /// CR 701.58a: Cloak the top card(s) of a library — face-down 2/2 with
     /// ward {2}, turnable face up for its mana cost if it's a creature card.
     Cloak {
         target: TargetFilter,
