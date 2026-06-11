@@ -1201,7 +1201,11 @@ fn effect_manages_own_outcome_flag(effect: &Effect) -> bool {
 fn effect_writes_last_revealed_ids(effect: &Effect) -> bool {
     matches!(
         effect,
-        Effect::RevealTop { .. } | Effect::Dig { .. } | Effect::RevealUntil { .. } | Effect::Clash
+        Effect::RevealTop { .. }
+            | Effect::Dig { .. }
+            | Effect::RevealUntil { .. }
+            | Effect::Clash
+            | Effect::TurnFaceUp { .. }
     )
 }
 

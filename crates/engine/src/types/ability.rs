@@ -8002,7 +8002,7 @@ pub enum Effect {
     /// CR 701.62a: Manifest dread — look at top 2 cards of library, manifest one,
     /// put the rest into graveyard. Uses interactive WaitingFor::ManifestDreadChoice.
     ManifestDread,
-    /// CR 708.3: Turn a face-down card face up via a resolving effect (not the
+    /// CR 406.3 + CR 701.20a: Turn a face-down card face up via a resolving effect (not the
     /// morph special action). Used by the Imprint "flip" cards — Clone Shell,
     /// Summoner's Egg, Compleated Clone Shell, The Creation of Avacyn — which
     /// exile a card face down and later "turn the exiled card face up". `target`
@@ -8483,7 +8483,7 @@ fn default_target_filter_self_ref() -> TargetFilter {
     TargetFilter::SelfRef
 }
 
-/// CR 708.3: default for `Effect::TurnFaceUp` — "the exiled card" this source
+/// CR 406.3: default for `Effect::TurnFaceUp` — "the exiled card" this source
 /// exiled face down (Imprint flip cards).
 fn default_target_filter_exiled_by_source() -> TargetFilter {
     TargetFilter::ExiledBySource

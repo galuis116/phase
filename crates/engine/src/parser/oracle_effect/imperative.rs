@@ -5683,7 +5683,7 @@ pub(super) fn parse_imperative_family_ast(
         "exile" => parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter),
         "counter" => parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter),
 
-        // CR 708.3: "turn the exiled card(s) face up" — the Imprint "flip" cards
+        // CR 406.3 + CR 701.20a: "turn the exiled card(s) face up" — the Imprint "flip" cards
         // (Clone Shell, Summoner's Egg, Compleated Clone Shell, The Creation of
         // Avacyn). Distinct from the morph/disguise special action ("you may
         // turn this face up"), which is an activated ability parsed elsewhere.
@@ -7165,7 +7165,7 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // constructs `Effect::Manifest { target: subject.affected, ... }` directly.
         ImperativeFamilyAst::Manifest { target, count } => Effect::Manifest { target, count },
         ImperativeFamilyAst::ManifestDread => Effect::ManifestDread,
-        // CR 708.3: Turn the exiled card(s) face up (Imprint flip cards).
+        // CR 406.3: Turn the exiled card(s) face up (Imprint flip cards).
         ImperativeFamilyAst::TurnFaceUp { target } => Effect::TurnFaceUp { target },
         ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,
         ImperativeFamilyAst::VentureIntoDungeon => Effect::VentureIntoDungeon,

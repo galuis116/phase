@@ -23960,7 +23960,7 @@ mod tests {
 
     #[test]
     fn turn_face_up_then_conditional_put_keeps_follow_up_clause() {
-        // CR 708.3: Clone Shell / Summoner's Egg dies-trigger effect. The
+        // CR 406.3 + CR 701.20a: Clone Shell / Summoner's Egg dies-trigger effect. The
         // "turn the exiled card face up" clause must NOT swallow the trailing
         // "If it's a creature card, put it onto the battlefield ..." sentence:
         // the leading clause lowers to TurnFaceUp and the follow-up survives as
@@ -23998,7 +23998,7 @@ mod tests {
 
     #[test]
     fn effect_turn_the_exiled_card_face_up() {
-        // CR 708.3: Summoner's Egg / Compleated Clone Shell — singular subject.
+        // CR 406.3: Summoner's Egg / Compleated Clone Shell — singular subject.
         let e = parse_effect("Turn the exiled card face up");
         assert!(
             matches!(
@@ -24013,7 +24013,7 @@ mod tests {
 
     #[test]
     fn effect_turn_the_exiled_cards_face_up() {
-        // CR 708.3: Clone Shell — plural subject ("turn the exiled cards face up").
+        // CR 406.3: Clone Shell — plural subject ("turn the exiled cards face up").
         let e = parse_effect("Turn the exiled cards face up");
         assert!(
             matches!(
