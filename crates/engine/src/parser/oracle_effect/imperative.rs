@@ -5838,6 +5838,64 @@ pub(super) fn parse_imperative_family_ast(
                 None
             }
         }
+        // CR 702.170a: "cloak the top card of your library" / "cloak the top N
+        // cards of [your / that player's] library" — face-down 2/2 with ward {2}.
+        // First pass covers the top-of-library source (Cryptic Coat, Ransom
+        // Note); cloaking from hand / a face-down pile is deferred.
+        "cloak" | "cloaks" => {
+            if let Ok((rest, _)) = alt((
+                tag::<_, _, OracleError<'_>>("cloak the top "),
+                tag("cloaks the top "),
+            ))
+            .parse(lower)
+            {
+                let parsed = alt((
+                    value(
+                        QuantityExpr::Fixed { value: 1 },
+                        alt((tag::<_, _, OracleError<'_>>("card "), tag("cards "))),
+                    ),
+                    map(nom_primitives::parse_number, |n| QuantityExpr::Fixed {
+                        value: n as i32,
+                    }),
+                ))
+                .parse(rest);
+
+                let (count, after_count) = if let Ok((after_count, count)) = parsed {
+                    let after_count = if matches!(&count, QuantityExpr::Fixed { value: 1 }) {
+                        after_count
+                    } else if let Ok((after_cards, _)) = preceded(
+                        tag::<_, _, OracleError<'_>>(" "),
+                        alt((tag("card "), tag("cards "))),
+                    )
+                    .parse(after_count)
+                    {
+                        after_cards
+                    } else {
+                        after_count
+                    };
+                    (count, after_count)
+                } else {
+                    (QuantityExpr::Fixed { value: 1 }, rest)
+                };
+
+                let target = if tag::<_, _, OracleError<'_>>("of your library")
+                    .parse(after_count)
+                    .is_ok()
+                {
+                    TargetFilter::Controller
+                } else if tag::<_, _, OracleError<'_>>("of that player's library")
+                    .parse(after_count)
+                    .is_ok()
+                {
+                    that_player_library_filter(ctx)
+                } else {
+                    TargetFilter::Controller
+                };
+                Some(ImperativeFamilyAst::Cloak { target, count })
+            } else {
+                None
+            }
+        }
         "proliferate" => Some(ImperativeFamilyAst::Proliferate),
         // CR 701.56a: "time travel" / "time travel N times"
         "time" => {
@@ -7129,6 +7187,8 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // constructs `Effect::Manifest { target: subject.affected, ... }` directly.
         ImperativeFamilyAst::Manifest { target, count } => Effect::Manifest { target, count },
         ImperativeFamilyAst::ManifestDread => Effect::ManifestDread,
+        // CR 702.170a: Cloak the top card(s) of a library (face-down 2/2 + ward {2}).
+        ImperativeFamilyAst::Cloak { target, count } => Effect::Cloak { target, count },
         ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,
         ImperativeFamilyAst::VentureIntoDungeon => Effect::VentureIntoDungeon,
         ImperativeFamilyAst::VentureIntoUndercity => Effect::VentureInto {
