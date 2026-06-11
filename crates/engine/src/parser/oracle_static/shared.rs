@@ -2492,26 +2492,53 @@ pub(crate) fn parse_combat_rule_static_predicate_with_defended_nom(
 
 pub(crate) fn parse_rule_static_tail_predicate_nom(
     input: &str,
-) -> OracleResult<'_, RuleStaticPredicate> {
+) -> OracleResult<
+    '_,
+    (
+        RuleStaticPredicate,
+        Option<crate::types::triggers::AttackTargetFilter>,
+    ),
+> {
     alt((
-        parse_rule_static_predicate_nom,
-        value(RuleStaticPredicate::CantBlock, tag("block")),
-        value(
-            RuleStaticPredicate::CantCrew,
-            (tag("crew"), opt(preceded(space1, tag("vehicles")))),
+        map(
+            parse_combat_rule_static_predicate_with_defended_nom,
+            |(predicate, defended)| (predicate, defended),
         ),
-        value(
-            RuleStaticPredicate::CantBeActivated,
-            alt((
-                tag("have its activated abilities activated"),
-                tag("have their activated abilities activated"),
-            )),
+        map(parse_rule_static_predicate_nom, |predicate| {
+            (predicate, None)
+        }),
+        map(value(RuleStaticPredicate::CantBlock, tag("block")), |p| {
+            (p, None)
+        }),
+        map(
+            value(
+                RuleStaticPredicate::CantCrew,
+                (tag("crew"), opt(preceded(space1, tag("vehicles")))),
+            ),
+            |p| (p, None),
+        ),
+        map(
+            value(
+                RuleStaticPredicate::CantBeActivated,
+                alt((
+                    tag("have its activated abilities activated"),
+                    tag("have their activated abilities activated"),
+                )),
+            ),
+            |p| (p, None),
         ),
     ))
     .parse(input)
 }
 
-pub(crate) fn parse_rule_static_tail_predicates(rest: &str) -> Option<Vec<RuleStaticPredicate>> {
+pub(crate) fn parse_rule_static_tail_predicates(
+    rest: &str,
+) -> Option<
+    Vec<(
+        RuleStaticPredicate,
+        Option<crate::types::triggers::AttackTargetFilter>,
+    )>,
+> {
     let mut remaining = rest;
     let mut predicates = Vec::new();
 
@@ -2521,9 +2548,9 @@ pub(crate) fn parse_rule_static_tail_predicates(rest: &str) -> Option<Vec<RuleSt
             return Some(predicates);
         }
         let (after_separator, _) = parse_rule_static_separator_nom(trimmed).ok()?;
-        let (after_predicate, predicate) =
+        let (after_predicate, (predicate, defended)) =
             parse_rule_static_tail_predicate_nom(after_separator).ok()?;
-        predicates.push(predicate);
+        predicates.push((predicate, defended));
         remaining = after_predicate;
     }
 }
@@ -2547,11 +2574,13 @@ pub(crate) fn parse_cant_attack_rule_static_predicate_nom(
     input: &str,
 ) -> OracleResult<'_, Option<crate::types::triggers::AttackTargetFilter>> {
     let (rest, _) = tag("can't attack").parse(input)?;
-    let (rest, _) = opt(preceded(space1, tag("its owner"))).parse(rest)?;
+    let (rest, owner_restriction) = opt(preceded(space1, tag("its owner"))).parse(rest)?;
     let (rest, a_player) = opt(preceded(space1, tag("a player"))).parse(rest)?;
     let (rest, defended) = parse_cant_attack_defended_scope_nom(rest)?;
     use crate::types::triggers::AttackTargetFilter;
-    let defended = if a_player.is_some() {
+    let defended = if owner_restriction.is_some() {
+        Some(AttackTargetFilter::Owner)
+    } else if a_player.is_some() {
         Some(AttackTargetFilter::Player)
     } else {
         defended

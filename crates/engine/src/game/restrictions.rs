@@ -1822,6 +1822,7 @@ pub(crate) fn attack_target_matches_defended_scope(
     attack_target: Option<&crate::game::combat::AttackTarget>,
     filter: &crate::types::triggers::AttackTargetFilter,
     source_controller: PlayerId,
+    source_owner: PlayerId,
 ) -> bool {
     use crate::game::combat::AttackTarget;
     use crate::types::triggers::AttackTargetFilter;
@@ -1844,6 +1845,8 @@ pub(crate) fn attack_target_matches_defended_scope(
         (AttackTargetFilter::Battle, AttackTarget::Battle(b_id)) => {
             permanent_controller(*b_id) == Some(source_controller)
         }
+        // CR 506.2: "can't attack its owner" — compare against the permanent's owner.
+        (AttackTargetFilter::Owner, AttackTarget::Player(p)) => *p == source_owner,
         _ => false,
     }
 }

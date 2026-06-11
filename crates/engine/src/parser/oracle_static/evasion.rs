@@ -261,11 +261,13 @@ pub(crate) fn parse_compound_subject_rule_static(
     }
     let subject = text[..subject_lower.len()].trim();
     let affected = parse_rule_static_subject_filter(subject)?;
-    predicates.insert(0, first);
+    predicates.insert(0, (first, None));
     Some(
         predicates
             .into_iter()
-            .map(|predicate| lower_rule_static(predicate, affected.clone(), text))
+            .map(|(predicate, defended)| {
+                lower_rule_static(predicate, affected.clone(), text).attack_defended(defended)
+            })
             .collect(),
     )
 }
@@ -480,8 +482,9 @@ pub(crate) fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDe
         }
         defs.push(companion);
     }
-    for predicate in tail_predicates {
-        let mut companion = lower_rule_static(predicate, affected.clone(), text);
+    for (predicate, defended) in tail_predicates {
+        let mut companion =
+            lower_rule_static(predicate, affected.clone(), text).attack_defended(defended);
         if let Some(condition) = condition.clone() {
             companion = companion.condition(condition);
         }
@@ -1680,6 +1683,14 @@ pub(crate) fn parse_subject_rule_static(text: &str) -> Option<StaticDefinition> 
                 condition: Box::new(control),
             });
             return Some(def);
+        }
+    }
+
+    if let Ok((rest, (predicate, defended))) =
+        parse_combat_rule_static_predicate_with_defended_nom(predicate_text)
+    {
+        if rest.trim().is_empty() {
+            return Some(lower_rule_static(predicate, affected, text).attack_defended(defended));
         }
     }
 
