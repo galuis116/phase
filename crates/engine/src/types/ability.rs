@@ -7351,6 +7351,24 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         exile_instead_of_graveyard: bool,
     },
+    /// CR 614.1a + CR 608.2n + CR 607.2b: "Exile it instead of putting it into a
+    /// graveyard as it resolves" — the self-replacement rider applied by a
+    /// `WhenAPlayerCasts` trigger to the *triggering spell* (Rod of Absorption).
+    ///
+    /// At resolution this effect does NOT move the spell (it is still on the
+    /// stack); it stamps the per-object linked-source marker so the
+    /// stack-resolution router sends the spell to exile (CR 614.1a replaces the
+    /// normal CR 608.2n graveyard destination) when it finishes resolving. When
+    /// the spell reaches exile, it is recorded as "exiled with" the trigger
+    /// source so a linked ability (CR 607.2b — "cards exiled with this artifact")
+    /// can later refer to the accumulating set.
+    ///
+    /// Distinct from `ChangeZone { destination: Exile }` (which moves a card that
+    /// is already in a zone) and from `FreeCastFromZones { exile_instead… }`
+    /// (which stamps the same rider on a spell *cast during resolution*, with no
+    /// linked-exile payoff). This effect is the trigger-driven, link-establishing
+    /// form for the resolving spell itself.
+    ExileResolvingSpellInsteadOfGraveyard,
     /// CR 615: Prevent damage to a target.
     PreventDamage {
         amount: PreventionAmount,
@@ -8939,6 +8957,9 @@ impl Effect {
             // CR 601.2a: candidates gathered by `filter`/`zones` at resolution,
             // no player-selectable target slot.
             | Effect::FreeCastFromZones { .. }
+            // CR 614.1a: acts on the triggering spell (the trigger source), not a
+            // player-declared target.
+            | Effect::ExileResolvingSpellInsteadOfGraveyard
             | Effect::Manifest { .. }
             | Effect::ManifestDread
             | Effect::RollDie { .. }
@@ -9171,6 +9192,7 @@ impl Effect {
             | Effect::ExchangeControl { .. }
             | Effect::ExchangeLifeWithStat { .. }
             | Effect::ExileFromTopUntil { .. }
+            | Effect::ExileResolvingSpellInsteadOfGraveyard
             | Effect::FlipCoin { .. }
             | Effect::FlipCoinUntilLose { .. }
             | Effect::Forage
@@ -9365,6 +9387,7 @@ impl Effect {
             | Effect::ExchangeControl { .. }
             | Effect::ExchangeLifeWithStat { .. }
             | Effect::ExileFromTopUntil { .. }
+            | Effect::ExileResolvingSpellInsteadOfGraveyard
             | Effect::FlipCoin { .. }
             | Effect::FlipCoinUntilLose { .. }
             | Effect::Forage
@@ -9518,6 +9541,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::PayCost { .. } => "PayCost",
         Effect::CastFromZone { .. } => "CastFromZone",
         Effect::FreeCastFromZones { .. } => "FreeCastFromZones",
+        Effect::ExileResolvingSpellInsteadOfGraveyard => "ExileResolvingSpellInsteadOfGraveyard",
         Effect::PreventDamage { .. } => "PreventDamage",
         Effect::CreateDamageReplacement { .. } => "CreateDamageReplacement",
         Effect::LoseTheGame { .. } => "LoseTheGame",
@@ -9711,6 +9735,7 @@ pub enum EffectKind {
     PayCost,
     CastFromZone,
     FreeCastFromZones,
+    ExileResolvingSpellInsteadOfGraveyard,
     PreventDamage,
     CreateDamageReplacement,
     Regenerate,
@@ -9915,6 +9940,9 @@ impl From<&Effect> for EffectKind {
             Effect::PayCost { .. } => EffectKind::PayCost,
             Effect::CastFromZone { .. } => EffectKind::CastFromZone,
             Effect::FreeCastFromZones { .. } => EffectKind::FreeCastFromZones,
+            Effect::ExileResolvingSpellInsteadOfGraveyard => {
+                EffectKind::ExileResolvingSpellInsteadOfGraveyard
+            }
             Effect::PreventDamage { .. } => EffectKind::PreventDamage,
             Effect::CreateDamageReplacement { .. } => EffectKind::CreateDamageReplacement,
             Effect::LoseTheGame { .. } => EffectKind::LoseTheGame,

@@ -62,6 +62,15 @@ fn spell_in_zone(state: &GameState, id: ObjectId, zone: Zone) -> bool {
     state.objects.get(&id).is_some_and(|obj| obj.zone == zone)
 }
 
+/// CR 614.1a + CR 608.2n + CR 607.2b: The per-object linked source is also the
+/// exile-instead marker for Rod of Absorption's resolving-spell rider.
+fn stack_exile_linked_source(state: &GameState, object_id: ObjectId) -> Option<ObjectId> {
+    state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.exile_from_stack_linked_source)
+}
+
 /// CR 608.3e + CR 614.6: A permanent spell whose ETB was fully prevented goes
 /// to its owner's graveyard (only if still on the stack — see `spell_still_on_stack`).
 /// Routed through the zone pipeline so board-wide `Moved` graveyard→exile
@@ -548,7 +557,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // instead of putting it anywhere else any time it would leave the stack.
             // Flashback only appears on instants/sorceries — unconditional exile is correct.
             Zone::Exile
-        } else if casting_variant.replaces_stack_to_graveyard_with_exile()
+        } else if (casting_variant.replaces_stack_to_graveyard_with_exile()
+            || stack_exile_linked_source(state, entry.id).is_some())
             && !is_permanent_spell(state, entry.id)
         {
             // CR 614.1a + CR 608.2n: Graveyard-cast permission riders ("If a
@@ -558,6 +568,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // free-cast rider is no longer read here — it is a self-scoped
             // `Moved` replacement on the spell, consulted by the pipeline when
             // the spell's stack → graveyard move is delivered below (CR 614.6).
+            // Rod of Absorption's per-object linked source is the same kind of
+            // STATIC destination rule and is honored here too.
             Zone::Exile
         } else if is_permanent_spell(state, entry.id) {
             // CR 608.3: Permanent spells enter the battlefield.
@@ -998,9 +1010,31 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 // the permanent-spell NeedsChoice arm: emit StackResolved + clear
                 // trigger context, then bail so the replacement-choice resume
                 // path delivers the redirected move.
+                let stack_exile_link_source = stack_exile_linked_source(state, entry.id);
                 let req = ZoneMoveRequest::spell_resolution_default(entry.id, dest);
                 match zone_pipeline::move_object(state, req, events) {
-                    ZoneMoveResult::Done => {}
+                    ZoneMoveResult::Done => {
+                        // CR 607.2b + CR 406.6: a spell exiled by Rod of
+                        // Absorption's per-object linked-source rider is "exiled
+                        // with" the trigger source that stamped it. Now that the
+                        // pipeline has delivered the move, record the linked-exile
+                        // association so the source's linked ability ("cast any
+                        // number of cards exiled with this artifact") sees the
+                        // accumulating set.
+                        // Gate on the object's ACTUAL post-move zone (not the
+                        // requested `dest`) so a redirect that diverted the card
+                        // away from exile never records a spurious link, while a
+                        // redirect INTO exile still records correctly.
+                        if spell_in_zone(state, entry.id, Zone::Exile) {
+                            if let Some(link_source) = stack_exile_link_source {
+                                super::exile_links::push_tracked_by_source(
+                                    state,
+                                    entry.id,
+                                    link_source,
+                                );
+                            }
+                        }
+                    }
                     ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
                         events.push(GameEvent::StackResolved {
                             object_id: entry.id,

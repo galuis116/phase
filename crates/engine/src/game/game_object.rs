@@ -842,6 +842,15 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_from_zone: Option<Zone>,
 
+    /// CR 614.1a + CR 608.2n + CR 607.2b + CR 406.6: While present, this spell
+    /// is exiled instead of being put into its owner's graveyard as it resolves,
+    /// and the resulting exile is recorded as "exiled with" the stored source.
+    /// Set by `Effect::ExileResolvingSpellInsteadOfGraveyard` (Rod of
+    /// Absorption's "exile it instead of putting it into a graveyard as it
+    /// resolves" rider); consumed by the stack-resolution router.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exile_from_stack_linked_source: Option<ObjectId>,
+
     /// CR 305.1 + CR 603.4: Transient field tracking the zone a land was played
     /// from. Consumed by ETB trigger processing for conditions like "without
     /// being played"; permanents put onto the battlefield by effects leave this
@@ -1134,6 +1143,7 @@ impl GameObject {
             room_unlocks: None,
             class_level: None,
             cast_from_zone: None,
+            exile_from_stack_linked_source: None,
             played_from_zone: None,
             mana_spent_to_cast: false,
             colors_spent_to_cast: ColoredManaCount::default(),
