@@ -379,11 +379,22 @@ fn plotted_grant_target(previous: &AbilityDefinition) -> TargetFilter {
 
 fn parse_becomes_plotted_continuation(lower: &str) -> bool {
     let text = lower.trim().trim_end_matches('.').trim(); // allow-noncombinator: punctuation cleanup before all_consuming
-    all_consuming(alt((
-        value((), tag::<_, _, OracleError<'_>>("it becomes plotted")),
-        value((), tag("that card becomes plotted")),
-        value((), tag("they become plotted")),
-    )))
+                                                          // CR 702.168 + CR 614.1c: Accept an optional "if you do," gate. The Plot-grant
+                                                          // cards (Make Your Own Luck, Lilah, Kellan Joins Up, Jace Reawakened) read
+                                                          // "You may exile a card. If you do, it becomes plotted." — the continuation
+                                                          // already attaches only after the (optional) exile and conditions on its
+                                                          // result, so the "if you do" restatement carries no extra runtime meaning.
+    all_consuming((
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("if you do, "),
+            tag::<_, _, OracleError<'_>>("if you do "),
+        ))),
+        alt((
+            value((), tag::<_, _, OracleError<'_>>("it becomes plotted")),
+            value((), tag("that card becomes plotted")),
+            value((), tag("they become plotted")),
+        )),
+    ))
     .parse(text)
     .is_ok()
 }
