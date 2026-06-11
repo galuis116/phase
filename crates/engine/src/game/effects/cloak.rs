@@ -95,6 +95,7 @@ mod tests {
         assert!(obj.face_down);
         assert_eq!(obj.power, Some(2));
         assert_eq!(obj.toughness, Some(2));
+        // allow-raw-authority: unit test asserts the exact Ward {2} cost the cloak profile grants on the raw keyword vec
         assert!(obj.keywords.iter().any(|keyword| matches!(
             keyword,
             Keyword::Ward(WardCost::Mana(cost)) if *cost == ManaCost::generic(2)
