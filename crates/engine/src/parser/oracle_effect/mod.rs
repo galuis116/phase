@@ -30055,7 +30055,7 @@ mod tests {
         );
     }
 
-    /// CR 702.168: the OTJ Plot-grant cards (Make Your Own Luck, Lilah,
+    /// CR 702.170c-d: the OTJ Plot-grant cards (Make Your Own Luck, Lilah,
     /// Kellan Joins Up, Jace Reawakened) gate the grant behind "If you do," —
     /// "You may exile a card. If you do, it becomes plotted." The optional
     /// "if you do," prefix must still route to the `BecomesPlotted` continuation
