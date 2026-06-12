@@ -7147,6 +7147,18 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.multi_target = Some(MultiTargetSpec::fixed(0, count as usize));
             clause
         }
+        // CR 117.3a: "you may <effect>" and subject-stripped "each player may
+        // <effect>" both arrive here as `YouMay` (the `you`/`may` first-word
+        // arms). The optionality is an ability-level flag, not part of the
+        // Effect, so lower the body and mark the CLAUSE optional. The bare
+        // `lower_imperative_family_effect` path drops the "may" entirely,
+        // making the effect mandatory — e.g. Mog, Moogle Warrior's "each
+        // player may discard a card" became a forced discard (issue #2901).
+        ImperativeFamilyAst::YouMay { text } => {
+            let mut clause = parsed_clause(super::parse_effect(&text));
+            clause.optional = true;
+            clause
+        }
         // All other arms produce a bare Effect with no sub_ability chain.
         other => parsed_clause(lower_imperative_family_effect(other)),
     }
