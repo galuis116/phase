@@ -2625,9 +2625,10 @@ mod tests {
                 source_id: ObjectId(1),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
-                restrictions: vec![ManaRestriction::OnlyForTypeSpellsOrAbilities(
-                    "Colorless Eldrazi".to_string(),
-                )],
+                restrictions: vec![ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                    spell_type: "Colorless Eldrazi".to_string(),
+                    ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+                }],
                 grants: vec![],
                 expiry: None,
             });
