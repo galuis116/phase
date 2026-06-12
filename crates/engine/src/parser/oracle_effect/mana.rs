@@ -1237,6 +1237,15 @@ fn parse_activation_source_quality(input: &str) -> OracleResult<'_, String> {
     Ok((rest, normalize_restricted_source_phrase(phrase.trim())))
 }
 
+fn parse_activation_tail_after_or(input: &str) -> OracleResult<'_, Option<String>> {
+    let (input, _) = opt(tag("to ")).parse(input)?;
+    let (input, _) = tag("activate ").parse(input)?;
+    let (input, _) = alt((tag("an ability"), tag("abilities"))).parse(input)?;
+    let (input, source_quality) =
+        opt(preceded(tag(" of "), parse_activation_source_quality)).parse(input)?;
+    Ok((input, source_quality))
+}
+
 /// The ability-activation tail of a "cast [X] spell …" spend restriction.
 enum ActivationTail {
     /// No "or activate …" tail — a plain spell-type restriction.
@@ -1248,46 +1257,27 @@ enum ActivationTail {
 }
 
 fn split_restricted_spell_and_activation(rest: &str) -> (&str, ActivationTail) {
-    // "… of [type]" forms: the ability is restricted to the named source type.
-    let typed = all_consuming(alt((
+    // Anchor on the activation suffix prefix instead of the first " or " so
+    // spell type unions ("instant or sorcery") stay inside the spell half.
+    let activation_tail = all_consuming(alt((
         separated_pair(
-            take_until::<_, _, OracleError<'_>>(" or activate abilities of "),
-            tag(" or activate abilities of "),
-            parse_activation_source_quality,
+            take_until::<_, _, OracleError<'_>>(" or to activate "),
+            tag(" or "),
+            parse_activation_tail_after_or,
         ),
         separated_pair(
-            take_until::<_, _, OracleError<'_>>(" or activate an ability of "),
-            tag(" or activate an ability of "),
-            parse_activation_source_quality,
-        ),
-        separated_pair(
-            take_until::<_, _, OracleError<'_>>(" or to activate an ability of "),
-            tag(" or to activate an ability of "),
-            parse_activation_source_quality,
+            take_until::<_, _, OracleError<'_>>(" or activate "),
+            tag(" or "),
+            parse_activation_tail_after_or,
         ),
     )))
     .parse(rest)
     .map(|(_, (spell_part, source_quality))| (spell_part.trim(), source_quality));
-    if let Ok((spell_part, source_quality)) = typed {
-        return (spell_part, ActivationTail::OfType(source_quality));
-    }
-
-    // CR 106.6: generic "… or (to) activate an ability" / "… or activate abilities"
-    // with no type qualifier — any ability activation is permitted (Sage of the
-    // Unknowable, Purple Dragon Punks). Checked after the typed forms so a trailing
-    // " of <type>" is not swallowed as the generic tail.
-    let any = all_consuming((
-        take_until::<_, _, OracleError<'_>>(" or "),
-        alt((
-            tag(" or to activate an ability"),
-            tag(" or activate an ability"),
-            tag(" or activate abilities"),
-        )),
-    ))
-    .parse(rest)
-    .map(|(_, (spell_part, _))| spell_part.trim());
-    if let Ok(spell_part) = any {
-        return (spell_part, ActivationTail::Any);
+    if let Ok((spell_part, source_quality)) = activation_tail {
+        return (
+            spell_part,
+            source_quality.map_or(ActivationTail::Any, ActivationTail::OfType),
+        );
     }
 
     (rest.trim(), ActivationTail::None)

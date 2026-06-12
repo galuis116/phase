@@ -13367,6 +13367,34 @@ mod tests {
     }
 
     #[test]
+    fn mana_spend_restriction_any_activation_tail_preserves_inner_or_spell_type() {
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "spend this mana only to cast an instant or sorcery spell or activate an ability",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Instant or Sorcery".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::Any,
+            })
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_any_activation_tail_accepts_to_activate_plural() {
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "spend this mana only to cast artifact spells or to activate abilities",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Artifact".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::Any,
+            })
+        );
+    }
+
+    #[test]
     fn mana_spend_restriction_ally_spell_or_source_activation() {
         let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
             "spend this mana only to cast an ally spell or activate an ability of an ally source",
