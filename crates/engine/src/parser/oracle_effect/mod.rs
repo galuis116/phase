@@ -23961,10 +23961,10 @@ mod tests {
 
     #[test]
     fn each_player_may_discard_is_optional_per_player() {
-        // CR 117.3a + issue #2901: Mog, Moogle Warrior — "each player MAY
-        // discard a card" must be an optional per-player discard, not a forced
-        // one. The subject-stripped "may discard a card" is lowered via the
-        // `YouMay` wrapper, which previously dropped the optionality.
+        // CR 603.5 / CR 608.2d + issue #2901: Mog, Moogle Warrior — "each
+        // player MAY discard a card" must be an optional per-player discard, not
+        // a forced one. The subject-stripped "may discard a card" is lowered via
+        // the `YouMay` wrapper, which previously dropped the optionality.
         let parsed = crate::parser::oracle::parse_oracle_text(
             "At the beginning of your end step, each player may discard a card.",
             "Mog, Moogle Warrior",
