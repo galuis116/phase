@@ -406,15 +406,13 @@ pub fn resolve_set_life_total(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (amount, target) = match &ability.effect {
-        Effect::SetLifeTotal { amount, target } => (
-            crate::game::quantity::resolve_quantity_with_targets(state, amount, ability),
-            target.clone(),
-        ),
+    let (amount_expr, target) = match &ability.effect {
+        Effect::SetLifeTotal { amount, target } => (amount, target),
         _ => return Err(EffectError::MissingParam("SetLifeTotal amount".to_string())),
     };
+    let amount = crate::game::quantity::resolve_quantity_with_targets(state, amount_expr, ability);
 
-    // CR 119.5 + CR 109.5: Resolve which players' life totals are set. The
+    // CR 119.5 + CR 608.2f: Resolve which players' life totals are set. The
     // common single-player forms ("your" → Controller, "target player's" →
     // the chosen target) preserve the original single-player behavior. The
     // non-targeted all-players form ("each player's life total becomes N" —
@@ -440,14 +438,12 @@ pub fn resolve_set_life_total(
     // handle their own CR 119.7 / CR 119.8 short-circuits and replacement
     // pipeline routing.
     for target_player_id in target_player_ids {
-        let Some(current_life) = state
+        let current_life = state
             .players
             .iter()
             .find(|p| p.id == target_player_id)
             .map(|p| p.life)
-        else {
-            continue;
-        };
+            .ok_or(EffectError::PlayerNotFound)?;
         let diff = amount - current_life;
 
         let deferred = match diff.signum() {

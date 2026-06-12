@@ -907,7 +907,7 @@ pub(super) fn parse_subject_application(
         let (filter, _) = parse_target(&normalized);
         return subject_filter_application(filter, false);
     }
-    // CR 119.5 + CR 109.5: "each player's life total" / "all players' life
+    // CR 119.5: "each player's life total" / "all players' life
     // total(s)" is a non-targeted ALL-players scope (Worldfire — issue #2882).
     // This must precede the generic "each "/"all " branch below: that branch
     // strips the quantifier and routes "player's life total" through
