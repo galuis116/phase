@@ -21,8 +21,9 @@ use crate::types::mana::{
 };
 use crate::types::player::PlayerId;
 use crate::types::statics::{
-    ActivationExemption, CastFreeOrigin, CastFrequency, CastingProhibitionCondition,
-    CostModifyMode, ExileCardPool, ExileCastCost, ExileCastTiming, ProhibitionScope, StaticMode,
+    ActivationExemption, AdditionalCostTaxAction, CastFreeOrigin, CastFrequency,
+    CastingProhibitionCondition, CostModifyMode, ExileCardPool, ExileCastCost, ExileCastTiming,
+    ProhibitionScope, StaticMode,
 };
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
@@ -924,6 +925,38 @@ fn upsert_keyword_by_kind(keywords: &mut Vec<Keyword>, keyword: Keyword) {
     }
 }
 
+pub(crate) fn requires_per_instance_resolution(kind: KeywordKind) -> bool {
+    matches!(
+        kind,
+        // CR 702.175b: each Offspring instance is paid and triggers separately.
+        KeywordKind::Offspring
+            // CR 702.56b: each Replicate instance is paid and triggers separately.
+            | KeywordKind::Replicate
+    )
+}
+
+fn requires_per_instance_keyword(keyword: &Keyword) -> bool {
+    if requires_per_instance_resolution(keyword.kind()) {
+        return true;
+    }
+
+    matches!(
+        keyword,
+        // CR 702.153b: each Casualty instance is paid and triggers separately.
+        Keyword::Casualty(_)
+            // CR 702.157b: each Squad instance is paid and triggers separately.
+            | Keyword::Squad(_)
+    )
+}
+
+fn merge_spell_keyword(keywords: &mut Vec<Keyword>, keyword: Keyword, preserve_instances: bool) {
+    if preserve_instances && requires_per_instance_keyword(&keyword) {
+        keywords.push(keyword);
+    } else {
+        upsert_keyword_by_kind(keywords, keyword);
+    }
+}
+
 /// CR 601.2a: Single matcher-side authority for "what zone did this spell get
 /// cast from" at SpellCast-event time. Encapsulates the placeholder vs
 /// ability-context storage split so the trigger matcher (and any future
@@ -1018,15 +1051,57 @@ fn granted_spell_keywords(
             continue;
         }
 
-        upsert_keyword_by_kind(&mut keywords, keyword.clone());
+        merge_spell_keyword(&mut keywords, keyword.clone(), false);
     }
 
     // CR 611.2c: Player-scoped flash-timing grants applied by activated/triggered
     // abilities (e.g. Teferi +1) live in the TCE table, not on a battlefield static.
-    transient_granted_spell_keywords(state, caster, spell_obj, origin_zone, &mut keywords);
+    transient_granted_spell_keywords(state, caster, spell_obj, origin_zone, &mut keywords, false);
 
     // CR 601.2f: One-shot "the next spell …" keyword/flash grants (Insist, Quicken, Wand).
-    apply_pending_next_spell_keyword_grants(state, caster, object_id, &mut keywords);
+    apply_pending_next_spell_keyword_grants(state, caster, object_id, &mut keywords, false);
+
+    keywords
+}
+
+fn granted_spell_keyword_instances(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+) -> Vec<Keyword> {
+    let Some(spell_obj) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+
+    let origin_zone = spell_obj
+        .cast_from_zone
+        .or_else(|| pending_cast_origin_zone_for(state, object_id))
+        .unwrap_or(spell_obj.zone);
+
+    let mut keywords = Vec::new();
+    for (source_obj, def) in super::functioning_abilities::game_active_statics(state) {
+        let StaticMode::CastWithKeyword { keyword } = &def.mode else {
+            continue;
+        };
+
+        let matches = def.affected.as_ref().is_none_or(|filter| {
+            super::filter::spell_object_matches_filter_from_state(
+                state,
+                spell_obj,
+                origin_zone,
+                caster,
+                filter,
+                source_obj.id,
+                &state.all_creature_types,
+            )
+        });
+        if matches {
+            merge_spell_keyword(&mut keywords, keyword.clone(), true);
+        }
+    }
+
+    transient_granted_spell_keywords(state, caster, spell_obj, origin_zone, &mut keywords, true);
+    apply_pending_next_spell_keyword_grants(state, caster, object_id, &mut keywords, true);
 
     keywords
 }
@@ -1045,6 +1120,7 @@ fn transient_granted_spell_keywords(
     spell_obj: &crate::game::game_object::GameObject,
     origin_zone: Zone,
     keywords: &mut Vec<Keyword>,
+    preserve_instances: bool,
 ) {
     for tce in &state.transient_continuous_effects {
         let TargetFilter::SpecificPlayer { id } = tce.affected else {
@@ -1103,7 +1179,7 @@ fn transient_granted_spell_keywords(
                 )
             });
             if matches {
-                upsert_keyword_by_kind(keywords, keyword.clone());
+                merge_spell_keyword(keywords, keyword.clone(), preserve_instances);
             }
         }
     }
@@ -1189,6 +1265,37 @@ pub(crate) fn effective_spell_keywords(
     // the battlefield. Use the pre-announcement zone so flashback still
     // applies for spells being cast from graveyard even after `finalize_cast`
     // moves them to the stack.
+    let effective_origin_zone = pending_cast_origin_zone_for(state, object_id).unwrap_or(obj.zone);
+    if effective_origin_zone != Zone::Battlefield
+        && super::keywords::object_has_effective_keyword_kind(
+            state,
+            object_id,
+            KeywordKind::Flashback,
+        )
+    {
+        upsert_keyword_by_kind(
+            &mut keywords,
+            Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
+        );
+    }
+
+    keywords
+}
+
+pub(crate) fn effective_spell_keyword_instances(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+) -> Vec<Keyword> {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+
+    let mut keywords = obj.keywords.clone();
+    for keyword in granted_spell_keyword_instances(state, caster, object_id) {
+        merge_spell_keyword(&mut keywords, keyword, true);
+    }
+
     let effective_origin_zone = pending_cast_origin_zone_for(state, object_id).unwrap_or(obj.zone);
     if effective_origin_zone != Zone::Battlefield
         && super::keywords::object_has_effective_keyword_kind(
@@ -2519,6 +2626,7 @@ fn apply_pending_next_spell_keyword_grants(
     caster: PlayerId,
     spell_id: ObjectId,
     keywords: &mut Vec<Keyword>,
+    preserve_instances: bool,
 ) {
     for entry in &state.pending_next_spell_modifiers {
         if entry.player != caster {
@@ -2529,7 +2637,7 @@ fn apply_pending_next_spell_keyword_grants(
         }
         match &entry.modifier {
             NextSpellModifier::HasKeyword { keyword } => {
-                upsert_keyword_by_kind(keywords, keyword.clone());
+                merge_spell_keyword(keywords, keyword.clone(), preserve_instances);
             }
             NextSpellModifier::CastAsThoughFlash => {
                 upsert_keyword_by_kind(keywords, Keyword::Flash);
@@ -4409,15 +4517,18 @@ fn cost_filter_has_target_ref(filter: &TargetFilter) -> bool {
 
 fn target_ref_matches_cost_filter(
     state: &GameState,
+    static_source_id: ObjectId,
     source_controller: PlayerId,
-    ability: &ResolvedAbility,
     target: &TargetRef,
     filter: &TargetFilter,
 ) -> bool {
     match target {
         TargetRef::Object(object_id) => {
-            let ctx = super::filter::FilterContext::from_ability_with_controller(
-                ability,
+            // CR 601.2f: Target-referenced cost filters ("that target this creature")
+            // resolve SelfRef against the static's source permanent, not the spell
+            // being cast.
+            let ctx = super::filter::FilterContext::from_source_with_controller(
+                static_source_id,
                 source_controller,
             );
             if super::filter::matches_stack_target_filter(state, *object_id, filter, &ctx) {
@@ -4436,6 +4547,7 @@ fn target_ref_matches_cost_filter(
 
 fn selected_targets_match_filter(
     state: &GameState,
+    static_source_id: ObjectId,
     source_controller: PlayerId,
     ability: &ResolvedAbility,
     filter: &TargetFilter,
@@ -4448,11 +4560,23 @@ fn selected_targets_match_filter(
 
     if require_all {
         targets.iter().all(|target| {
-            target_ref_matches_cost_filter(state, source_controller, ability, target, filter)
+            target_ref_matches_cost_filter(
+                state,
+                static_source_id,
+                source_controller,
+                target,
+                filter,
+            )
         })
     } else {
         targets.iter().any(|target| {
-            target_ref_matches_cost_filter(state, source_controller, ability, target, filter)
+            target_ref_matches_cost_filter(
+                state,
+                static_source_id,
+                source_controller,
+                target,
+                filter,
+            )
         })
     }
 }
@@ -4494,10 +4618,24 @@ fn spell_matches_cost_filter_with_selected_targets(
 
             tf.properties.iter().all(|prop| match prop {
                 crate::types::ability::FilterProp::Targets { filter } => {
-                    selected_targets_match_filter(state, source_controller, ability, filter, false)
+                    selected_targets_match_filter(
+                        state,
+                        source_id,
+                        source_controller,
+                        ability,
+                        filter,
+                        false,
+                    )
                 }
                 crate::types::ability::FilterProp::TargetsOnly { filter } => {
-                    selected_targets_match_filter(state, source_controller, ability, filter, true)
+                    selected_targets_match_filter(
+                        state,
+                        source_id,
+                        source_controller,
+                        ability,
+                        filter,
+                        true,
+                    )
                 }
                 _ => true,
             })
@@ -4693,6 +4831,77 @@ fn collect_battlefield_cost_modifiers(
     }
 
     collected
+}
+
+/// CR 601.2f + CR 118.8: Collect additional non-mana costs imposed by battlefield
+/// statics once targets are chosen. Terror of the Peaks class.
+pub(super) fn collect_imposed_additional_cast_costs(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    ability: &ResolvedAbility,
+) -> Vec<AbilityCost> {
+    use crate::types::ability::ControllerRef;
+
+    let mut costs = Vec::new();
+    for (src_obj, def) in super::functioning_abilities::game_functioning_statics(state) {
+        let bf_id = src_obj.id;
+        let source_controller = src_obj.controller;
+
+        let StaticMode::ImposeAdditionalCost {
+            cost,
+            spell_filter,
+            action: AdditionalCostTaxAction::Cast,
+        } = &def.mode
+        else {
+            continue;
+        };
+
+        let has_target_filter = spell_filter
+            .as_ref()
+            .is_some_and(cost_filter_has_target_ref);
+        if !has_target_filter {
+            continue;
+        }
+
+        if matches!(def.affected, Some(TargetFilter::SelfRef)) {
+            continue;
+        }
+
+        if def.active_zones.is_empty() {
+            if src_obj.zone != Zone::Battlefield {
+                continue;
+            }
+        } else if !def.active_zones.contains(&src_obj.zone) {
+            continue;
+        }
+
+        if let Some(TargetFilter::Typed(ref tf)) = def.affected {
+            match tf.controller {
+                Some(ControllerRef::You) if caster != source_controller => continue,
+                Some(ControllerRef::Opponent) if caster == source_controller => continue,
+                _ => {}
+            }
+        }
+
+        if let Some(ref cond) = def.condition {
+            if !super::layers::evaluate_condition(state, cond, caster, bf_id) {
+                continue;
+            }
+        }
+
+        if let Some(ref filter) = spell_filter {
+            if !spell_matches_cost_filter_with_selected_targets(
+                state, caster, spell_id, filter, bf_id, ability,
+            ) {
+                continue;
+            }
+        }
+
+        costs.push(cost.clone());
+    }
+
+    costs
 }
 
 fn apply_cost_modifications_in_order(mana_cost: &mut ManaCost, collected: &[CostModification]) {
@@ -26925,6 +27134,8 @@ mod tests {
             ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: ModalSelectionCondition::AdditionalCostPaid {
                     source: crate::types::ability::AdditionalCostPaymentSource::Any,
+                    origin: None,
+                    origin_ordinal: None,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,
@@ -42393,9 +42604,10 @@ mod tests {
                         produced: ManaProduction::Colorless {
                             count: QuantityExpr::Fixed { value: 2 },
                         },
-                        restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                            "Colorless Eldrazi".to_string(),
-                        )],
+                        restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                            spell_type: "Colorless Eldrazi".to_string(),
+                            ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+                        }],
                         grants: vec![],
                         expiry: None,
                         target: None,

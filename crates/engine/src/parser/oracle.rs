@@ -2942,6 +2942,7 @@ pub(crate) fn parse_oracle_ir(
                     target: TargetFilter::Any,
                     scope: PreventionScope::AllDamage,
                     damage_source_filter: Some(TargetFilter::Typed(source_filter)),
+                    prevention_duration: None,
                 },
             ))
             .description(line.to_string());
@@ -4318,13 +4319,21 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
 
         // CR 602.2: "Any player may activate this ability." — strip as a recognized
         // annotation. This appears as a trailing sentence on activated abilities.
-        if let Some(prefix) = lower.strip_suffix("any player may activate this ability") {
-            let end = remaining.len() - "any player may activate this ability".len();
+        const ANY_PLAYER_ACTIVATE_SUFFIX: &str = "any player may activate this ability";
+        let any_player_suffix = all_consuming(terminated(
+            take_until::<_, _, OracleError<'_>>(ANY_PLAYER_ACTIVATE_SUFFIX),
+            tag::<_, _, OracleError<'_>>(ANY_PLAYER_ACTIVATE_SUFFIX),
+        ))
+        .parse(lower.as_str())
+        .is_ok();
+        if any_player_suffix {
+            let end = remaining.len() - ANY_PLAYER_ACTIVATE_SUFFIX.len();
+            let prefix = lower[..end].trim();
             remaining = remaining[..end]
                 .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                 .to_string();
             constraints.any_player_may_activate = true;
-            if prefix.trim().is_empty() {
+            if prefix.is_empty() {
                 break;
             }
             continue;
@@ -7808,7 +7817,7 @@ mod tests {
         };
         assert_eq!(filters.len(), 2);
         for (filter, property) in [
-            (&filters[0], FilterProp::Attacking),
+            (&filters[0], FilterProp::Attacking { defender: None }),
             (&filters[1], FilterProp::Blocking),
         ] {
             let TargetFilter::Typed(typed) = filter else {
@@ -10037,6 +10046,8 @@ mod tests {
             ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: crate::types::ability::ModalSelectionCondition::AdditionalCostPaid {
                     source: crate::types::ability::AdditionalCostPaymentSource::Kicker,
+                    origin: None,
+                    origin_ordinal: None,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,
@@ -10066,6 +10077,8 @@ mod tests {
             ModalSelectionConstraint::ConditionalMaxChoices {
                 condition: crate::types::ability::ModalSelectionCondition::AdditionalCostPaid {
                     source: crate::types::ability::AdditionalCostPaymentSource::Any,
+                    origin: None,
+                    origin_ordinal: None,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,
@@ -11230,6 +11243,43 @@ mod tests {
             def.repeat_until, None,
             "the 'if you do' form is deferred — no predicate set, got {:?}",
             def.repeat_until,
+        );
+    }
+
+    #[test]
+    fn tainted_pact_parses_until_stop_repeat_and_unless_same_name_gate() {
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{AbilityCondition, RepeatContinuation, TargetFilter};
+        let def = parse_effect_chain(
+            "Exile the top card of your library. You may put that card into your hand \
+             unless it has the same name as another card exiled this way. Repeat this process \
+             until you put a card into your hand or you exile two cards with the same name, \
+             whichever comes first.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(
+            def.repeat_until,
+            Some(RepeatContinuation::UntilStopConditions {
+                stop_on_put_to_hand: true,
+                stop_on_duplicate_exiled_names: true,
+            }),
+            "expected UntilStopConditions repeat_until, got {:?}",
+            def.repeat_until,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected optional put-to-hand sub_ability");
+        assert!(sub.optional, "put-to-hand rider must be optional");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::TargetSharesNameWithOtherExiledThisWay {
+                    target: TargetFilter::ParentTarget,
+                }),
+            }),
+            "unless same-name gate must bind to ParentTarget, got {:?}",
+            sub.condition,
         );
     }
 
@@ -13368,9 +13418,10 @@ mod tests {
         );
         assert_eq!(
             result.map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                "Colorless Eldrazi".to_string()
-            ))
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Colorless Eldrazi".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+            })
         );
     }
 
@@ -13381,9 +13432,10 @@ mod tests {
         );
         assert_eq!(
             result.map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                "Artifact".to_string()
-            ))
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Artifact".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+            })
         );
     }
 
@@ -13394,18 +13446,74 @@ mod tests {
         );
         assert_eq!(
             result.map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                "Assassin".to_string()
-            ))
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Assassin".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+            })
+        );
+    }
+
+    /// CR 106.6: a bare "… or (to) activate an ability" suffix (no type qualifier)
+    /// permits casting the named spell type OR activating *any* ability — the
+    /// generic `AbilityActivationScope::Any` form (Sage of the Unknowable, Purple
+    /// Dragon Punks, Guidelight Optimizer).
+    #[test]
+    fn mana_spend_restriction_bare_activation_or_is_any_ability() {
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "spend this mana only to cast an artifact spell or activate an ability",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Artifact".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::Any,
+            })
+        );
+    }
+
+    /// CR 106.6: Sage of the Unknowable — "Spend this mana only to cast a
+    /// colorless spell or to activate an ability." The "or **to** activate an
+    /// ability" suffix is the generic any-ability form.
+    #[test]
+    fn mana_spend_restriction_colorless_or_to_activate_any_ability() {
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "spend this mana only to cast a colorless spell or to activate an ability",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Colorless".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::Any,
+            })
         );
     }
 
     #[test]
-    fn mana_spend_restriction_bare_activation_or_is_unsupported() {
+    fn mana_spend_restriction_any_activation_tail_preserves_inner_or_spell_type() {
         let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
-            "spend this mana only to cast an artifact spell or activate an ability",
+            "spend this mana only to cast an instant or sorcery spell or activate an ability",
         );
-        assert_eq!(result, None);
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Instant or Sorcery".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::Any,
+            })
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_any_activation_tail_accepts_to_activate_plural() {
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "spend this mana only to cast artifact spells or to activate abilities",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Artifact".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::Any,
+            })
+        );
     }
 
     #[test]
@@ -13415,9 +13523,10 @@ mod tests {
         );
         assert_eq!(
             result.map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                "Ally".to_string()
-            ))
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Ally".to_string(),
+                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+            })
         );
     }
 
@@ -18283,5 +18392,37 @@ mod pipeline_snapshot_tests {
             }
             other => panic!("sub-ability must be Draw, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn zack_fair_activated_parses_counter_move_and_attach_sub_chain() {
+        use crate::types::ability::TargetFilter;
+
+        let effect = "Target creature you control gains indestructible until end of turn. Put Zack Fair's counters on that creature and attach an Equipment that was attached to Zack Fair to that creature.";
+        let mut ctx = ParseContext::default();
+        let def = parse_activated_with_self_ref_fallback(effect, "Zack Fair", &mut ctx);
+
+        fn has_effect(def: &AbilityDefinition, pred: &dyn Fn(&Effect) -> bool) -> bool {
+            if pred(&def.effect) {
+                return true;
+            }
+            def.sub_ability
+                .as_ref()
+                .is_some_and(|sub| has_effect(sub, pred))
+        }
+
+        assert!(has_effect(&def, &|e| matches!(
+            e,
+            Effect::MoveCounters {
+                source: TargetFilter::SelfRef,
+                ..
+            }
+        )));
+        assert!(
+            has_effect(&def, &|e| matches!(e, Effect::Attach { .. })),
+            "expected Attach in sub chain, got {:?}",
+            def.sub_ability
+        );
+        assert!(!has_unimplemented(&def));
     }
 }

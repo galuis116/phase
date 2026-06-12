@@ -1081,6 +1081,7 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
             target,
             scope: PreventionScope::AllDamage,
             damage_source_filter: None,
+            prevention_duration: None,
         },
         duration: Some(Duration::UntilEndOfTurn),
         sub_ability: counter_followup.map(Box::new),
@@ -8260,6 +8261,7 @@ fn try_parse_verb_and_target<'a>(
                             enter_tapped: d.enter_tapped,
                             enters_attacking: d.enters_attacking,
                             enter_with_counters: d.enter_with_counters,
+                            face_down: d.face_down,
                         },
                         rem,
                     ))
@@ -13803,6 +13805,7 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::Manifest { target, .. }
         | Effect::TargetOnly { target, .. } => f(target),
         Effect::PutCounter { target, .. } | Effect::RemoveCounter { target, .. } => f(target),
+        Effect::GoadAll { target } => f(target),
         Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => f(target),
         Effect::LoseLife {
             target: Some(target),
@@ -13980,6 +13983,13 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     }
 
     each_quantity_expr_mut(&mut def.effect, &mut rewrite_quantity_expr);
+    // CR 608.2 + CR 109.5: Rebind actor-default `You` controllers to
+    // `ScopedPlayer` for each-*player* iterations only. Each-opponent scopes
+    // keep `You` so optional opponent-choice sacrifices ("permanent of their
+    // choice") retain the chooser-as-controller binding (issue #2903).
+    if matches!(def.player_scope, Some(PlayerFilter::All)) {
+        each_target_filter_mut(&mut def.effect, &mut rewrite_filter_controller_to_scoped);
+    }
     if let Some(condition) = def.condition.as_mut() {
         rewrite_condition(condition);
     }
@@ -14495,6 +14505,65 @@ fn wire_optional_cast_decline_fallback(def: &mut AbilityDefinition) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum RepeatStopPredicate {
+    PutToHand,
+    DuplicateExiledNames,
+}
+
+fn parse_repeat_stop_predicate(input: &str) -> OracleResult<'_, RepeatStopPredicate> {
+    alt((
+        value(
+            RepeatStopPredicate::PutToHand,
+            alt((
+                tag("you put a card into your hand"),
+                tag("you put that card into your hand"),
+            )),
+        ),
+        value(
+            RepeatStopPredicate::DuplicateExiledNames,
+            tag("you exile two cards with the same name"),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 608.2c + CR 107.1c: "Repeat this process until … whichever comes first."
+fn try_parse_repeat_until_stop_conditions(
+    lower: &str,
+) -> Option<crate::types::ability::RepeatContinuation> {
+    let trimmed = lower.trim().trim_end_matches('.');
+    let (rest, first) = preceded(
+        tag("repeat this process until "),
+        parse_repeat_stop_predicate,
+    )
+    .parse(trimmed)
+    .ok()?;
+    let (rest, second) = opt(preceded(tag(" or "), parse_repeat_stop_predicate))
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(", whichever comes first"))
+        .parse(rest)
+        .ok()?;
+    eof::<_, OracleError<'_>>(rest).ok()?;
+
+    let mut stop_on_put_to_hand = false;
+    let mut stop_on_duplicate_exiled_names = false;
+    for predicate in [Some(first), second].into_iter().flatten() {
+        match predicate {
+            RepeatStopPredicate::PutToHand => stop_on_put_to_hand = true,
+            RepeatStopPredicate::DuplicateExiledNames => stop_on_duplicate_exiled_names = true,
+        }
+    }
+
+    Some(
+        crate::types::ability::RepeatContinuation::UntilStopConditions {
+            stop_on_put_to_hand,
+            stop_on_duplicate_exiled_names,
+        },
+    )
+}
+
 /// Parse a compound effect chain into an `AbilityDefinition` sub-ability chain.
 ///
 /// Phase 1 keeps the existing clause/effect semantics but replaces the fragile
@@ -14567,7 +14636,7 @@ pub(crate) fn parse_effect_chain_with_context(
 /// by the casting-line parser; an optional leading copy of that sentence is
 /// stripped here defensively in case it reaches this entry inline.
 ///
-/// `FilterProp::AttackingController` matches every attacker whose defending
+/// `FilterProp::Attacking { defender: Some(ControllerRef::You) }` matches every attacker whose defending
 /// player is the controller — which the engine records as the controller of an
 /// attacked planeswalker/battle too, so "attacking you" and "or a planeswalker
 /// you control" collapse onto the one predicate.
@@ -14629,9 +14698,12 @@ fn try_parse_for_each_attacker_copy_blocker(
         true
     };
 
-    let source_filter = TargetFilter::Typed(
-        TypedFilter::creature().properties(vec![FilterProp::AttackingController]),
-    );
+    let source_filter =
+        TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                defender: Some(ControllerRef::You),
+            }]),
+        );
     let mut def = AbilityDefinition::new(
         kind,
         Effect::CopyTokenBlockingAttacker {
@@ -15358,6 +15430,13 @@ pub(crate) fn parse_effect_chain_ir(
             }
         }
 
+        // CR 608.2c + CR 107.1c: "Repeat this process until … whichever comes
+        // first" — auto-repeat loop with game-state stop predicates (Tainted Pact).
+        if let Some(continuation) = try_parse_repeat_until_stop_conditions(&lower_check) {
+            pending_repeat_until = Some(continuation);
+            continue;
+        }
+
         // CR 608.2c + CR 107.1c: "Repeat this process" — a loop-continuation
         // directive that doesn't produce an independent effect. It is a
         // back-reference applying to the process (chain) built so far.
@@ -15962,6 +16041,26 @@ pub(crate) fn parse_effect_chain_ir(
         }
         let (is_optional, opponent_may_scope, implicit_player_scope, text) =
             strip_optional_effect_prefix(&text);
+        let (unless_same_name_condition, text) = if is_optional {
+            if let Some((stripped, unless_cond)) =
+                crate::parser::oracle_effect::conditions::strip_unless_shares_name_with_other_exiled_this_way(
+                    &text,
+                )
+            {
+                (Some(unless_cond), stripped)
+            } else {
+                (None, text)
+            }
+        } else {
+            (None, text)
+        };
+        let condition = match (condition, unless_same_name_condition) {
+            (Some(existing), Some(unless_cond)) => Some(AbilityCondition::And {
+                conditions: vec![existing, unless_cond],
+            }),
+            (None, Some(unless_cond)) => Some(unless_cond),
+            (existing, None) => existing,
+        };
         // CR 701.34a + CR 122.1: keep the whole "for each kind of counter on
         // target permanent or player, give … another counter of that kind"
         // clause intact so the targeted-proliferate recognizer in
@@ -16843,15 +16942,15 @@ pub(crate) fn parse_effect_chain_ir(
         // CR 603.7: Cross-clause pronoun → mark uses_tracked_set flag.
         // This needs to check whether the previous clause publishes an affected
         // object set (zone changes, token creation, counter placement, etc.).
-        let needs_tracked_set = clauses
-            .iter()
-            .rev()
-            .find(|c| !c.absorbed_by_followup)
-            .is_some_and(|previous| {
-                publishes_tracked_set_from_resolution(&previous.parsed.effect)
-                    && (contains_explicit_tracked_set_pronoun(&lower_check)
-                        || contains_implicit_tracked_set_pronoun(&lower_check))
-            });
+        // CR 603.7: Scan ALL prior non-absorbed clauses for a tracked-set
+        // publisher, not just the nearest. An intermediate non-publishing
+        // clause (e.g. Investigate) must not shadow an earlier exile.
+        let any_prior_publishes = clauses.iter().any(|c| {
+            !c.absorbed_by_followup && publishes_tracked_set_from_resolution(&c.parsed.effect)
+        });
+        let needs_tracked_set = any_prior_publishes
+            && (contains_explicit_tracked_set_pronoun(&lower_check)
+                || contains_implicit_tracked_set_pronoun(&lower_check));
 
         // Continuation recognition — store on ClauseIr, application moves to lowering.
         //
@@ -23891,10 +23990,12 @@ mod tests {
                 owner,
             } => {
                 assert_eq!(*owner, TargetFilter::Controller);
-                assert!(tf
-                    .properties
-                    .iter()
-                    .any(|p| matches!(p, FilterProp::AttackingController)));
+                assert!(tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Attacking {
+                        defender: Some(ControllerRef::You)
+                    }
+                )));
             }
             other => panic!("expected CopyTokenBlockingAttacker, got {other:?}"),
         }
@@ -24353,6 +24454,46 @@ mod tests {
             matches!(&*execute.effect, Effect::Discard { .. }),
             "expected Discard, got {:?}",
             execute.effect
+        );
+    }
+
+    #[test]
+    fn agitator_ant_end_step_counters_and_goad_parsed() {
+        // Issue #2903: optional per-player counter placement on each player's
+        // creature, then goad only creatures that received counters this way.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "At the beginning of your end step, each player may put two +1/+1 counters on a creature they control. Goad each creature that had counters put on it this way.",
+            "Agitator Ant",
+            &[],
+            &["Creature".to_string()],
+            &["Insect".to_string()],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("Agitator Ant trigger execute");
+        assert!(
+            execute.optional,
+            "counter placement must be optional (each player MAY)"
+        );
+        assert_eq!(execute.player_scope, Some(PlayerFilter::All));
+        let Effect::PutCounter { target, .. } = execute.effect.as_ref() else {
+            panic!("expected PutCounter, got {:?}", execute.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::ScopedPlayer))
+        );
+        let sub = execute.sub_ability.as_ref().expect("goad sub_ability");
+        let Effect::GoadAll { target } = sub.effect.as_ref() else {
+            panic!("expected GoadAll, got {:?}", sub.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::TrackedSetFiltered {
+                id: crate::types::identifiers::TrackedSetId(0),
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+            }
         );
     }
 
@@ -30914,6 +31055,32 @@ mod tests {
         assert!(*tapped);
     }
 
+    /// CR 603.7: Exile → non-publishing clause → delayed return: uses_tracked_set
+    /// must be true even when the non-publishing clause (Investigate) is nearest.
+    /// Covers Disorder in the Court.
+    #[test]
+    fn exile_then_investigate_then_return_exiled_cards_uses_tracked_set() {
+        let e = parse_effect_chain(
+            "Exile X target creatures, then investigate X times. Return the exiled cards to the battlefield tapped under their owners' control at the beginning of the next end step.",
+            AbilityKind::Spell,
+        );
+        fn find_delayed(def: &AbilityDefinition) -> bool {
+            if let Effect::CreateDelayedTrigger {
+                uses_tracked_set, ..
+            } = &*def.effect
+            {
+                if *uses_tracked_set {
+                    return true;
+                }
+            }
+            def.sub_ability.as_deref().is_some_and(find_delayed)
+        }
+        assert!(
+            find_delayed(&e),
+            "expected CreateDelayedTrigger {{ uses_tracked_set: true }} for 'the exiled cards', got {e:?}"
+        );
+    }
+
     /// Issue #1696 — Myrkul, Lord of Bones full chain: an exile that publishes a
     /// tracked set, followed by "create a token that's a copy of that card,
     /// except it's an enchantment and loses all other card types." The copy
@@ -36364,7 +36531,7 @@ mod tests {
         for (input, expected_prop, expected_negated) in [
             (
                 "draw a card if it was attacking",
-                FilterProp::Attacking,
+                FilterProp::Attacking { defender: None },
                 false,
             ),
             (
@@ -36374,7 +36541,7 @@ mod tests {
             ),
             (
                 "draw a card if it wasn't attacking",
-                FilterProp::Attacking,
+                FilterProp::Attacking { defender: None },
                 true,
             ),
             (
@@ -38099,6 +38266,7 @@ mod tests {
                 target,
                 scope,
                 damage_source_filter,
+                ..
             } => {
                 assert_eq!(*amount, PreventionAmount::All);
                 assert!(amount_dynamic.is_none());
@@ -38291,10 +38459,11 @@ mod tests {
                     factor: 3,
                     inner: Box::new(QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount {
-                            filter: TargetFilter::Typed(
-                                TypedFilter::creature()
-                                    .properties(vec![FilterProp::AttackingController]),
-                            ),
+                            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                                FilterProp::Attacking {
+                                    defender: Some(ControllerRef::You)
+                                }
+                            ]),),
                         },
                     }),
                 },
@@ -38607,7 +38776,7 @@ mod tests {
                         filter: TargetFilter::Typed(TypedFilter {
                             type_filters: vec![TypeFilter::Creature],
                             controller: Some(ControllerRef::TargetPlayer),
-                            properties: vec![FilterProp::Attacking],
+                            properties: vec![FilterProp::Attacking { defender: None }],
                         }),
                     },
                 },
@@ -39999,7 +40168,7 @@ mod tests {
                         properties,
                         ..
                     }) if type_filters.contains(&TypeFilter::Creature)
-                        && properties.contains(&FilterProp::Attacking)
+                        && properties.contains(&FilterProp::Attacking { defender: None })
                         && properties.contains(&FilterProp::Another)
                 ));
                 assert!(matches!(
@@ -40013,7 +40182,7 @@ mod tests {
                             })
                         }
                     }) if type_filters == &vec![TypeFilter::Creature]
-                        && properties == &vec![FilterProp::Attacking, FilterProp::Another]
+                        && properties == &vec![FilterProp::Attacking { defender: None }, FilterProp::Another]
                 ));
                 assert_eq!(power, toughness);
             }
@@ -43294,7 +43463,7 @@ mod tests {
                         ..
                     })
                 }
-            } if properties.as_slice() == [FilterProp::Attacking]
+            } if properties.as_slice() == [FilterProp::Attacking { defender: None }]
         ));
     }
 
