@@ -536,13 +536,19 @@ fn parse_grant_all_activated_abilities_source(
     lower: &str,
 ) -> Option<crate::types::ability::TargetFilter> {
     let p = lower.trim().trim_end_matches('.').trim();
-    matches!(
-        p,
-        "all activated abilities of all cards exiled with it"
-            | "all activated abilities of all cards exiled with ~"
-            | "all activated abilities of the exiled card"
-    )
-    .then_some(crate::types::ability::TargetFilter::ExiledBySource)
+    all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("all activated abilities of "),
+        alt((
+            value(TargetFilter::ExiledBySource, tag("the exiled card")),
+            value(
+                TargetFilter::ExiledBySource,
+                (tag("all cards exiled with "), alt((tag("it"), tag("~")))),
+            ),
+        )),
+    ))
+    .parse(p)
+    .ok()
+    .map(|(_, source)| source)
 }
 
 pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModification> {
