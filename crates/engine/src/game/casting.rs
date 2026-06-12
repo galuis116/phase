@@ -9877,7 +9877,7 @@ pub(super) fn pay_mana_cost_with_choices(
         .collect::<Vec<_>>();
 
     // CR 106.6: Apply mana spell grants to the spell being cast.
-    apply_mana_spell_grants(state, source_id, &mana_spent_units, events);
+    apply_mana_spell_grants(state, source_id, &mana_spent_units);
 
     // CR 601.2h: Track whether mana was actually spent to cast this spell,
     // the per-color breakdown for Adamant-style intervening-if checks
@@ -10266,7 +10266,6 @@ fn apply_mana_spell_grants(
     state: &mut GameState,
     spell_id: ObjectId,
     spent_units: &[crate::types::mana::ManaUnit],
-    events: &mut Vec<GameEvent>,
 ) {
     let has_cant_be_countered = spent_units
         .iter()
@@ -10322,11 +10321,12 @@ fn apply_mana_spell_grants(
         );
     }
 
-    // CR 106.6 + CR 603.3: Reflexive "when you spend this mana to cast a [filter]
-    // spell, [effect]" triggers (Lapis Orb of Dragonkind, Scaled Nurturer,
-    // Gilanra). For each spent unit whose grant matches the spell, put the
-    // controller's ability on the stack as a triggered ability sourced from the
-    // mana-producing permanent — it resolves above the spell per CR 603.3b.
+    // CR 106.6 + CR 603.3b: Reflexive "when you spend this mana to cast a
+    // [filter] spell, [effect]" triggers (Lapis Orb of Dragonkind, Scaled
+    // Nurturer, Gilanra). For each spent unit whose grant matches the spell,
+    // queue the controller's ability for the same post-announcement placement
+    // path used by other cost-payment triggers so same-controller ordering and
+    // target/mode setup stay under the trigger dispatcher.
     for unit in spent_units {
         for grant in &unit.grants {
             let ManaSpellGrant::TriggerOnSpend {
@@ -10343,16 +10343,17 @@ fn apply_mana_spell_grants(
             }) {
                 continue;
             }
+            let timestamp = state.next_timestamp() as u32;
             let resolved =
                 super::ability_utils::build_resolved_from_def(ability, unit.source_id, caster);
-            super::triggers::push_pending_trigger_to_stack(
+            super::triggers::defer_pending_trigger(
                 state,
                 super::triggers::PendingTrigger {
                     source_id: unit.source_id,
                     controller: caster,
                     condition: None,
                     ability: resolved,
-                    timestamp: 0,
+                    timestamp,
                     target_constraints: Vec::new(),
                     distribute: None,
                     trigger_event: None,
@@ -10363,7 +10364,6 @@ fn apply_mana_spell_grants(
                     subject_match_count: None,
                     die_result: None,
                 },
-                events,
             );
         }
     }
@@ -13825,14 +13825,8 @@ mod tests {
             expiry: None,
         };
 
-        let mut events = Vec::new();
-        apply_mana_spell_grants(
-            &mut state,
-            dragon_id,
-            std::slice::from_ref(&unit),
-            &mut events,
-        );
-        apply_mana_spell_grants(&mut state, goblin_id, &[unit], &mut events);
+        apply_mana_spell_grants(&mut state, dragon_id, std::slice::from_ref(&unit));
+        apply_mana_spell_grants(&mut state, goblin_id, &[unit]);
 
         assert_eq!(state.transient_continuous_effects.len(), 1);
         let effect = &state.transient_continuous_effects[0];
@@ -13915,26 +13909,119 @@ mod tests {
             expiry: None,
         };
 
-        let mut events = Vec::new();
         let before = state.stack.len();
-        // Spent on a Dragon creature spell → trigger fires (onto the stack).
-        apply_mana_spell_grants(
-            &mut state,
-            dragon_id,
-            std::slice::from_ref(&unit),
-            &mut events,
-        );
+        let deferred_before = state.deferred_triggers.len();
+        // Spent on a Dragon creature spell → trigger is queued for the
+        // post-announcement trigger dispatcher.
+        apply_mana_spell_grants(&mut state, dragon_id, std::slice::from_ref(&unit));
         assert_eq!(
-            state.stack.len(),
-            before + 1,
-            "spending on a Dragon creature spell must put the reflexive trigger on the stack"
+            state.deferred_triggers.len(),
+            deferred_before + 1,
+            "spending on a Dragon creature spell must queue the reflexive trigger"
         );
         // Spent on a non-Dragon creature spell → no trigger.
-        apply_mana_spell_grants(&mut state, goblin_id, &[unit], &mut events);
+        apply_mana_spell_grants(&mut state, goblin_id, &[unit]);
         assert_eq!(
             state.stack.len(),
-            before + 1,
-            "spending on a non-matching spell must not fire the trigger"
+            before,
+            "the helper must not push directly to the stack during cost payment"
+        );
+        assert_eq!(
+            state.deferred_triggers.len(),
+            deferred_before + 1,
+            "spending on a non-matching spell must not queue another trigger"
+        );
+    }
+
+    /// CR 106.6 + CR 601.2i + CR 603.3b: Mana-spend triggers fire during cost
+    /// payment but are not placed on the stack until the spell is fully cast.
+    #[test]
+    fn mana_spend_trigger_cast_pipeline_places_trigger_after_spell_is_cast() {
+        let mut state = setup_game_at_main_phase();
+        let orb = create_object(
+            &mut state,
+            CardId(300),
+            PlayerId(0),
+            "Lapis Orb of Dragonkind".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&orb)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let dragon_id = create_object(
+            &mut state,
+            CardId(301),
+            PlayerId(0),
+            "Dragon Whelp".to_string(),
+            Zone::Hand,
+        );
+        {
+            let dragon = state.objects.get_mut(&dragon_id).unwrap();
+            dragon.card_types.core_types.push(CoreType::Creature);
+            dragon.card_types.subtypes.push("Dragon".to_string());
+            dragon.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 0,
+            };
+        }
+
+        let trigger_ability = crate::types::ability::AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Activated,
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+        );
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap()
+            .mana_pool
+            .add(ManaUnit {
+                color: ManaType::Blue,
+                source_id: orb,
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: vec![],
+                grants: vec![ManaSpellGrant::TriggerOnSpend {
+                    restriction: Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string())),
+                    ability: Box::new(trigger_ability),
+                }],
+                expiry: None,
+            });
+
+        let mut events = Vec::new();
+        let waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), dragon_id, CardId(301), &mut events)
+                .expect("Dragon spell should cast with Orb mana");
+
+        assert!(matches!(waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.stack.len(), 2);
+        assert_eq!(state.stack.front().unwrap().source_id, dragon_id);
+        let trigger_entry = state.stack.back().unwrap();
+        assert!(matches!(
+            trigger_entry.kind,
+            StackEntryKind::TriggeredAbility { .. }
+        ));
+        assert_eq!(trigger_entry.source_id, orb);
+
+        let spell_cast_pos = events
+            .iter()
+            .position(|event| matches!(event, GameEvent::SpellCast { object_id, .. } if *object_id == dragon_id))
+            .expect("casting pipeline must emit SpellCast");
+        let trigger_push_pos = events
+            .iter()
+            .position(|event| matches!(event, GameEvent::StackPushed { object_id } if *object_id == trigger_entry.id))
+            .expect("trigger must be pushed after cast completion");
+        assert!(
+            trigger_push_pos > spell_cast_pos,
+            "mana-spend trigger must not be pushed before the spell is cast"
         );
     }
 

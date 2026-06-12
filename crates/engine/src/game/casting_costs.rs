@@ -6589,7 +6589,7 @@ pub fn finalize_mana_payment(
 
             let pending = state.pending_cast.take().unwrap();
             stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
-            return finalize_cast(
+            let waiting_for = finalize_cast(
                 state,
                 player,
                 pending.object_id,
@@ -6600,7 +6600,12 @@ pub fn finalize_mana_payment(
                 pending.cast_timing_permission,
                 pending.origin_zone,
                 events,
-            );
+            )?;
+            return Ok(drain_deferred_triggers_after_stack_object_announcement(
+                state,
+                events,
+                waiting_for,
+            ));
         }
 
         state.pending_cast = Some(Box::new(pending_resumed));
@@ -6613,7 +6618,7 @@ pub fn finalize_mana_payment(
     }
 
     stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
-    finalize_cast(
+    let waiting_for = finalize_cast(
         state,
         player,
         pending.object_id,
@@ -6624,7 +6629,12 @@ pub fn finalize_mana_payment(
         pending.cast_timing_permission,
         pending.origin_zone,
         events,
-    )
+    )?;
+    Ok(drain_deferred_triggers_after_stack_object_announcement(
+        state,
+        events,
+        waiting_for,
+    ))
 }
 
 fn stamp_convoked_creatures(
@@ -6744,7 +6754,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
 
             let pending = state.pending_cast.take().unwrap();
             stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
-            return finalize_cast(
+            let waiting_for = finalize_cast(
                 state,
                 player,
                 pending.object_id,
@@ -6755,7 +6765,12 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                 pending.cast_timing_permission,
                 pending.origin_zone,
                 events,
-            );
+            )?;
+            return Ok(drain_deferred_triggers_after_stack_object_announcement(
+                state,
+                events,
+                waiting_for,
+            ));
         }
 
         state.pending_cast = Some(Box::new(pending_resumed));
@@ -6768,7 +6783,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
     }
 
     stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
-    finalize_cast_with_phyrexian_choices(
+    let waiting_for = finalize_cast_with_phyrexian_choices(
         state,
         player,
         pending.object_id,
@@ -6780,7 +6795,12 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         pending.origin_zone,
         Some(phyrexian_choices),
         events,
-    )
+    )?;
+    Ok(drain_deferred_triggers_after_stack_object_announcement(
+        state,
+        events,
+        waiting_for,
+    ))
 }
 
 /// CR 107.4f + CR 601.2f: Determine whether this cast needs to pause for per-shard

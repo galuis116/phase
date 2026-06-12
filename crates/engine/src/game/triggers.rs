@@ -3078,6 +3078,14 @@ pub(crate) fn collect_triggers_into_deferred(state: &mut GameState, events: &[Ga
     state.deferred_triggers.extend(pending);
 }
 
+/// CR 106.6 + CR 603.3b: Queue a synthetic cost-payment trigger for the same
+/// post-announcement stack-placement path as event-collected cost triggers.
+pub(crate) fn defer_pending_trigger(state: &mut GameState, trigger: PendingTrigger) {
+    state
+        .deferred_triggers
+        .push(PendingTriggerContext::single(trigger));
+}
+
 /// CR 603.3: Put triggered ability on the stack. Returns the `ObjectId` of the
 /// newly created `StackEntry` so callers that need to track the entry for
 /// in-construction mutation (mode / target / division still being chosen) can
