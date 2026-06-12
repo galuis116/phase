@@ -473,6 +473,17 @@ pub enum ManaSpellGrant {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         restriction: Option<ManaRestriction>,
     },
+    /// CR 106.6 + CR 603.3: "When you spend this mana to cast a [filter] spell,
+    /// [effect]" — a reflexive trigger riding the produced mana (Lapis Orb of
+    /// Dragonkind, Scaled Nurturer, Gilanra). When the mana is spent on a spell
+    /// satisfying `restriction` (`None` = any spell), the controller's `ability`
+    /// is put on the stack as a triggered ability. The ability's source is the
+    /// permanent that produced the mana.
+    TriggerOnSpend {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restriction: Option<ManaRestriction>,
+        ability: Box<crate::types::ability::AbilityDefinition>,
+    },
 }
 
 /// When mana expires — controls lifecycle beyond the normal CR 106.4 step/phase drain.

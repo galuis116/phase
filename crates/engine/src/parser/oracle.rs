@@ -1885,6 +1885,7 @@ pub(crate) fn parse_oracle_ir(
             restrictions.push(ActivationRestriction::LevelCounterRange { minimum, maximum });
             def.activation_restrictions = restrictions;
             extract_cost_reduction_from_chain(&mut def);
+            extract_mana_spend_trigger_from_chain(&mut def);
             result.abilities.push(def);
             continue;
         }
@@ -1929,6 +1930,7 @@ pub(crate) fn parse_oracle_ir(
         result.triggers.extend(sc_triggers);
         for mut def in sc_abilities {
             extract_cost_reduction_from_chain(&mut def);
+            extract_mana_spend_trigger_from_chain(&mut def);
             result.abilities.push(def);
         }
         consumed
@@ -2324,6 +2326,7 @@ pub(crate) fn parse_oracle_ir(
                 // CR 601.2f: Extract self-referential cost reduction from the terminal
                 // sub_ability in the chain (it may be several levels deep).
                 extract_cost_reduction_from_chain(&mut def);
+                extract_mana_spend_trigger_from_chain(&mut def);
                 result.abilities.push(def);
                 i += 1;
                 continue;
@@ -2361,6 +2364,7 @@ pub(crate) fn parse_oracle_ir(
                 // effects can reference "boast abilities" as a class.
                 def.ability_tag = Some(AbilityTag::Boast);
                 extract_cost_reduction_from_chain(&mut def);
+                extract_mana_spend_trigger_from_chain(&mut def);
                 result.abilities.push(def);
                 i += 1;
                 continue;
@@ -2389,6 +2393,7 @@ pub(crate) fn parse_oracle_ir(
                     .push(ActivationRestriction::OnlyOnce);
                 def.ability_tag = Some(AbilityTag::Exhaust);
                 extract_cost_reduction_from_chain(&mut def);
+                extract_mana_spend_trigger_from_chain(&mut def);
                 result.abilities.push(def);
                 i += 1;
                 continue;
@@ -2426,6 +2431,7 @@ pub(crate) fn parse_oracle_ir(
                 def.activation_restrictions
                     .push(ActivationRestriction::OnlyOnceEachTurn);
                 extract_cost_reduction_from_chain(&mut def);
+                extract_mana_spend_trigger_from_chain(&mut def);
                 result.abilities.push(def);
                 i += 1;
                 continue;
@@ -3668,6 +3674,7 @@ fn parse_activated_ability_definition(
         def.activation_restrictions = constraints.restrictions;
     }
     extract_cost_reduction_from_chain(&mut def);
+    extract_mana_spend_trigger_from_chain(&mut def);
     (def, effect_text)
 }
 
@@ -4114,6 +4121,45 @@ fn strip_cost_reduction_node(
     }
     // Recurse into the chain.
     strip_cost_reduction_node(&mut sub.sub_ability)
+}
+
+/// CR 106.6 + CR 603.3: Fold a trailing "When you spend this mana to cast a
+/// [filter] spell, [effect]" sub-ability into the parent mana effect's `grants`
+/// as a `ManaSpellGrant::TriggerOnSpend` (Lapis Orb of Dragonkind, Scaled
+/// Nurturer, Gilanra). Only applies to mana abilities; otherwise the clause
+/// drops to an `Effect:when` gap.
+fn extract_mana_spend_trigger_from_chain(def: &mut AbilityDefinition) {
+    if !matches!(&*def.effect, Effect::Mana { .. }) {
+        return;
+    }
+    if let Some(grant) = strip_mana_spend_trigger_node(&mut def.sub_ability) {
+        if let Effect::Mana { grants, .. } = &mut *def.effect {
+            grants.push(grant);
+        }
+    }
+}
+
+/// Recursively walk the sub_ability chain. If a node is an `Unimplemented`
+/// "When you spend this mana to cast …" clause, remove it and return the parsed
+/// `ManaSpellGrant`.
+fn strip_mana_spend_trigger_node(
+    slot: &mut Option<Box<AbilityDefinition>>,
+) -> Option<crate::types::mana::ManaSpellGrant> {
+    let sub = slot.as_mut()?;
+    if let Effect::Unimplemented {
+        description: Some(ref desc),
+        ..
+    } = *sub.effect
+    {
+        if let Some(grant) =
+            super::oracle_effect::mana::parse_mana_spend_trigger(&desc.to_lowercase())
+        {
+            // Remove this node, promote its child (usually None).
+            *slot = sub.sub_ability.take();
+            return Some(grant);
+        }
+    }
+    strip_mana_spend_trigger_node(&mut sub.sub_ability)
 }
 
 /// Find the position of ":" that indicates an activated ability cost/effect split.
@@ -8758,6 +8804,47 @@ mod tests {
         let r = parse("({T}: Add {G}.)", "Forest", &[], &["Land"], &["Forest"]);
         // Reminder text should be stripped/skipped
         assert_eq!(r.abilities.len(), 0);
+    }
+
+    /// CR 106.6 + CR 603.3: Lapis Orb of Dragonkind — the trailing "When you
+    /// spend this mana to cast a Dragon creature spell, scry 2" clause folds into
+    /// the mana effect's `grants` as a `TriggerOnSpend`, consuming the sub-ability
+    /// (no leftover `Effect:when` gap). Issue #3101-style mana-spent trigger.
+    #[test]
+    fn lapis_orb_mana_spend_trigger_folds_into_grant() {
+        use crate::types::mana::{ManaRestriction, ManaSpellGrant};
+        let r = parse(
+            "{T}: Add {U}. When you spend this mana to cast a Dragon creature spell, scry 2.",
+            "Lapis Orb of Dragonkind",
+            &[],
+            &["Artifact"],
+            &["Lapis Orb of Dragonkind"],
+        );
+        assert_eq!(r.abilities.len(), 1, "abilities: {:?}", r.abilities);
+        let Effect::Mana { grants, .. } = &*r.abilities[0].effect else {
+            panic!("expected Effect::Mana, got {:?}", r.abilities[0].effect);
+        };
+        assert_eq!(grants.len(), 1, "grants: {:?}", grants);
+        let ManaSpellGrant::TriggerOnSpend {
+            restriction,
+            ability,
+        } = &grants[0]
+        else {
+            panic!("expected TriggerOnSpend, got {:?}", grants[0]);
+        };
+        assert_eq!(
+            *restriction,
+            Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string()))
+        );
+        assert!(
+            matches!(*ability.effect, Effect::Scry { .. }),
+            "reflexive effect must be Scry, got {:?}",
+            ability.effect
+        );
+        assert!(
+            r.abilities[0].sub_ability.is_none(),
+            "the spend-trigger clause must be folded out of the chain"
+        );
     }
 
     #[test]
