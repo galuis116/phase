@@ -4110,12 +4110,16 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
 /// established, mirroring how the "that player" event-context anaphor resolves.
 ///
 /// Returns `None` for any recipient that is not the bare anaphor, and for
-/// contexts with no player scope — so the caller's generic target parse (and
-/// the object "them" → `ParentTarget` anaphor used by, e.g., "destroy them")
-/// is left untouched. The scope mapping matches `that_player_library_filter`:
-/// `ScopedPlayer` (per-player phase triggers) stays `ScopedPlayer`; the
-/// triggering-event and target-player scopes resolve to `TriggeringPlayer`;
-/// attack triggers resolve to the `DefendingPlayer`.
+/// contexts with neither a player scope nor a player-actor trigger subject — so
+/// the caller's generic target parse (and the object "them" → `ParentTarget`
+/// anaphor used by, e.g., "destroy them") is left untouched. The scope mapping
+/// matches `that_player_library_filter`: `ScopedPlayer` (per-player phase
+/// triggers) stays `ScopedPlayer`; the triggering-event and target-player scopes
+/// resolve to `TriggeringPlayer`; attack triggers resolve to the
+/// `DefendingPlayer`. When no explicit scope is set, a player-actor trigger
+/// subject ("an opponent draws a card") makes "them"/"they" the triggering
+/// player — the same subject fallback `that_player_library_filter` uses
+/// (Razorkin Needlehead, issue #2869).
 fn resolve_player_anaphor_damage_recipient(
     after_to: &str,
     ctx: &ParseContext,
@@ -4139,7 +4143,22 @@ fn resolve_player_anaphor_damage_recipient(
             Some(TargetFilter::TriggeringPlayer)
         }
         Some(ControllerRef::DefendingPlayer) => Some(TargetFilter::DefendingPlayer),
-        _ => None,
+        // CR 608.2k: No explicit player scope — fall back to the trigger
+        // subject. A player-actor subject (a bare player filter: empty type
+        // filters with a controller ref, e.g. "an opponent draws a card", or
+        // `TargetFilter::Player`) makes "them"/"they" the triggering player,
+        // not the object the generic pronoun resolver would bind. An
+        // object-typed subject (non-empty type filters) keeps that object
+        // anaphor. Mirrors `that_player_library_filter`'s subject fallback.
+        _ => match &ctx.subject {
+            Some(TargetFilter::Typed(tf))
+                if tf.type_filters.is_empty() && tf.controller.is_some() =>
+            {
+                Some(TargetFilter::TriggeringPlayer)
+            }
+            Some(TargetFilter::Player) => Some(TargetFilter::TriggeringPlayer),
+            _ => None,
+        },
     }
 }
 
