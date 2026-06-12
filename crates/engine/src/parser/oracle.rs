@@ -8847,6 +8847,29 @@ mod tests {
         );
     }
 
+    /// CR 106.6 + CR 603.3: a spell-referencing reflexive effect (Jade Orb of
+    /// Dragonkind — "it enters with an additional +1/+1 counter on it") is NOT
+    /// folded into a grant in the first pass — it stays a loud gap rather than
+    /// flipping the card to "supported" with a swallowed clause. Regression for
+    /// PR #3110 CI (coverage-honesty +2).
+    #[test]
+    fn jade_orb_spell_referencing_mana_spend_trigger_stays_a_gap() {
+        let r = parse(
+            "{T}: Add {G}. When you spend this mana to cast a Dragon creature spell, it enters with an additional +1/+1 counter on it.",
+            "Jade Orb of Dragonkind",
+            &[],
+            &["Artifact"],
+            &["Jade Orb of Dragonkind"],
+        );
+        let Effect::Mana { grants, .. } = &*r.abilities[0].effect else {
+            panic!("expected Effect::Mana, got {:?}", r.abilities[0].effect);
+        };
+        assert!(
+            grants.is_empty(),
+            "spell-referencing effect must not fold into a grant (deferred): {grants:?}"
+        );
+    }
+
     #[test]
     fn mox_pearl_mana_ability() {
         let r = parse("{T}: Add {W}.", "Mox Pearl", &[], &["Artifact"], &[]);

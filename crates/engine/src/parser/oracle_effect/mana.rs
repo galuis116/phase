@@ -1640,7 +1640,19 @@ pub(crate) fn parse_mana_spend_trigger(lower: &str) -> Option<ManaSpellGrant> {
     }
     // Parse the reflexive effect (scry N, gain N life, draw a card, …).
     let ability = super::parse_effect_chain(effect_text, AbilityKind::Activated);
-    if matches!(*ability.effect, Effect::Unimplemented { .. }) {
+    // First pass: accept only controller-scoped reflexive effects whose parse
+    // fully consumes the clause. Anything else — notably spell-referencing
+    // effects like Jade Orb's "it enters with an additional +1/+1 counter on it",
+    // which `parse_effect_chain` parses *partially* (silently swallowing the
+    // counter clause) — is rejected so the whole clause stays a loud gap rather
+    // than flipping the card to "supported" with a swallowed clause (follow-ups).
+    if !matches!(
+        *ability.effect,
+        Effect::Scry { .. } | Effect::GainLife { .. } | Effect::Draw { .. }
+    ) {
+        return None;
+    }
+    if ability.sub_ability.is_some() {
         return None;
     }
     Some(ManaSpellGrant::TriggerOnSpend {
