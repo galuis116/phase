@@ -4146,11 +4146,10 @@ fn strip_mana_spend_trigger_node(
     slot: &mut Option<Box<AbilityDefinition>>,
 ) -> Option<crate::types::mana::ManaSpellGrant> {
     let sub = slot.as_mut()?;
-    if let Effect::Unimplemented {
-        description: Some(ref desc),
-        ..
-    } = *sub.effect
-    {
+    // Re-parse the gap node's text via the `Effect` accessor (rather than a
+    // hand-matched `Effect::Unimplemented` literal, which the parser-combinator
+    // gate forbids in parser modules).
+    if let Some(desc) = sub.effect.unimplemented_description() {
         if let Some(grant) =
             super::oracle_effect::mana::parse_mana_spend_trigger(&desc.to_lowercase())
         {

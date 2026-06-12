@@ -9055,6 +9055,18 @@ impl Effect {
         }
     }
 
+    /// Returns the description (unparsed Oracle fragment) of an
+    /// `Effect::Unimplemented` gap node, or `None` for any other effect. Lets
+    /// parser post-passes re-parse a gapped clause's text without hand-matching
+    /// the `Effect::Unimplemented` literal (forbidden in parser modules by
+    /// `scripts/check-parser-combinators.sh`).
+    pub fn unimplemented_description(&self) -> Option<&str> {
+        match self {
+            Effect::Unimplemented { description, .. } => description.as_deref(),
+            _ => None,
+        }
+    }
+
     /// CR 115.1: Returns the target filter for effects that have a player-selectable
     /// `target` field. Returns `None` for effects with no target field, or whose
     /// targeting is handled through different mechanisms (filters, zones, etc.).
