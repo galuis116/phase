@@ -325,10 +325,12 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Effect, EffectScope,
-        QuantityExpr, TapStateChange, TargetFilter, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, CounterCostSelection,
+        Effect, EffectScope, QuantityExpr, QuantityRef, TapStateChange, TargetFilter, TypedFilter,
+        REMOVE_COUNTER_COST_X,
     };
     use crate::types::card_type::CoreType;
+    use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::game_state::CastingVariant;
     use crate::types::identifiers::CardId;
     use crate::types::phase::Phase;
@@ -357,6 +359,17 @@ mod tests {
             .activation_restrictions
             .push(ActivationRestriction::OnlyOnceEachTurn);
         ability
+    }
+
+    fn make_minus_x_loyalty_ability(effect: Effect) -> AbilityDefinition {
+        AbilityDefinition::new(AbilityKind::Activated, effect)
+            .cost(AbilityCost::RemoveCounter {
+                count: REMOVE_COUNTER_COST_X,
+                counter_type: CounterMatch::OfType(CounterType::Loyalty),
+                target: None,
+                selection: CounterCostSelection::SingleObject,
+            })
+            .sorcery_speed()
     }
 
     fn create_planeswalker(
@@ -446,31 +459,18 @@ mod tests {
     #[test]
     fn minus_x_loyalty_removes_chosen_x_and_binds_x_into_effect() {
         use crate::game::engine::apply_as_current;
-        use crate::types::ability::{CounterCostSelection, QuantityRef, REMOVE_COUNTER_COST_X};
-        use crate::types::counter::{CounterMatch, CounterType};
         use crate::types::GameAction;
 
         let mut state = setup();
 
         // "[−X]: You gain X life." — the loyalty-X cost is a chosen-X removal of
         // loyalty counters (exactly what the parser builds for `[−X]:` lines).
-        let cost = AbilityCost::RemoveCounter {
-            count: REMOVE_COUNTER_COST_X,
-            counter_type: CounterMatch::OfType(CounterType::Loyalty),
-            target: None,
-            selection: CounterCostSelection::default(),
-        };
-        let ability = AbilityDefinition::new(
-            AbilityKind::Activated,
-            Effect::GainLife {
-                amount: QuantityExpr::Ref {
-                    qty: QuantityRef::CostXPaid,
-                },
-                player: TargetFilter::Controller,
+        let ability = make_minus_x_loyalty_ability(Effect::GainLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::CostXPaid,
             },
-        )
-        .cost(cost)
-        .sorcery_speed();
+            player: TargetFilter::Controller,
+        });
 
         let pw = create_planeswalker(&mut state, PlayerId(0), "Variable Walker", 6, vec![ability]);
         let life_before = state.players[0].life;
@@ -522,6 +522,72 @@ mod tests {
             state.players[0].life,
             life_before + 4,
             "the effect must gain the chosen X (4) life"
+        );
+    }
+
+    /// CR 606.3: The generic `GameAction::ActivateAbility` path must enforce
+    /// the same once-per-turn loyalty gate before a `[−X]` cost can prompt for X.
+    #[test]
+    fn minus_x_loyalty_direct_activation_rejected_after_other_loyalty_ability() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::GameAction;
+
+        let mut state = setup();
+        let plus_one = make_loyalty_ability(
+            1,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let minus_x = make_minus_x_loyalty_ability(Effect::GainLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::CostXPaid,
+            },
+            player: TargetFilter::Controller,
+        });
+        let pw = create_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "Variable Walker",
+            4,
+            vec![plus_one, minus_x],
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: pw,
+                ability_index: 0,
+            },
+        )
+        .expect("first loyalty activation must be accepted");
+        state.stack.clear();
+        let loyalty_after_first_activation = state.objects[&pw].loyalty;
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: pw,
+                ability_index: 1,
+            },
+        );
+
+        assert!(
+            matches!(result, Err(EngineError::ActionNotAllowed(_))),
+            "second same-turn loyalty activation must be rejected, got {result:?}"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "the rejected `[−X]` activation must not prompt for X"
+        );
+        assert_eq!(
+            state.objects[&pw].loyalty, loyalty_after_first_activation,
+            "the rejected `[−X]` activation must not remove loyalty counters"
+        );
+        assert!(
+            state.stack.is_empty(),
+            "the rejected `[−X]` activation must not put an ability on the stack"
         );
     }
 

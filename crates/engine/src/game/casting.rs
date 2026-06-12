@@ -11278,6 +11278,22 @@ pub fn handle_activate_ability(
     // CR 118.3: Pre-check for non-self sacrifice costs — must detour to WaitingFor
     // before any cost payment, regardless of whether targets were auto-selected.
     if let Some(ref cost) = ability_def.cost {
+        // CR 606.3: `can_activate_ability_now` gates legal-action generation,
+        // but direct `GameAction::ActivateAbility` submissions must be rejected
+        // here before the chosen-X detour can announce/pay a `[−X]` loyalty cost.
+        if crate::types::ability::is_loyalty_ability_cost(cost)
+            && !super::planeswalker::can_activate_loyalty_ability(
+                state,
+                source_id,
+                player,
+                ability_index,
+            )
+        {
+            return Err(EngineError::ActionNotAllowed(
+                "Cannot activate loyalty ability".to_string(),
+            ));
+        }
+
         if casting_costs::activation_cost_needs_x_choice(&resolved, cost) {
             // CR 602.2b + CR 601.2f: A non-mana activation cost that removes
             // X counters still needs the same X announcement step before any

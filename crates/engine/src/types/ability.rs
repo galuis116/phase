@@ -5139,19 +5139,25 @@ pub fn is_chosen_remove_counter_cost_count(count: u32) -> bool {
 ///
 /// Two shapes qualify: the fixed `[+N]` / `[−N]` / `[0]` form (`Loyalty`), and
 /// the variable `[−X]` form, which is modeled as *removing X loyalty counters*
-/// (`RemoveCounter` of `Loyalty` counters with a chosen-X count). Modeling
-/// `[−X]` as a counter-removal cost reuses the existing chosen-X announcement,
-/// concretization, and replacement-aware payment machinery; this predicate lets
-/// the CR 606.3 once-per-turn gate and loyalty-activation tracking treat both
-/// shapes as loyalty abilities. Loyalty counters are removed as a cost only by
-/// planeswalker loyalty abilities, so the `RemoveCounter` form is unambiguous.
+/// from the source. Modeling `[−X]` as a counter-removal cost reuses the
+/// existing chosen-X announcement, concretization, and replacement-aware payment
+/// machinery; this predicate lets the CR 606.3 once-per-turn gate and
+/// loyalty-activation tracking treat both shapes as loyalty abilities without
+/// folding arbitrary loyalty-counter removal costs into the CR 606 rules.
 pub fn is_loyalty_ability_cost(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::Loyalty { .. } => true,
-        AbilityCost::RemoveCounter { counter_type, .. } => matches!(
+        AbilityCost::RemoveCounter {
+            count,
             counter_type,
-            CounterMatch::OfType(crate::types::counter::CounterType::Loyalty)
-        ),
+            target,
+            selection,
+        } => {
+            *count == REMOVE_COUNTER_COST_X
+                && matches!(counter_type, CounterMatch::OfType(CounterType::Loyalty))
+                && target.is_none()
+                && matches!(selection, CounterCostSelection::SingleObject)
+        }
         _ => false,
     }
 }
@@ -14515,6 +14521,45 @@ mod tests {
         assert_eq!(cycling_json["consumes_source"], serde_json::json!(true));
         let benign_json = serde_json::to_value(&tap_only).unwrap();
         assert!(benign_json.get("consumes_source").is_none());
+    }
+
+    #[test]
+    fn loyalty_cost_classifier_accepts_only_loyalty_symbol_shapes() {
+        assert!(is_loyalty_ability_cost(&AbilityCost::Loyalty {
+            amount: -2,
+        }));
+
+        let minus_x_loyalty = AbilityCost::RemoveCounter {
+            count: REMOVE_COUNTER_COST_X,
+            counter_type: CounterMatch::OfType(CounterType::Loyalty),
+            target: None,
+            selection: CounterCostSelection::SingleObject,
+        };
+        assert!(is_loyalty_ability_cost(&minus_x_loyalty));
+
+        let fixed_counter_removal = AbilityCost::RemoveCounter {
+            count: 1,
+            counter_type: CounterMatch::OfType(CounterType::Loyalty),
+            target: None,
+            selection: CounterCostSelection::SingleObject,
+        };
+        assert!(!is_loyalty_ability_cost(&fixed_counter_removal));
+
+        let targeted_counter_removal = AbilityCost::RemoveCounter {
+            count: REMOVE_COUNTER_COST_X,
+            counter_type: CounterMatch::OfType(CounterType::Loyalty),
+            target: Some(TargetFilter::Any),
+            selection: CounterCostSelection::SingleObject,
+        };
+        assert!(!is_loyalty_ability_cost(&targeted_counter_removal));
+
+        let multi_object_counter_removal = AbilityCost::RemoveCounter {
+            count: REMOVE_COUNTER_COST_X,
+            counter_type: CounterMatch::OfType(CounterType::Loyalty),
+            target: None,
+            selection: CounterCostSelection::AmongObjects,
+        };
+        assert!(!is_loyalty_ability_cost(&multi_object_counter_removal));
     }
 
     /// #1446: `Effect::count_expr`/`count_expr_mut` are the building block the

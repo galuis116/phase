@@ -1894,6 +1894,9 @@ pub(super) fn push_activated_ability_to_stack(
     // pass the original full cost; choice-based sub-costs already paid by a
     // WaitingFor handler are no-ops here.
     if let Some(cost) = remaining_cost {
+        // CR 606.3 + CR 606.5: Capture the symbolic `[−X]` loyalty shape before
+        // chosen-X concretization turns it into a fixed counter-removal count.
+        let should_record_loyalty = crate::types::ability::is_loyalty_ability_cost(cost);
         let concretized_cost;
         let cost = if let Some(chosen_x) = resolved.chosen_x {
             // CR 602.2b + CR 601.2f + CR 122.1: Once X is announced for an
@@ -1925,19 +1928,24 @@ pub(super) fn push_activated_ability_to_stack(
         // (before payment mutates loyalty) so the once-per-turn activation can be
         // recorded after a successful payment — mirroring the post-target path in
         // `pay_activation_costs_after_target_selection`.
-        let should_record_loyalty = crate::types::ability::is_loyalty_ability_cost(cost)
-            && super::planeswalker::can_activate_loyalty_ability(
-                state,
-                source_id,
-                player,
-                ability_index,
-            );
         super::casting::stamp_self_ref_discard_cost_paid_object(
             state,
             source_id,
             &mut resolved,
             cost,
         );
+        if should_record_loyalty
+            && !super::planeswalker::can_activate_loyalty_ability(
+                state,
+                source_id,
+                player,
+                ability_index,
+            )
+        {
+            return Err(EngineError::ActionNotAllowed(
+                "Cannot activate loyalty ability".to_string(),
+            ));
+        }
         if let super::casting::PaymentOutcome::Paused { remaining_cost } =
             super::casting::pay_ability_cost_for_activation(state, player, source_id, cost, events)?
         {
