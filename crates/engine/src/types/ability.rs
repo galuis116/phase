@@ -5135,6 +5135,27 @@ pub fn is_chosen_remove_counter_cost_count(count: u32) -> bool {
     )
 }
 
+/// CR 606.5: Is this activation cost a planeswalker loyalty-ability cost?
+///
+/// Two shapes qualify: the fixed `[+N]` / `[−N]` / `[0]` form (`Loyalty`), and
+/// the variable `[−X]` form, which is modeled as *removing X loyalty counters*
+/// (`RemoveCounter` of `Loyalty` counters with a chosen-X count). Modeling
+/// `[−X]` as a counter-removal cost reuses the existing chosen-X announcement,
+/// concretization, and replacement-aware payment machinery; this predicate lets
+/// the CR 606.3 once-per-turn gate and loyalty-activation tracking treat both
+/// shapes as loyalty abilities. Loyalty counters are removed as a cost only by
+/// planeswalker loyalty abilities, so the `RemoveCounter` form is unambiguous.
+pub fn is_loyalty_ability_cost(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Loyalty { .. } => true,
+        AbilityCost::RemoveCounter { counter_type, .. } => matches!(
+            counter_type,
+            CounterMatch::OfType(crate::types::counter::CounterType::Loyalty)
+        ),
+        _ => false,
+    }
+}
+
 pub fn is_variable_remove_counter_cost_count(count: u32) -> bool {
     matches!(
         count,

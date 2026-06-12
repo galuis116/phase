@@ -10935,7 +10935,10 @@ pub fn can_activate_ability_now(
     // `OnlyOnceEachTurn` activation restriction tracks per `(source_id, ability_index)`,
     // which is the wrong granularity — it would let each loyalty ability fire once.
     // Defer to `can_activate_loyalty`, the single authority for the per-permanent gate.
-    if matches!(ability_def.cost, Some(AbilityCost::Loyalty { .. }))
+    if ability_def
+        .cost
+        .as_ref()
+        .is_some_and(crate::types::ability::is_loyalty_ability_cost)
         && !super::planeswalker::can_activate_loyalty_ability(
             state,
             source_id,

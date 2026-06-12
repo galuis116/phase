@@ -1919,6 +1919,19 @@ pub(super) fn push_activated_ability_to_stack(
                 ability_index,
             ));
         }
+        // CR 606.3: A `[−X]` loyalty ability is modeled as a chosen-X removal of
+        // loyalty counters, so it finalizes through this X-cost path rather than
+        // `handle_activate_loyalty`. Capture whether it is a loyalty activation
+        // (before payment mutates loyalty) so the once-per-turn activation can be
+        // recorded after a successful payment — mirroring the post-target path in
+        // `pay_activation_costs_after_target_selection`.
+        let should_record_loyalty = crate::types::ability::is_loyalty_ability_cost(cost)
+            && super::planeswalker::can_activate_loyalty_ability(
+                state,
+                source_id,
+                player,
+                ability_index,
+            );
         super::casting::stamp_self_ref_discard_cost_paid_object(
             state,
             source_id,
@@ -1933,6 +1946,9 @@ pub(super) fn push_activated_ability_to_stack(
             pending.activation_ability_index = Some(ability_index);
             state.pending_cast = Some(Box::new(pending));
             return Ok(state.waiting_for.clone());
+        }
+        if should_record_loyalty {
+            super::planeswalker::record_loyalty_activation(state, source_id, player);
         }
     }
 
