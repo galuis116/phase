@@ -4311,6 +4311,35 @@ fn check_trigger_constraint(
             state.active_player == controller
                 && matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
         }
+        // CR 109.5 + CR 603.2: Fires only when the triggering discard was caused
+        // by a spell/ability controlled by `ctrl_ref` relative to the trigger's
+        // controller (mirrors the replacement-side `EventSourceControlledBy`).
+        TriggerConstraint::EventSourceControlledBy {
+            controller: ctrl_ref,
+        } => {
+            let event_source = match event {
+                GameEvent::Discarded {
+                    source_id: Some(source_id),
+                    ..
+                } => *source_id,
+                _ => return false,
+            };
+            let Some(event_source_controller) = state
+                .objects
+                .get(&event_source)
+                .map(|o| o.controller)
+                .or_else(|| state.lki_cache.get(&event_source).map(|lki| lki.controller))
+            else {
+                return false;
+            };
+            match ctrl_ref {
+                crate::types::ability::ControllerRef::You => event_source_controller == controller,
+                crate::types::ability::ControllerRef::Opponent => {
+                    event_source_controller != controller
+                }
+                _ => false,
+            }
+        }
         // CR 603.2: Per-caster spell count. The caster is extracted from the SpellCast
         // event; the count comes from the per-player map (not the global counter).
         // When `filter` contains `TypeFilter::Non(Creature)`, use the noncreature counter.
@@ -5359,8 +5388,9 @@ fn record_trigger_fired(
         | TriggerConstraint::OnlyDuringYourMainPhase
         | TriggerConstraint::NthSpellThisTurn { .. }
         | TriggerConstraint::NthDrawThisTurn { .. }
+        | TriggerConstraint::EventSourceControlledBy { .. }
         | TriggerConstraint::AtClassLevel { .. } => {
-            // No tracking needed — checked at fire time via game/object state
+            // No tracking needed — checked at fire time via game/object/event state
         }
         // CR 603.4: Increment fire count for MaxTimesPerTurn tracking.
         TriggerConstraint::MaxTimesPerTurn { .. } => {
@@ -5699,6 +5729,54 @@ pub mod tests {
         obj.power = Some(power);
         obj.toughness = Some(toughness);
         id
+    }
+
+    /// CR 109.5 + CR 603.2: the `EventSourceControlledBy { Opponent }` trigger
+    /// constraint (Guerrilla Tactics) fires only when the discard's cause is a
+    /// spell/ability controlled by an opponent — not a self-caused discard or one
+    /// with no recorded cause. (issue67)
+    #[test]
+    fn event_source_controlled_by_opponent_gates_discard_trigger() {
+        use crate::types::ability::{ControllerRef, TriggerConstraint};
+        let mut state = setup();
+        let source = make_creature(&mut state, PlayerId(0), "Guerrilla Tactics", 0, 0);
+        let opp_cause = make_creature(&mut state, PlayerId(1), "Opponent's Spell", 0, 0);
+        let own_cause = make_creature(&mut state, PlayerId(0), "Your Own Spell", 0, 0);
+
+        let mut def = make_trigger(TriggerMode::Discarded);
+        def.constraint = Some(TriggerConstraint::EventSourceControlledBy {
+            controller: ControllerRef::Opponent,
+        });
+
+        let opp = GameEvent::Discarded {
+            player_id: PlayerId(0),
+            object_id: source,
+            source_id: Some(opp_cause),
+        };
+        assert!(
+            check_trigger_constraint(&state, &def, source, 0, PlayerId(0), &opp),
+            "an opponent-controlled cause must satisfy the constraint"
+        );
+
+        let own = GameEvent::Discarded {
+            player_id: PlayerId(0),
+            object_id: source,
+            source_id: Some(own_cause),
+        };
+        assert!(
+            !check_trigger_constraint(&state, &def, source, 0, PlayerId(0), &own),
+            "a self-controlled cause must NOT satisfy the constraint"
+        );
+
+        let no_cause = GameEvent::Discarded {
+            player_id: PlayerId(0),
+            object_id: source,
+            source_id: None,
+        };
+        assert!(
+            !check_trigger_constraint(&state, &def, source, 0, PlayerId(0), &no_cause),
+            "a discard with no recorded cause must NOT satisfy the constraint"
+        );
     }
 
     /// CR 702.149a + CR 508.1a: the synthesized Training condition is a filtered
@@ -13649,10 +13727,12 @@ pub mod tests {
                 GameEvent::Discarded {
                     player_id: PlayerId(0),
                     object_id: discarded_creature,
+                    source_id: None,
                 },
                 GameEvent::Discarded {
                     player_id: PlayerId(0),
                     object_id: discarded_instant,
+                    source_id: None,
                 },
             ],
         );

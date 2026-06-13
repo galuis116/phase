@@ -11465,6 +11465,29 @@ fn try_parse_discard_trigger(
         return Some((TriggerMode::DiscardedAll, def));
     }
 
+    // CR 109.5 + CR 603.2: "a spell or ability an opponent controls causes you to
+    // discard this card" — the self-discard caused by an opponent's spell/ability
+    // (Guerrilla Tactics, Sand Golem, Quagnoth, Mangara's Blessing). The
+    // `EventSourceControlledBy { Opponent }` constraint gates on the discard
+    // event's cause; mirrors the replacement form in `oracle_replacement.rs`.
+    if tag::<_, _, OracleError<'_>>(
+        "a spell or ability an opponent controls causes you to discard this card",
+    )
+    .parse(event)
+    .is_ok()
+    {
+        let mut def = make_base();
+        def.mode = TriggerMode::Discarded;
+        def.valid_card = Some(TargetFilter::SelfRef);
+        def.valid_target = Some(TargetFilter::Controller);
+        def.constraint = Some(
+            crate::types::ability::TriggerConstraint::EventSourceControlledBy {
+                controller: ControllerRef::Opponent,
+            },
+        );
+        return Some((TriggerMode::Discarded, def));
+    }
+
     // Determine subject and find "discards"/"discard" verb using nom alt()
     fn parse_discard_subject(input: &str) -> OracleResult<'_, Option<ControllerRef>> {
         alt((
@@ -21190,6 +21213,29 @@ mod tests {
             Some(TargetFilter::Typed(
                 TypedFilter::new(TypeFilter::Card).controller(ControllerRef::Opponent)
             ))
+        );
+    }
+
+    /// CR 109.5 + CR 603.2: "When a spell or ability an opponent controls causes
+    /// you to discard this card, [effect]" (Guerrilla Tactics, Sand Golem) — a
+    /// self-discard trigger gated by the `EventSourceControlledBy { Opponent }`
+    /// constraint. Issue #3109-style. (issue67)
+    #[test]
+    fn trigger_opponent_causes_you_to_discard_this_card() {
+        let def = parse_trigger_line(
+            "When a spell or ability an opponent controls causes you to discard this card, this card deals 4 damage to any target.",
+            "Guerrilla Tactics",
+        );
+        assert_eq!(def.mode, TriggerMode::Discarded);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(
+            def.constraint,
+            Some(
+                crate::types::ability::TriggerConstraint::EventSourceControlledBy {
+                    controller: ControllerRef::Opponent
+                }
+            )
         );
     }
 
