@@ -423,6 +423,21 @@ pub fn parse_trigger_lines(text: &str, card_name: &str) -> Vec<TriggerDefinition
     parse_trigger_lines_at_index(text, card_name, None, &mut ParseContext::default())
 }
 
+/// Extract the `(lhs, rhs)` operands of a `QuantityComparison` trigger
+/// condition, looking through a top-level `And` composite (intervening-if
+/// conditions are composed onto any pre-existing condition via
+/// `and_trigger_conditions`). Used to resolve the anaphoric "draw cards equal
+/// to the difference" count against the hoisted condition's two operands.
+fn quantity_comparison_operands(cond: &TriggerCondition) -> Option<(&QuantityExpr, &QuantityExpr)> {
+    match cond {
+        TriggerCondition::QuantityComparison { lhs, rhs, .. } => Some((lhs, rhs)),
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            conditions.iter().find_map(quantity_comparison_operands)
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn parse_trigger_lines_at_index(
     text: &str,
     card_name: &str,
@@ -1045,6 +1060,42 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         Some(if_cond) => Some(and_trigger_conditions(def.condition.take(), if_cond)),
         None => def.condition.take(),
     };
+
+    // CR 121.1 + CR 603.4: "draw cards equal to the difference" inside a
+    // trigger body (Kozilek the Great Distortion, Damia Sage of Stone, Krang
+    // Master Mind, The Ten Rings, Doctor Octopus). The "if you have fewer than
+    // N cards in hand" gate is hoisted to the trigger-level condition above, so
+    // the body's effect parser never sees the two operands and leaves the
+    // anaphoric draw count as `Unimplemented`. Resolve it here against the
+    // hoisted `QuantityComparison`, mirroring the standalone `difference_draw`
+    // branch in `oracle_effect/mod.rs` (`QuantityExpr::Difference { lhs, rhs }`).
+    let difference_count = def
+        .condition
+        .as_ref()
+        .and_then(quantity_comparison_operands)
+        .map(|(lhs, rhs)| QuantityExpr::Difference {
+            left: Box::new(lhs.clone()),
+            right: Box::new(rhs.clone()),
+        });
+    if let Some(count) = difference_count {
+        if let Some(execute) = def.execute.as_deref_mut() {
+            let is_difference_draw = matches!(
+                execute.effect.as_ref(),
+                Effect::Unimplemented { name, description: Some(desc) }
+                    if name == "draw"
+                        && desc
+                            .trim()
+                            .trim_end_matches('.')
+                            .eq_ignore_ascii_case("draw cards equal to the difference")
+            );
+            if is_difference_draw {
+                *execute.effect = Effect::Draw {
+                    count,
+                    target: TargetFilter::Controller,
+                };
+            }
+        }
+    }
 
     // CR 603.4: Intervening-if life-gain triggers check the gained-life
     // condition when they trigger and resolve, so "that many" distribution
@@ -12088,6 +12139,56 @@ mod tests {
             "effect chain leaked Unimplemented: {:?}",
             execute
         );
+    }
+
+    // CR 121.1 + CR 603.4: "draw cards equal to the difference" inside a trigger
+    // body. The "if you have fewer than N cards in hand" gate is hoisted to the
+    // trigger-level condition, so the anaphoric draw count must resolve against
+    // those operands (Difference{HandSize, N}), not leak as Unimplemented.
+    // Kozilek the Great Distortion, Damia Sage of Stone, Krang Master Mind,
+    // The Ten Rings, Doctor Octopus.
+    #[test]
+    fn parse_difference_draw_trigger_resolves_against_hoisted_hand_size_gate() {
+        for (text, name, threshold) in [
+            (
+                "When you cast this spell, if you have fewer than seven cards in hand, \
+                 draw cards equal to the difference.",
+                "Kozilek, the Great Distortion",
+                7,
+            ),
+            (
+                "At the beginning of your end step, if you have fewer than ten cards in hand, \
+                 draw cards equal to the difference.",
+                "The Ten Rings",
+                10,
+            ),
+        ] {
+            let defs = parse_trigger_lines(text, name);
+            assert_eq!(defs.len(), 1, "{name}: expected one trigger: {defs:?}");
+            let execute = defs[0].execute.as_ref().expect("execute ability");
+            match &*execute.effect {
+                Effect::Draw {
+                    count: QuantityExpr::Difference { left, right },
+                    ..
+                } => {
+                    assert_eq!(
+                        **right,
+                        QuantityExpr::Fixed { value: threshold },
+                        "{name}: wrong difference threshold"
+                    );
+                    assert!(
+                        matches!(
+                            **left,
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::HandSize { .. }
+                            }
+                        ),
+                        "{name}: expected HandSize lhs, got {left:?}"
+                    );
+                }
+                other => panic!("{name}: expected Draw with Difference count, got {other:?}"),
+            }
+        }
     }
 
     // CR 603.6a + CR 110.5b: "When this land enters untapped, ..." — Gingerbread
