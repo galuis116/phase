@@ -6756,6 +6756,15 @@ mod tests {
         assert!(!is_draft_matters_sentence(
             "When this creature enters, you may search your library for a card."
         ));
+        // Draft-state setup lines feed constructed-play text on cards such as
+        // Regicide and Lurking Automaton, so they must remain represented rather
+        // than being silently consumed with draft-only procedure text.
+        assert!(!is_draft_matters_sentence(
+            "Reveal this card as you draft it and note how many cards you've drafted this draft round, including this card."
+        ));
+        assert!(!is_draft_matters_sentence(
+            "Reveal this card as you draft it. The player to your right chooses a color, you choose another color, then the player to your left chooses a third color."
+        ));
         // "draft" appearing mid-sentence is not a draft-procedure line.
         assert!(!is_draft_matters_sentence(
             "Creatures you control get +1/+1."
