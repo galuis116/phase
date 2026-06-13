@@ -221,6 +221,28 @@ impl ChoiceType {
     pub fn color_excluding(excluded: Vec<ManaColor>) -> Self {
         Self::Color { excluded }
     }
+
+    /// Whether the player supplies the chosen value at runtime rather than the
+    /// engine enumerating a fixed option set.
+    ///
+    /// `CardName` options come from the frontend's local card database (the
+    /// engine sends an empty list to avoid serializing 30k+ names) and are
+    /// wired end-to-end via the free-text name search. `Word` / `Artist` are
+    /// likewise player-supplied free-text in principle, but their free-text
+    /// frontend/legal-action path is not yet implemented (only `CardName` is
+    /// synthesized by `named_choice_actions` and given a text input by
+    /// `NamedChoiceModal`) — a separate known gap. They are kept here so an
+    /// empty engine list for them is treated as a still-to-be-supplied value
+    /// rather than silently skipped as impossible. For every other choice type
+    /// the engine fully enumerates the legal options, so an empty option list
+    /// means there is genuinely nothing to choose.
+    ///
+    /// Used to distinguish a legitimately-empty engine option list (this
+    /// predicate is true) from an impossible choice that must resolve as a
+    /// no-op per CR 609.3 (this predicate is false).
+    pub fn options_supplied_by_player(&self) -> bool {
+        matches!(self, Self::CardName | Self::Word | Self::Artist)
+    }
 }
 
 impl Serialize for ChoiceType {
@@ -14408,6 +14430,15 @@ pub struct ResolvedAbility {
     /// `SequentialSibling` subs resolve even when an optional parent is declined.
     #[serde(default, skip_serializing_if = "SubAbilityLink::is_continuation")]
     pub sub_link: SubAbilityLink,
+    /// CR 700.2b + CR 603.3c: Modal choice for a reflexive modal trigger whose modes
+    /// are gated behind an optional cost (Caesar). Carried from the def so
+    /// try_begin_reflexive_target_selection can hand it to the PendingTrigger and
+    /// route to AbilityModeChoice. None for non-modal abilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modal: Option<ModalChoice>,
+    /// CR 700.2b: One AbilityDefinition per mode for the reflexive modal trigger.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mode_abilities: Vec<AbilityDefinition>,
 }
 
 impl ResolvedAbility {
@@ -14458,6 +14489,8 @@ impl ResolvedAbility {
             repeat_until: None,
             sub_link: SubAbilityLink::ContinuationStep,
             source_incarnation: None,
+            modal: None,
+            mode_abilities: Vec::new(),
         }
     }
 

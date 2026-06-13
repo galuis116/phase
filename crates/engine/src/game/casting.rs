@@ -3125,11 +3125,13 @@ fn prepare_spell_cast_with_variant_override_inner(
     let has_graveyard_permission = graveyard_permission_src.is_some();
     let has_graveyard_alt_cost = has_graveyard_timed_alt_cost_permission(state, obj, player);
     let has_hand_alt_cost = has_hand_alt_cost_permission(state, obj, player);
-    // CR 608.2g: A free-cast window (Invoke Calamity) may drive a
-    // cast-during-resolution on a card still in the controller's HAND. The
-    // runtime `ExileWithAltCost { resolution_cleanup: Some(_) }` is the
-    // zone-agnostic discriminator for that path; it must zero the mana cost
-    // even when the card is neither in exile nor under a graveyard alt-cost.
+    // CR 608.2g: A free-cast window (Invoke Calamity) or targeted
+    // during-resolution free-cast (Memory Plunder) may drive a cast on a card
+    // still in its real origin zone. The runtime
+    // `ExileWithAltCost { resolution_cleanup: Some(_) }` is the zone-agnostic
+    // discriminator for that path; it must both authorize the cast and zero the
+    // mana cost even when the card is neither in exile nor under a standing
+    // graveyard alt-cost.
     let has_during_resolution_alt_cost =
         has_during_resolution_alt_cost_permission(state, obj, player);
 
@@ -3156,6 +3158,7 @@ fn prepare_spell_cast_with_variant_override_inner(
         && has_alt_cost_permission_for(obj, state, player);
     let castable_zone = has_unowned_exile_permission
         || has_exile_permission
+        || has_during_resolution_alt_cost
         || (obj.owner == player
             && (obj.zone == Zone::Hand
                 || (state.format_config.command_zone
@@ -5297,12 +5300,14 @@ fn alternative_spell_layout(obj: &crate::game::game_object::GameObject) -> Optio
         .core_types
         .iter()
         .any(|ct| matches!(ct, CoreType::Instant | CoreType::Sorcery));
-    let front_is_creature = obj
+    let front_is_spell = obj
         .card_types
         .core_types
         .iter()
-        .any(|ct| matches!(ct, CoreType::Creature));
-    if !back_is_spell || !front_is_creature {
+        .any(|ct| matches!(ct, CoreType::Instant | CoreType::Sorcery));
+    // CR 715.3: Adventure permanents (creature or enchantment) may cast their
+    // inset instant/sorcery spell face from hand.
+    if !back_is_spell || front_is_spell {
         return None;
     }
 
@@ -7290,6 +7295,11 @@ pub fn handle_cast_spell_with_payment_mode(
             )));
         }
     }
+
+    // CR 707.10: `resolving_stack_entry` may intentionally persist after a
+    // resolution for deferred self-copy choices, but a fresh normal cast starts
+    // a new stack-object announcement outside that old resolution context.
+    state.resolving_stack_entry = None;
 
     // CR 715.3 / CR 720.3: Adventure-family cards from hand (or a commander cast
     // from the command zone) require choosing the normal creature face or
@@ -19114,6 +19124,103 @@ mod tests {
         );
     }
 
+    /// CR 601.2f + CR 102.2/102.3: Heliod, the Warped Eclipse, in a 3-player
+    /// game. "Spells you cast cost {1} less to cast for each card your opponents
+    /// have drawn this turn." With opponents having drawn 2 and 3, the SUM-across-
+    /// opponents reduction is {5}, so a {5}-generic spell drops to {0}. The reverted
+    /// `ObjectCount{Card}` over-reduction would not equal exactly 5 → discriminates.
+    #[test]
+    fn heliod_warped_eclipse_reduces_by_sum_of_opponents_draws() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // CR 102.2/102.3: the two opponents drew 2 and 3 cards this turn → SUM 5.
+        state.players[1].cards_drawn_this_turn = 2;
+        state.players[2].cards_drawn_this_turn = 3;
+
+        // Heliod on the battlefield with the parsed cost-reduction static:
+        // affected = spells the controller casts; dynamic_count = opponents' SUM.
+        let heliod = create_object(
+            &mut state,
+            CardId(840),
+            PlayerId(0),
+            "Heliod, the Warped Eclipse".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&heliod)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::generic(1),
+                    spell_filter: None,
+                    dynamic_count: Some(QuantityRef::CardsDrawnThisTurn {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Sum,
+                        },
+                    }),
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::card().controller(ControllerRef::You),
+                )),
+            );
+
+        // A {5} generic spell in the controller's hand.
+        let spell = create_object(
+            &mut state,
+            CardId(841),
+            PlayerId(0),
+            "Generic Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                generic: 5,
+                shards: vec![],
+            };
+        }
+
+        let mut mana_cost = state.objects.get(&spell).unwrap().mana_cost.clone();
+        apply_battlefield_cost_modifiers(&state, PlayerId(0), spell, &mut mana_cost);
+
+        match mana_cost {
+            ManaCost::Cost { generic, .. } => assert_eq!(
+                generic, 0,
+                "opponents' SUM draw (2 + 3 = 5) must reduce {{5}} to {{0}}, got {generic}"
+            ),
+            other => panic!("expected ManaCost::Cost, got {other:?}"),
+        }
+
+        // 0-draw control: with no opponent draws the reduction is {0} → full {5}.
+        // The buggy ObjectCount{Card} would over-reduce here too (counting the
+        // battlefield permanents), so this discriminates against the misparse.
+        let mut zero_state = state.clone();
+        zero_state.players[1].cards_drawn_this_turn = 0;
+        zero_state.players[2].cards_drawn_this_turn = 0;
+        let mut zero_cost = zero_state.objects.get(&spell).unwrap().mana_cost.clone();
+        apply_battlefield_cost_modifiers(&zero_state, PlayerId(0), spell, &mut zero_cost);
+        match zero_cost {
+            ManaCost::Cost { generic, .. } => assert_eq!(
+                generic, 5,
+                "no opponent draws must leave the {{5}} spell unreduced, got {generic}"
+            ),
+            other => panic!("expected ManaCost::Cost, got {other:?}"),
+        }
+    }
+
     #[test]
     fn activated_ability_cost_reduction_applies_to_matching_permanent_type() {
         let mut state = setup_game_at_main_phase();
@@ -28971,6 +29078,91 @@ mod tests {
         });
 
         obj_id
+    }
+
+    /// Enchantment adventure (Virtue of Courage // Embereth Blaze class).
+    fn create_enchantment_adventure_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let obj_id = create_object(
+            state,
+            CardId(72),
+            player,
+            "Virtue of Courage".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 2,
+        };
+
+        obj.back_face = Some(crate::game::game_object::BackFaceData {
+            name: "Embereth Blaze".to_string(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            card_types: {
+                let mut ct = crate::types::card_type::CardType::default();
+                ct.core_types.push(CoreType::Instant);
+                ct.subtypes.push("Adventure".to_string());
+                ct
+            },
+            mana_cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            },
+            keywords: Vec::new(),
+            abilities: vec![crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target: crate::types::ability::TargetFilter::Any,
+                    damage_source: None,
+                },
+            )],
+            trigger_definitions: Default::default(),
+            replacement_definitions: Default::default(),
+            static_definitions: Default::default(),
+            color: vec![ManaColor::Red],
+            printed_ref: None,
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            layout_kind: Some(LayoutKind::Adventure),
+        });
+
+        obj_id
+    }
+
+    #[test]
+    fn issue_2870_enchantment_adventure_offers_cast_choice() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_enchantment_adventure_in_hand(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 2);
+
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), obj_id),
+            "Enchantment adventure must be castable via its spell face"
+        );
+
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(72), &mut events).unwrap();
+
+        assert!(
+            matches!(
+                result,
+                WaitingFor::CastOffer {
+                    player,
+                    kind: CastOfferKind::Adventure { .. }
+                } if player == PlayerId(0)
+            ),
+            "Expected Adventure cast offer for enchantment adventure card, got {:?}",
+            result
+        );
     }
 
     /// Create an Omen card in hand: creature normal face / sorcery Omen face.
