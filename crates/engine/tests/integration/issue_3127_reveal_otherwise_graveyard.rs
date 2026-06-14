@@ -44,15 +44,8 @@ fn zone_of(runner: &GameRunner, id: ObjectId) -> Zone {
 /// Move `id` to the very top of its owner's library (`library[0]`), regardless
 /// of where it currently is, preserving its already-set `card_types`.
 fn put_library_top(runner: &mut GameRunner, id: ObjectId) {
-    let owner = runner.state().objects.get(&id).expect("object").owner;
-    let zone = runner.state().objects.get(&id).expect("object").zone;
-    if zone != Zone::Library {
-        engine::game::zones::remove_from_zone(runner.state_mut(), id, zone, owner);
-        runner.state_mut().objects.get_mut(&id).unwrap().zone = Zone::Library;
-    }
-    let lib = &mut runner.state_mut().players[owner.0 as usize].library;
-    lib.retain(|&oid| oid != id);
-    lib.insert(0, id);
+    let mut events = Vec::new();
+    engine::game::zones::move_to_library_position(runner.state_mut(), id, true, &mut events);
 }
 
 /// Build a scenario with the reveal/otherwise enchantment on the battlefield
