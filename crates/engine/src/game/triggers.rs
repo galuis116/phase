@@ -5779,6 +5779,121 @@ pub mod tests {
         );
     }
 
+    /// CR 113.6k + CR 701.9a + CR 109.5: end-to-end proof that an
+    /// "a spell or ability an opponent controls causes you to discard this card"
+    /// trigger (Sand Golem) actually fires through the real discard pipeline.
+    /// `complete_discard_to_graveyard` moves the card hand->graveyard BEFORE
+    /// pushing `GameEvent::Discarded`, so the trigger can only be observed by the
+    /// off-zone (graveyard) scan in `process_triggers`. This discriminates the
+    /// `trigger_zones = [Graveyard, Exile]` fix: with the empty `trigger_zones`
+    /// bug the definition is battlefield-only and never reaches the
+    /// `EventSourceControlledBy` constraint, so the positive case would fail.
+    ///
+    /// Installs the *parsed* trigger (not a hand-built one) on a card in HAND and
+    /// varies only the discard's cause across the three cases.
+    #[test]
+    fn opponent_caused_self_discard_trigger_fires_through_real_pipeline() {
+        use crate::game::effects::discard;
+
+        // Build the printed trigger from Oracle text — this is the production
+        // parser output, including the `trigger_zones = [Graveyard, Exile]` fix.
+        let parsed = crate::parser::oracle_trigger::parse_trigger_line(
+            "When a spell or ability an opponent controls causes you to discard this card, \
+             this card deals 4 damage to any target.",
+            "Sand Golem",
+        );
+        assert_eq!(parsed.mode, TriggerMode::Discarded);
+        assert_eq!(parsed.trigger_zones, vec![Zone::Graveyard, Zone::Exile]);
+
+        // Fresh state with the Sand Golem card in PlayerId(0)'s HAND carrying the
+        // parsed trigger, plus a live source object whose controller we vary.
+        // Returns whether the trigger fired (reached the stack or pending target
+        // selection with `card` as its source).
+        let run_case = |source_controller: PlayerId, with_cause: bool| -> bool {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+
+            let card = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Sand Golem".to_string(),
+                Zone::Hand,
+            );
+            state
+                .objects
+                .get_mut(&card)
+                .unwrap()
+                .trigger_definitions
+                .push(parsed.clone());
+
+            // A live source object on the battlefield, controlled by whichever
+            // player this case wants to be the discard's cause.
+            let source = make_creature(&mut state, source_controller, "Discard Source", 2, 2);
+
+            let mut events = Vec::new();
+            if with_cause {
+                // Real "caused by a spell/ability" discard seam — records the
+                // cause as `source_id`.
+                discard::discard_caused_by_effect_with_source(
+                    &mut state,
+                    card,
+                    PlayerId(0),
+                    Some(source),
+                    &mut events,
+                );
+            } else {
+                // Cost-style discard with no recorded cause (source_id = None).
+                discard::discard_as_cost(&mut state, card, PlayerId(0), &mut events);
+            }
+
+            // The card must have actually moved hand->graveyard so the off-zone
+            // scan can observe it.
+            assert_eq!(
+                state.objects.get(&card).map(|o| o.zone),
+                Some(Zone::Graveyard),
+                "complete_discard_to_graveyard must move the card to the graveyard \
+                 before the Discarded event is scanned"
+            );
+            assert!(
+                events.iter().any(
+                    |e| matches!(e, GameEvent::Discarded { object_id, .. } if *object_id == card)
+                ),
+                "the real discard seam must emit a Discarded event for the card"
+            );
+
+            process_triggers(&mut state, &events);
+
+            let on_stack = state.stack.iter().any(|entry| {
+                entry.source_id == card
+                    && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+            });
+            let pending = state
+                .pending_trigger
+                .as_ref()
+                .is_some_and(|p| p.source_id == card);
+            on_stack || pending
+        };
+
+        // Positive: opponent-controlled cause => trigger fires.
+        assert!(
+            run_case(PlayerId(1), true),
+            "an opponent-caused self-discard must fire the trigger from the graveyard"
+        );
+
+        // Negative (a): self-caused (PlayerId(0)) => constraint rejects, no trigger.
+        assert!(
+            !run_case(PlayerId(0), true),
+            "a self-caused discard must NOT fire the opponent-gated trigger"
+        );
+
+        // Negative (b): no recorded cause (discard_as_cost) => no trigger.
+        assert!(
+            !run_case(PlayerId(1), false),
+            "a discard with no recorded cause must NOT fire the trigger"
+        );
+    }
+
     /// CR 702.149a + CR 508.1a: the synthesized Training condition is a filtered
     /// `MinCoAttackers { minimum: 1, filter: Some(power > source) }`. This drives
     /// the *real* synthesized condition through `check_trigger_condition` to prove

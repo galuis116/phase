@@ -11485,6 +11485,13 @@ fn try_parse_discard_trigger(
                 controller: ControllerRef::Opponent,
             },
         );
+        // CR 113.6 + CR 113.6k: the source is the discarded card itself. By the time
+        // process_triggers scans the Discarded event, complete_discard_to_graveyard has
+        // already moved the card hand->graveyard (CR 701.9a), so the trigger must
+        // function from the graveyard it lands in (the same off-zone seam Necropotence-
+        // style self-discard triggers use). Exile keeps it live under a madness/RIP-class
+        // redirect (a redirected discard is still a discard).
+        def.trigger_zones = vec![Zone::Graveyard, Zone::Exile];
         return Some((TriggerMode::Discarded, def));
     }
 
@@ -21237,6 +21244,10 @@ mod tests {
                 }
             )
         );
+        // The discarded card has already moved hand->graveyard (or exile under a
+        // madness/RIP redirect) by the time the Discarded event is scanned, so the
+        // trigger must function off the battlefield to fire at all.
+        assert_eq!(def.trigger_zones, vec![Zone::Graveyard, Zone::Exile]);
     }
 
     /// CR 701.9 + CR 603.7c + CR 406.1: Necropotence's on-discard trigger
