@@ -4518,6 +4518,14 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
+    // CR 305.2 + CR 611.2c: "you may play an additional land this turn" — a
+    // turn-scoped extra-land-drop grant (Escape to the Wilds). Must win before
+    // the generic CastFromZone parser, which would otherwise misread "play …"
+    // as a card pick.
+    if let Some(clause) = try_parse_additional_land_this_turn(tp) {
+        return clause;
+    }
+
     // CR 701.57a: "discover N" / "discover X" — effect variant.
     let (discover_tp, discover_where_x) = strip_trailing_where_x(tp);
     if let Some((limit, rest_orig)) =
@@ -6450,10 +6458,17 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
 
     if let Some(rest) = full_rest {
         // Full form: rest must start with a card reference
+        // CR 400.7i + CR 603.7: "(the) cards exiled this way" is the impulse-set
+        // anaphor used by Escape to the Wilds — semantically identical to "those
+        // cards" but phrased relative to the exiling effect rather than a
+        // demonstrative. Longer-first so "the cards exiled this way" wins over
+        // the bare "cards exiled this way".
         if alt((
             tag::<_, _, OracleError<'_>>("that card"),
             tag("that spell"),
             tag("those cards"),
+            tag("the cards exiled this way"),
+            tag("cards exiled this way"),
             tag("it "),
         ))
         .parse(rest.lower)
@@ -6484,11 +6499,17 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         if scan_contains_phrase(tp.lower, "without paying") {
             return None;
         }
+        // CR 400.7i + CR 603.7: "(the) cards exiled this way" bare anaphor
+        // (Escape to the Wilds, after `you may ` is peeled by the chunk loop).
         if alt((
             tag::<_, _, OracleError<'_>>("play that card"),
             tag("cast that card"),
             tag("play it"),
             tag("cast it"),
+            tag("play the cards exiled this way"),
+            tag("play cards exiled this way"),
+            tag("cast the cards exiled this way"),
+            tag("cast cards exiled this way"),
         ))
         .parse(tp.lower)
         .is_err()
@@ -6576,6 +6597,58 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
         target: tracked_set_filter(),
         grantee: Default::default(),
     }))
+}
+
+/// CR 305.2 + CR 611.2c: "You may play an additional land this turn" — a
+/// one-shot land-drop grant scoped to the current turn (Escape to the Wilds,
+/// Explore, Rampaging Baloths' landfall). Distinct from the STATIC "on each of
+/// your turns" form (Exploration/Azusa), which `should_defer_spell_to_effect`
+/// routes to the static parser; the `this turn` discriminator keeps this
+/// resolution-time `GenericEffect` from colliding with that printed static.
+/// "an additional land" => count 1 (`MayPlayAdditionalLand`); "<n> additional
+/// lands" => count n (`AdditionalLandDrop { count: n }`). The granted mode is
+/// applied to the controller for the rest of the turn via a transient
+/// continuous effect (`Duration::UntilEndOfTurn`), summed at land-drop time by
+/// `static_abilities::additional_land_drops`.
+fn try_parse_additional_land_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
+    let (count, rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
+        let (input, _) = opt(alt((tag("you may "), tag("may ")))).parse(input)?;
+        let (input, _) = tag("play ").parse(input)?;
+        // "an additional land" (count 1) or "<number> additional lands".
+        let (input, count) = alt((
+            value(1u8, tag("an additional land")),
+            map(
+                (nom_primitives::parse_number, tag(" additional lands")),
+                |(n, _)| n as u8,
+            ),
+        ))
+        .parse(input)?;
+        let (input, _) = tag(" this turn").parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof.parse(input)?;
+        Ok((input, count))
+    })?;
+    let _ = rest_orig;
+
+    let mode = if count == 1 {
+        StaticMode::MayPlayAdditionalLand
+    } else {
+        StaticMode::AdditionalLandDrop { count }
+    };
+    let def = StaticDefinition::new(mode.clone())
+        .affected(TargetFilter::Controller)
+        .modifications(vec![ContinuousModification::AddStaticMode { mode }]);
+
+    let mut clause = parsed_clause(Effect::GenericEffect {
+        static_abilities: vec![def],
+        duration: Some(Duration::UntilEndOfTurn),
+        target: None,
+    });
+    // CR 305.2: The grant lapses at end of turn — set the clause duration so
+    // `register_transient_effect` builds a UntilEndOfTurn transient continuous
+    // effect (mirrors the Pardic Miner restriction idiom in subject.rs).
+    clause.duration = Some(Duration::UntilEndOfTurn);
+    Some(clause)
 }
 
 pub(crate) fn try_parse_exile_top_each_library_with_collection_counter(
@@ -12892,6 +12965,14 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
     // just exiled by the preceding clause. It is not an immediate cast/play
     // instruction, so it must win before the generic CastFromZone parser.
     if let Some(clause) = try_parse_play_from_exile(tp, ctx) {
+        return clause;
+    }
+
+    // CR 305.2 + CR 611.2c: "you may play an additional land this turn" — a
+    // turn-scoped extra-land-drop grant (Escape to the Wilds). Must win before
+    // the generic CastFromZone parser, which would otherwise misread "play …"
+    // as a card pick.
+    if let Some(clause) = try_parse_additional_land_this_turn(tp) {
         return clause;
     }
 
@@ -31950,6 +32031,196 @@ mod tests {
             "Expected PlayFromExile(UntilEndOfNextTurnOf) on TrackedSet(0), got {:?}",
             sub.effect
         );
+    }
+
+    /// Issue #2879: Escape to the Wilds' "cards exiled this way" anaphor must
+    /// parse to the same impulse-set grant shape as "those cards" (Light Up the
+    /// Stage), not to a `CastFromZone`.
+    #[test]
+    fn escape_to_the_wilds_play_clause() {
+        let def = parse_effect_chain(
+            "Exile the top five cards of your library. You may play cards exiled this way until the end of your next turn.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 5 },
+                    face_down: false,
+                }
+            ),
+            "Expected ExileTop(Controller, 5), got {:?}",
+            def.effect
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("Expected sub_ability grant");
+        assert!(!sub.optional, "grant sub-ability must not be optional");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        duration: Duration::UntilEndOfNextTurnOf {
+                            player: PlayerScope::Controller,
+                        },
+                        ..
+                    },
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0)
+                    },
+                    ..
+                }
+            ),
+            "Expected PlayFromExile(UntilEndOfNextTurnOf) on TrackedSet(0), got {:?}",
+            sub.effect
+        );
+        // No CastFromZone / Unimplemented anywhere in the chain.
+        assert!(
+            !matches!(
+                &*sub.effect,
+                Effect::CastFromZone { .. } | Effect::Unimplemented { .. }
+            ),
+            "grant must not be CastFromZone/Unimplemented, got {:?}",
+            sub.effect
+        );
+        assert!(
+            !matches!(&*def.effect, Effect::Unimplemented { .. }),
+            "root must not be Unimplemented"
+        );
+    }
+
+    /// Issue #2879: the turn-scoped additional-land grant must parse to a
+    /// `GenericEffect` carrying `MayPlayAdditionalLand` for the controller,
+    /// NOT a `CastFromZone`.
+    #[test]
+    fn escape_to_the_wilds_additional_land() {
+        let def = parse_effect_chain(
+            "You may play an additional land this turn.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+                let s = &static_abilities[0];
+                assert_eq!(s.mode, StaticMode::MayPlayAdditionalLand);
+                assert_eq!(s.affected, Some(TargetFilter::Controller));
+                assert!(
+                    s.modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::MayPlayAdditionalLand
+                        }
+                    )),
+                    "expected AddStaticMode(MayPlayAdditionalLand), got {:?}",
+                    s.modifications
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// Issue #2879 (count >= 2 branch): "play two additional lands this turn"
+    /// must carry `AdditionalLandDrop { count: 2 }`, not the count-1
+    /// `MayPlayAdditionalLand` shape.
+    #[test]
+    fn play_two_additional_lands_this_turn_parses_count() {
+        let def = parse_effect_chain(
+            "You may play two additional lands this turn.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } => {
+                assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+                let s = &static_abilities[0];
+                assert_eq!(s.mode, StaticMode::AdditionalLandDrop { count: 2 });
+                assert!(
+                    s.modifications.iter().any(|m| matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::AdditionalLandDrop { count: 2 }
+                        }
+                    )),
+                    "expected AddStaticMode(AdditionalLandDrop count 2), got {:?}",
+                    s.modifications
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// Issue #2879: the complete Escape to the Wilds oracle text parses to a
+    /// 3-link chain (ExileTop -> PlayFromExile grant -> additional-land
+    /// GenericEffect) with no Unimplemented / CastFromZone{Any}.
+    #[test]
+    fn escape_to_the_wilds_full_card_chain() {
+        let def = parse_effect_chain(
+            "Exile the top five cards of your library. You may play cards exiled this way until the end of your next turn. You may play an additional land this turn.",
+            AbilityKind::Spell,
+        );
+        // Link 1: ExileTop.
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ExileTop {
+                    count: QuantityExpr::Fixed { value: 5 },
+                    ..
+                }
+            ),
+            "Expected ExileTop(5) root, got {:?}",
+            def.effect
+        );
+        // Link 2: PlayFromExile grant.
+        let grant = def
+            .sub_ability
+            .as_ref()
+            .expect("Expected grant sub_ability");
+        assert!(
+            matches!(
+                &*grant.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile { .. },
+                    ..
+                }
+            ),
+            "Expected PlayFromExile grant, got {:?}",
+            grant.effect
+        );
+        // Link 3: additional-land GenericEffect.
+        let land = grant
+            .sub_ability
+            .as_ref()
+            .expect("Expected additional-land sub_ability");
+        assert!(
+            matches!(&*land.effect, Effect::GenericEffect { .. }),
+            "Expected GenericEffect for additional land, got {:?}",
+            land.effect
+        );
+        // No Unimplemented / CastFromZone anywhere in the chain.
+        for (label, eff) in [
+            ("root", &*def.effect),
+            ("grant", &*grant.effect),
+            ("land", &*land.effect),
+        ] {
+            assert!(
+                !matches!(
+                    eff,
+                    Effect::Unimplemented { .. } | Effect::CastFromZone { .. }
+                ),
+                "{label} must not be Unimplemented/CastFromZone, got {eff:?}"
+            );
+        }
     }
 
     #[test]
