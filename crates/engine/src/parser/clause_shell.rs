@@ -282,12 +282,14 @@ fn parse_additional_land_head(input: &str) -> nom::IResult<&str, (), OracleError
     use nom::combinator::value;
     alt((
         value((), tag("play an additional land")),
-        value((), |i| -> nom::IResult<&str, (), OracleError<'_>> {
-            let (i, _) = tag("play ").parse(i)?;
-            let (i, _) = crate::parser::oracle_nom::primitives::parse_number(i)?;
-            let (i, _) = tag(" additional lands").parse(i)?;
-            Ok((i, ()))
-        }),
+        value(
+            (),
+            (
+                tag("play "),
+                crate::parser::oracle_nom::primitives::parse_number,
+                tag(" additional lands"),
+            ),
+        ),
     ))
     .parse(input)
 }

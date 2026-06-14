@@ -3353,6 +3353,16 @@ fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause
             }
             return clause;
         }
+        if let Some(mut clause) =
+            try_parse_additional_land_this_turn(TextPair::new(text, &original_lower))
+        {
+            if clause.condition.is_none() {
+                if let Some(cond) = peel_ctx.condition().cloned() {
+                    clause.condition = Some(cond);
+                }
+            }
+            return clause;
+        }
     }
     let mut clause = parse_effect_clause_inner(&peeled_text, ctx);
     // Trial-parse fallback: peeling may have removed disambiguation signal
@@ -6648,7 +6658,23 @@ fn try_parse_additional_land_this_turn(tp: TextPair) -> Option<ParsedEffectClaus
     // `register_transient_effect` builds a UntilEndOfTurn transient continuous
     // effect (mirrors the Pardic Miner restriction idiom in subject.rs).
     clause.duration = Some(Duration::UntilEndOfTurn);
+    // CR 305.2: The printed "may" grants permission to play the extra land
+    // later; it is not an optional choice to apply this continuous effect now.
+    clause.optional = false;
     Some(clause)
+}
+
+fn clause_is_additional_land_permission(clause: &ParsedEffectClause) -> bool {
+    matches!(
+        &clause.effect,
+        Effect::GenericEffect {
+            static_abilities,
+            ..
+        } if static_abilities.iter().any(|definition| matches!(
+            definition.mode,
+            StaticMode::MayPlayAdditionalLand | StaticMode::AdditionalLandDrop { .. }
+        ))
+    )
 }
 
 pub(crate) fn try_parse_exile_top_each_library_with_collection_counter(
@@ -17220,9 +17246,15 @@ pub(crate) fn parse_effect_chain_ir(
         // CR 608.2g + CR 601.2: The "may" in a free-cast window belongs to the
         // interactive CastOffer itself ("up to N" includes choosing zero casts),
         // not to the generic OptionalEffectChoice wrapper around the whole
-        // effect. Keep the actor context derived from the printed "you may", but
-        // lower the effect as mandatory so resolution opens the FreeCastWindow.
-        let is_optional = if matches!(&clause.effect, Effect::FreeCastFromZones { .. }) {
+        // effect.
+        //
+        // CR 305.2: The "may" in an additional-land grant is likewise the later
+        // play permission, not a choice to apply the continuous effect now. Keep
+        // the actor context derived from the printed "you may", but lower both
+        // permission grants as mandatory so resolution installs the permission.
+        let is_optional = if matches!(&clause.effect, Effect::FreeCastFromZones { .. })
+            || clause_is_additional_land_permission(&clause)
+        {
             false
         } else {
             is_optional
@@ -32102,6 +32134,10 @@ mod tests {
             "You may play an additional land this turn.",
             AbilityKind::Spell,
         );
+        assert!(
+            !def.optional,
+            "permission grant must not become an optional resolution choice"
+        );
         match &*def.effect {
             Effect::GenericEffect {
                 static_abilities,
@@ -32135,6 +32171,10 @@ mod tests {
         let def = parse_effect_chain(
             "You may play two additional lands this turn.",
             AbilityKind::Spell,
+        );
+        assert!(
+            !def.optional,
+            "permission grant must not become an optional resolution choice"
         );
         match &*def.effect {
             Effect::GenericEffect {
@@ -32202,6 +32242,10 @@ mod tests {
             .sub_ability
             .as_ref()
             .expect("Expected additional-land sub_ability");
+        assert!(
+            !land.optional,
+            "additional-land permission grant must resolve without an optional prompt"
+        );
         assert!(
             matches!(&*land.effect, Effect::GenericEffect { .. }),
             "Expected GenericEffect for additional land, got {:?}",
