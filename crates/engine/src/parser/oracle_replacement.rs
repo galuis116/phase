@@ -35,6 +35,7 @@ use crate::types::ability::{
     ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, StaticCondition,
     TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
+use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
 use crate::types::replacements::ReplacementEvent;
@@ -5899,6 +5900,7 @@ fn parse_mana_replacement(norm_lower: &str, original_text: &str) -> Option<Repla
         && !nom_primitives::scan_contains(norm_lower, "tapped for mana")
         && !nom_primitives::scan_contains(norm_lower, "tap a permanent for mana")
         && !nom_primitives::scan_contains(norm_lower, "tap a land for mana")
+        && !nom_primitives::scan_contains(norm_lower, "tap a basic land for mana")
     {
         return None;
     }
@@ -5945,6 +5947,16 @@ fn parse_mana_multiplier_replacement(
         value(
             TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
             tag("a permanent"),
+        ),
+        value(
+            TargetFilter::Typed(
+                TypedFilter::land()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::HasSupertype {
+                        value: Supertype::Basic,
+                    }]),
+            ),
+            tag("a basic land"),
         ),
         value(
             TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
@@ -11840,6 +11852,27 @@ mod tests {
             scan_damage_modification("it deals that much damage minus 1 instead"),
             Some(DamageModification::Minus { value: 1 })
         );
+    }
+
+    #[test]
+    fn parses_basic_land_triple_mana_replacement() {
+        let def = parse_replacement_line(
+            "If you tap a basic land for mana, it produces three times as much of that mana instead.",
+            "Virtue of Strength",
+        )
+        .expect("basic land 3x mana");
+        assert_eq!(
+            def.mana_modification,
+            Some(ManaModification::Multiply { factor: 3 })
+        );
+        let Some(TargetFilter::Typed(filter)) = def.valid_card else {
+            panic!("basic land replacement should carry a typed source filter");
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert!(filter.type_filters.contains(&TypeFilter::Land));
+        assert!(filter.properties.contains(&FilterProp::HasSupertype {
+            value: Supertype::Basic,
+        }));
     }
 
     #[test]
