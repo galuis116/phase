@@ -2847,6 +2847,24 @@ fn affected_objects_from_events(
                 _ => None,
             })
             .collect(),
+        // CR 608.2c + CR 701.19c: damage publishes the damaged objects so a
+        // downstream "<noun> dealt damage this way can't be regenerated"
+        // sub-ability binds to exactly those creatures (Incinerate/Flamebreak/
+        // Jaya Ballard, Task Mage). Object targets only — a player carries no
+        // regen shield and the static is inert on players. CR 120.3/120.6: only
+        // creatures actually dealt a nonzero amount were "dealt damage this way"
+        // (fully-prevented damage doesn't count), so require `amount > 0`.
+        Effect::DealDamage { .. } | Effect::DamageAll { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DamageDealt {
+                    target: TargetRef::Object(id),
+                    amount,
+                    ..
+                } if *amount > 0 => Some(*id),
+                _ => None,
+            })
+            .collect(),
         Effect::Sacrifice { .. } => events
             .iter()
             .filter_map(|event| match event {
