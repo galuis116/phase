@@ -1173,7 +1173,7 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
-    // CR 608.2c + CR 117.3a: "its controller" / "their controller" as anaphoric
+    // CR 608.2c + CR 608.2d: "its controller" / "their controller" as anaphoric
     // subject, optionally carrying a "may" modal ("its controller may search
     // their library" — Assassin's Trophy, Path to Exile, Oblation, etc.). When
     // "may" is present, the resulting ability is marked optional so the acting
@@ -1209,7 +1209,7 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
-    // CR 608.2c + CR 117.3a: "its owner may" / "their owner may" — owner-of-target
+    // CR 608.2c + CR 608.2d: "its owner may" / "their owner may" — owner-of-target
     // subject carrying a "may" modal (mirrors the "its controller may" arm above).
     if let Ok((after_head, _)) = alt((
         tag::<_, _, OracleError<'_>>("its owner may"),
