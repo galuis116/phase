@@ -2568,6 +2568,9 @@ pub(crate) fn static_condition_to_ability_condition(
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::RecipientMatchesFilter { .. }
+        // CR 509.1b: recipient-scoped block-evasion gate; no effect-resolution
+        // (`AbilityCondition`) equivalent — lowering returns `None`.
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::SourceInZone { .. }
         | StaticCondition::DefendingPlayerControls { .. }
