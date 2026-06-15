@@ -71,6 +71,7 @@ pub fn convert_as_enters(
         }
         let (condition, mode, exec) = build_replacement_exec(act, &valid_card)?;
         out.push(ReplacementDefinition {
+            source_controller: None,
             expiry: None,
             event: ReplacementEvent::ChangeZone,
             execute: Some(Box::new(exec)),
@@ -151,6 +152,7 @@ pub fn convert_replace_would_enter(
         }
         let (condition, mode, exec) = build_replacement_exec(act, &valid_card)?;
         out.push(ReplacementDefinition {
+            source_controller: None,
             expiry: None,
             event: ReplacementEvent::ChangeZone,
             execute: Some(Box::new(exec)),
@@ -214,6 +216,7 @@ pub fn convert_replace_would_deal_damage(
     for act in actions {
         let modification = damage_action_to_modification(act)?;
         out.push(ReplacementDefinition {
+            source_controller: None,
             expiry: None,
             event: ReplacementEvent::DamageDone,
             execute: None,
@@ -586,6 +589,7 @@ pub fn convert_replace_would_draw(
             },
         );
         out.push(ReplacementDefinition {
+            source_controller: None,
             expiry: None,
             event: ReplacementEvent::Draw,
             execute: Some(Box::new(exec)),
@@ -707,6 +711,7 @@ pub fn convert_replace_would_put_into_graveyard(
             },
         );
         out.push(ReplacementDefinition {
+            source_controller: None,
             expiry: None,
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(exec)),
@@ -953,6 +958,7 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
             },
         );
         out.push(ReplacementDefinition {
+            source_controller: None,
             expiry: None,
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(exec)),
@@ -1041,6 +1047,7 @@ pub fn convert_replace_would_put_counters(
     for act in actions {
         let modification = counter_action_to_modification(act)?;
         out.push(ReplacementDefinition {
+            source_controller: None,
             expiry: None,
             event: ReplacementEvent::AddCounter,
             execute: None,
@@ -1223,6 +1230,7 @@ pub fn convert_replace_would_gain_life(
     for act in actions {
         let modification = gain_life_action_to_modification(act)?;
         out.push(ReplacementDefinition {
+            source_controller: None,
             expiry: None,
             event: ReplacementEvent::GainLife,
             execute: None,
@@ -1339,6 +1347,7 @@ fn try_build_may_cost_pair(
     };
 
     Ok(Some(ReplacementDefinition {
+        source_controller: None,
         expiry: None,
         event: ReplacementEvent::ChangeZone,
         execute: execute.map(Box::new),
