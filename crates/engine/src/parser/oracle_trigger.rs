@@ -29283,6 +29283,80 @@ mod tests {
             "the boost lasts until end of turn"
         );
     }
+
+    /// CR 108.3 + CR 109.4 + CR 603.4: Agent of Treachery's end-step draw is
+    /// gated by an intervening-if — "if you control three or more permanents you
+    /// don't own". The bare "you don't own" negated-ownership suffix must be
+    /// consumed by the type-phrase parser so the count condition reaches a word
+    /// boundary and the intervening-if is hoisted onto the trigger. Before the
+    /// fix the suffix was unconsumed, the condition was discarded
+    /// (`condition: None`), and Agent drew three cards unconditionally every end
+    /// step (#3304).
+    #[test]
+    fn agent_of_treachery_end_step_draw_is_gated_by_not_owned_count() {
+        let parsed = parse_oracle_text(
+            "When this creature enters, gain control of target permanent.\n\
+             At the beginning of your end step, if you control three or more \
+             permanents you don't own, draw three cards.",
+            "Agent of Treachery",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Rogue".to_string()],
+        );
+
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "no parse warnings expected, got {:?}",
+            parsed.parse_warnings
+        );
+
+        let end_step = parsed
+            .triggers
+            .iter()
+            .find(|t| t.phase == Some(Phase::End))
+            .expect("an end-step (Phase::End) trigger must be parsed");
+
+        // The intervening-if must survive as a QuantityComparison, NOT be dropped.
+        let Some(TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 3 },
+        }) = end_step.condition.clone()
+        else {
+            panic!(
+                "end-step trigger must carry ObjectCount >= 3 intervening-if, got {:?}",
+                end_step.condition
+            );
+        };
+
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("count filter must be Typed, got {filter:?}");
+        };
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::You),
+            "the counted permanents are ones YOU control (CR 109.4)"
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::Owned {
+                controller: ControllerRef::Opponent,
+            }),
+            "the counted permanents are ones you DON'T own — Owned{{Opponent}} \
+             (runtime: owner != controller); got {:?}",
+            tf.properties
+        );
+
+        // The execute body still draws three cards.
+        let exec = end_step.execute.as_deref().expect("end-step execute body");
+        assert!(
+            matches!(exec.effect.as_ref(), Effect::Draw { .. }),
+            "end-step trigger draws cards, got {:?}",
+            exec.effect
+        );
+    }
 }
 
 /// Snapshot tests locking current trigger parser output before the IR split.
