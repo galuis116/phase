@@ -96,6 +96,7 @@ mod integration_bending;
 mod integration_landfall;
 mod invoke_calamity_free_cast;
 mod issue_1005_suffer_the_past;
+mod issue_1007_fractal_harness_attach;
 mod issue_1008_korvold_sacrifice_triggers;
 mod issue_1010_magus_lucea_kane;
 mod issue_1011_vexing_puzzlebox_roll;
