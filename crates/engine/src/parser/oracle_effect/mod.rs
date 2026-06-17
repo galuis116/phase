@@ -22041,6 +22041,63 @@ mod tests {
         }
     }
 
+    /// CR 120.2b + CR 120.3: Dagger Caster — "deals 1 damage to each opponent
+    /// and 1 damage to each creature your opponents control" is a two-segment
+    /// damage CHAIN (two independently-amounted recipients joined by "and"), not
+    /// the " and each " compound. The first segment is an each-opponent PLAYER
+    /// scope; it must emit `DamageEachPlayer{Opponent}` and chain the second
+    /// "1 damage to each creature your opponents control" segment as a
+    /// sub_ability — NOT collapse to an empty-Typed `DamageAll{Opponent}` (which
+    /// would silently deal the opponents NO damage). Regression guard: on revert
+    /// of the `parse_damage_each_player_scope_with_remainder` chain arm, the
+    /// primary becomes `DamageAll{Typed{empty}, player_filter:None}` and this
+    /// fails.
+    #[test]
+    fn dagger_caster_each_opponent_chain_emits_damage_each_player() {
+        let def = parse_effect_chain(
+            "~ deals 1 damage to each opponent and 1 damage to each creature your opponents control",
+            AbilityKind::Spell,
+        );
+        // Primary: the each-opponent player half must route to DamageEachPlayer,
+        // NOT an empty-Typed DamageAll.
+        match &*def.effect {
+            Effect::DamageEachPlayer {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player_filter: PlayerFilter::Opponent,
+            } => {}
+            other => panic!(
+                "primary must be DamageEachPlayer{{Fixed 1, Opponent}} (not empty-Typed DamageAll), got {other:?}"
+            ),
+        }
+        // Sub-ability: the second "1 damage to each creature your opponents
+        // control" segment chains as a mass-damage effect at opponents' creatures.
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected chained damage sub_ability for the second segment");
+        match &*sub.effect {
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target,
+                ..
+            } => match target {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                    assert!(tf
+                        .type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Creature)));
+                }
+                other => panic!("expected Typed{{Creature, Opponent}} sub-target, got {other:?}"),
+            },
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                ..
+            } => {}
+            other => panic!("expected DamageAll/DealDamage(1) sub_ability, got {other:?}"),
+        }
+    }
+
     #[test]
     fn damage_each_player_scope_rejects_compound_phrase() {
         assert_eq!(
