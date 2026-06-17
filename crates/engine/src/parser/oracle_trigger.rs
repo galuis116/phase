@@ -6080,15 +6080,21 @@ fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
 /// the discard-remainder convenience wrapper for call sites that don't read the
 /// tail.
 ///
-/// Recognizes only the *player* recipient axis — "a player", "an opponent",
-/// "you", "a player or planeswalker". The object-recipient axis (a
-/// creature/permanent/planeswalker that took the damage) is deliberately NOT
-/// matched here: it is reachable only through
-/// [`parse_object_recipient_pt_gate`], which requires the trailing "equal to
-/// that <recipient>'s toughness/power" qualifier. Folding the object axis in
-/// unconditionally would silently change the `valid_target` of every existing
-/// DamageDone trigger that names an object recipient (e.g. Questing Beast's
-/// "deals combat damage to a planeswalker"), so the object axis stays gated.
+/// Recognizes the *player* recipient axis only ("a player", "an opponent",
+/// "you", "a player or planeswalker"). The object recipient axis ("a creature",
+/// "a permanent", typed object) is handled separately by the guarded
+/// [`parse_object_recipient_filter`], which the call sites try BEFORE this
+/// player-axis parser. Keeping the object arm out of this parser is what lets a
+/// mixed "to a creature or player" / "to a creature or opponent" recipient
+/// (Crovax, Flesh Reaver) decline both parsers and leave `valid_target = None`
+/// (any recipient fires) rather than being mis-scoped to `Typed([Creature])`
+/// with its player leg dropped.
+///
+/// The Taii-Wakeen equal-to-P/T shape is the sole province of
+/// [`parse_object_recipient_pt_gate`] (which additionally yields the
+/// recipient-relative `QuantityRef`); a bare object recipient ("to a creature"
+/// with no P/T tail, Strax's class) is the sole province of
+/// [`parse_object_recipient_filter`].
 fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, ()) =
         value((), tag::<_, _, OracleError<'_>>("to ")).parse(after_verb.trim_start())?;
@@ -12462,6 +12468,66 @@ mod tests {
     use crate::types::mana::{ManaCost, ManaType, ManaUnit};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{CastFrequency, StaticMode};
+
+    // --- Fix B: damage-recipient qualifier (player axis preserved + object axis added) ---
+
+    #[test]
+    fn parse_damage_to_qualifier_preserves_player_recipients() {
+        // CR 120.3 + CR 102.2: player-recipient phrasings must keep their
+        // existing player-scope filters after the object arm was added.
+        assert_eq!(
+            parse_damage_to_qualifier("to a player"),
+            Some(TargetFilter::Player)
+        );
+        assert_eq!(
+            parse_damage_to_qualifier("to you"),
+            Some(TargetFilter::Controller)
+        );
+        // "to an opponent" → controller-only Typed (the player-scope convention).
+        match parse_damage_to_qualifier("to an opponent") {
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::Opponent),
+                properties,
+            })) => {
+                assert!(type_filters.is_empty(), "opponent filter is player-scope");
+                assert!(properties.is_empty());
+            }
+            other => panic!("expected opponent player-scope filter, got {other:?}"),
+        }
+        // "to a player or planeswalker" stays an Or naming a player slot.
+        match parse_damage_to_qualifier("to a player or planeswalker") {
+            Some(TargetFilter::Or { filters }) => {
+                assert!(filters.iter().any(|f| matches!(f, TargetFilter::Player)));
+            }
+            other => panic!("expected Or {{ Player, Planeswalker }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn glory_of_battle_trigger_gates_on_creature_recipient() {
+        // CR 120.3: "Whenever ~ deals damage to a creature, put a +1/+1 counter
+        // on ~" (Strax, Sontaran Nurse — Glory of Battle) must set a typed
+        // creature `valid_target` so the trigger fires only on creature damage.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Whenever Strax deals damage to a creature, put a +1/+1 counter on Strax.",
+            "Strax, Sontaran Nurse",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::DamageDone))
+            .expect("DamageDone trigger");
+        match &trigger.valid_target {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            }
+            other => panic!("expected creature-scoped valid_target, got {other:?}"),
+        }
+    }
 
     fn blocking_source_beyond_first_expr() -> QuantityExpr {
         let count_minus_one = QuantityExpr::Offset {
@@ -29408,6 +29474,7 @@ mod tests {
                 Effect::Choose {
                     choice_type,
                     persist,
+                    ..
                 } => Some((choice_type.clone(), *persist)),
                 _ => None,
             })

@@ -1420,6 +1420,7 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
             Effect::Choose {
                 choice_type: ChoiceType::BasicLandType,
                 persist: true,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
         )
     });
@@ -1430,6 +1431,7 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
             Effect::Choose {
                 choice_type: ChoiceType::BasicLandType,
                 persist: true,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
             },
         )
         .sub_ability(tap_self)
@@ -1489,6 +1491,7 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
         Effect::Choose {
             choice_type,
             persist: true,
+            selection: crate::types::ability::TargetSelectionMode::Chosen,
         },
     );
 
@@ -8646,6 +8649,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::Color { ref excluded },
                 persist: true,
+                ..
             } if excluded.is_empty()
         ));
     }
@@ -8688,6 +8692,7 @@ mod tests {
                 Effect::Choose {
                     choice_type: ChoiceType::Color { ref excluded },
                     persist: true,
+                    ..
                 } if excluded == &vec![ManaColor::Green]
             ),
             "sub-ability must be Choose color (excluding Green), got {:?}",
@@ -8711,6 +8716,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::Color { ref excluded },
                 persist: true,
+                ..
             } if excluded == &vec![ManaColor::White]
         ));
     }
@@ -8728,6 +8734,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::TwoColors,
                 persist: true,
+                ..
             }
         ));
     }
@@ -8745,6 +8752,7 @@ mod tests {
             Effect::Choose {
                 choice_type: ChoiceType::CreatureType,
                 persist: true,
+                ..
             }
         ));
     }
