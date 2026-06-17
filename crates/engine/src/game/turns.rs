@@ -1952,6 +1952,13 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
                     return state.waiting_for.clone();
                 }
+                // CR 603.3b + issue #1350: deferred triggers collapsed during
+                // elimination must drain before advancing past combat damage.
+                if !state.deferred_triggers.is_empty() || state.pending_trigger.is_some() {
+                    return WaitingFor::Priority {
+                        player: state.active_player,
+                    };
+                }
                 // If triggers were placed on the stack (DamageReceived, dies, etc.),
                 // grant priority so they can resolve before advancing.
                 if !state.stack.is_empty() {
@@ -3497,6 +3504,82 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::PermanentUntapped { object_id } if *object_id == id)));
+    }
+
+    #[test]
+    fn execute_untap_applies_edge_of_malacol_untap_replacement() {
+        use crate::types::card_type::CoreType;
+        use crate::types::counter::CounterType;
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        // CR 502.3 + CR 502.4: the turn-based untap happens during the untap
+        // step; `ReplacementCondition::DuringUntapStep` gates on this phase.
+        state.phase = Phase::Untap;
+
+        // A tapped creature the active player controls.
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.tapped = true;
+        }
+
+        // Edge of Malacol's untap-step replacement.
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Edge of Malacol".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let def = crate::parser::oracle_replacement::parse_replacement_line(
+                "If a creature you control would untap during your untap step, put two +1/+1 counters on it instead.",
+                "Edge of Malacol",
+            )
+            .expect("untap-step replacement should parse");
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.replacement_definitions.push(def.clone());
+            Arc::make_mut(&mut obj.base_replacement_definitions).push(def);
+        }
+
+        let mut events = Vec::new();
+        execute_untap(&mut state, &mut events);
+
+        // The untap is replaced: the creature stays tapped, emits no untap event,
+        // and gains two +1/+1 counters instead — exercising the DuringUntapStep
+        // gate and the untap-step raise end to end (a broken phase check or raise
+        // would untap the creature and skip the counters).
+        assert!(
+            state.objects[&creature].tapped,
+            "untap must be replaced; the creature stays tapped"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                GameEvent::PermanentUntapped { object_id } if *object_id == creature
+            )),
+            "no untap event is emitted when the untap is replaced"
+        );
+        assert_eq!(
+            state.objects[&creature]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            2,
+            "two +1/+1 counters are added instead of untapping"
+        );
     }
 
     #[test]

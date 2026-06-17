@@ -12278,6 +12278,17 @@ pub enum AbilityCondition {
     ///     kicker" clauses. Database synthesis resolves this to `variant`
     ///     once the card's kicker declarations are visible.
     AdditionalCostPaid {
+        /// CR 608.2c + CR 115.1 + CR 113.7: which object's casting-time payments this
+        /// condition reads. `Source` (default, CR 113.7) = the resolving ability's own
+        /// SpellContext (every legacy kicker/Gift/Buyback/Casualty/Replicate card).
+        /// `Target` (CR 115.1) = the first object target's stamped payments — "counter
+        /// target spell if it was kicked" (Ertai's Trickery): "it" anaphors to the
+        /// countered spell (CR 608.2c, whose own example is a counter-target-spell rider).
+        #[serde(
+            default = "AbilityCondition::default_subject_source",
+            skip_serializing_if = "AbilityCondition::is_subject_source"
+        )]
+        subject: ObjectScope,
         #[serde(default, skip_serializing_if = "AdditionalCostPaymentSource::is_any")]
         source: AdditionalCostPaymentSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -12623,6 +12634,19 @@ impl AbilityCondition {
         *value == 1
     }
 
+    /// CR 113.7: Default `subject` for `AdditionalCostPaid` is `Source` — the
+    /// resolving ability reads its own SpellContext payments.
+    pub(crate) fn default_subject_source() -> ObjectScope {
+        ObjectScope::Source
+    }
+
+    /// Skip-serialization predicate: omit `subject` from JSON when it equals the
+    /// default (`Source`). Keeps card-data.json compact for the common case.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub(crate) fn is_subject_source(value: &ObjectScope) -> bool {
+        matches!(value, ObjectScope::Source)
+    }
+
     /// Construct the default-shape `AdditionalCostPaid` condition: any single
     /// optional-additional-cost payment was made. Equivalent to the legacy
     /// nullary `AdditionalCostPaid` variant; preserves call sites in
@@ -12631,6 +12655,7 @@ impl AbilityCondition {
     /// `game/effects/change_zone.rs` (Collect Evidence).
     pub fn additional_cost_paid_any() -> Self {
         AbilityCondition::AdditionalCostPaid {
+            subject: ObjectScope::Source,
             source: AdditionalCostPaymentSource::Any,
             origin: None,
             origin_ordinal: None,
@@ -12644,6 +12669,7 @@ impl AbilityCondition {
     /// specific kicker variant being paid.
     pub fn additional_cost_paid_kicker(variant: KickerVariant) -> Self {
         AbilityCondition::AdditionalCostPaid {
+            subject: ObjectScope::Source,
             source: AdditionalCostPaymentSource::Kicker,
             origin: None,
             origin_ordinal: None,
@@ -12658,6 +12684,7 @@ impl AbilityCondition {
     /// `KickerVariant` using the card's `AdditionalCost::Kicker` declaration.
     pub fn additional_cost_paid_kicker_cost(cost: ManaCost) -> Self {
         AbilityCondition::AdditionalCostPaid {
+            subject: ObjectScope::Source,
             source: AdditionalCostPaymentSource::Kicker,
             origin: None,
             origin_ordinal: None,
@@ -12671,12 +12698,27 @@ impl AbilityCondition {
     /// payment count meeting a minimum.
     pub fn additional_cost_paid_n_times(min_count: u32) -> Self {
         AbilityCondition::AdditionalCostPaid {
+            subject: ObjectScope::Source,
             source: AdditionalCostPaymentSource::Kicker,
             origin: None,
             origin_ordinal: None,
             variant: None,
             kicker_cost: None,
             min_count,
+        }
+    }
+
+    /// CR 115.1 + CR 608.2c: "if it was kicked" where "it" = the resolving ability's
+    /// first object target (the countered spell), not the source.
+    pub fn additional_cost_paid_target() -> Self {
+        AbilityCondition::AdditionalCostPaid {
+            subject: ObjectScope::Target,
+            source: AdditionalCostPaymentSource::Any,
+            origin: None,
+            origin_ordinal: None,
+            variant: None,
+            kicker_cost: None,
+            min_count: 1,
         }
     }
 }
@@ -13476,6 +13518,14 @@ pub enum ReplacementCondition {
     /// "twice that many of each of those kinds of counters" doubling
     /// replacement) is the canonical case.
     ClassLevelGE { level: u8 },
+    /// CR 502.3 + CR 502.4: True only during the untap step. Permanents untap as
+    /// a turn-based action during the untap step (502.3) and no player receives
+    /// priority then (502.4), so the only `ProposedEvent::Untap` raised during
+    /// this phase is the turn-based untap. Gates an untap replacement ("if [X]
+    /// would untap during [its controller's / your] untap step, [effect]
+    /// instead" — Freyalise's Winds, Edge of Malacol) so it does NOT apply to
+    /// effect-untaps ("untap target creature") at other times.
+    DuringUntapStep,
     /// "unless you revealed a [type] card" / "unless you paid {mana}"
     /// CR 614.1d — Generic condition text that the engine does not yet decompose further.
     /// Using this variant lets the replacement be recognized for coverage while deferring
