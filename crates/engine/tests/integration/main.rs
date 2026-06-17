@@ -225,6 +225,7 @@ mod issue_3245_abhorrent_oculus_manifest_dread;
 mod issue_3260_phantasmal_image_persist;
 mod issue_3283_sevinne_reclamation_copy_no_self_copy;
 mod issue_3285_face_down_public_zone;
+mod issue_3288_electrolyze_second_target;
 mod issue_3294_good_king_mog_chapter_ii;
 mod issue_3295_scrapwork_mutt_unearth_zone;
 mod issue_3296_hordewing_skaab_discard;
