@@ -1514,6 +1514,33 @@ fn starts_target_continuous_clause_lower(s: &str) -> OracleResult<'_, ()> {
     .parse(rest)
 }
 
+/// CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: a second "each opponent"/"each
+/// player" clause joined by a bare " and " is a fresh player-scoped clause start
+/// (Slitherwisp "you draw a card and each opponent loses 1 life"; Curry Favor;
+/// Disinformation Campaign; Bad Deal; Clockwork Fox). Without this arm the
+/// conjunct is swallowed by the first effect and the player-scoped half is
+/// dropped. The discriminator is a conjugated player-action verb immediately
+/// after the "each opponent "/"each player " subject — a bare-noun continuation
+/// (Goblin Chainwhirler's "... and each creature you control") has no such verb
+/// and is left un-split, preserving the single DamageAll. Player-scope sibling of
+/// `starts_target_continuous_clause_lower`.
+fn starts_each_player_predicate_clause_lower(s: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = alt((tag("each opponent "), tag("each player "))).parse(s)?;
+    value(
+        (),
+        alt((
+            tag("loses "),
+            tag("gains "),
+            tag("draws "),
+            tag("discards "),
+            tag("mills "),
+            tag("sacrifices "),
+            tag("exiles "),
+        )),
+    )
+    .parse(rest)
+}
+
 /// Inner implementation operating on pre-lowercased input.
 fn starts_bare_and_clause_lower(s: &str) -> bool {
     // CR 613.1b + CR 110.2: "<player-subject> gains control of …" control-handoff
@@ -1748,6 +1775,13 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // `starts_they_continuous_clause_lower` helper) rather than a new tuple
     // element so the enclosing `alt(...)` cluster stays under nom's 21-arm limit.
     .or(value((), starts_target_continuous_clause_lower))
+    // CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: a fresh "each opponent"/"each
+    // player" conjunct + conjugated player-action verb is a player-scoped clause
+    // start (Slitherwisp, Curry Favor, Disinformation Campaign, Bad Deal,
+    // Clockwork Fox). Trailing `.or()` arm (mirroring
+    // `starts_target_continuous_clause_lower`) so the `alt(...)` cluster stays
+    // under nom's 21-arm limit.
+    .or(value((), starts_each_player_predicate_clause_lower))
     .parse(s)
     .is_ok();
     if has_verb_prefix {
@@ -7822,6 +7856,57 @@ mod tests {
         assert!(!starts_bare_and_clause("target creature you control"));
     }
 
+    /// CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: A second "each opponent"/"each
+    /// player" conjunct joined by a bare " and " is a fresh player-scoped clause
+    /// start when followed by a conjugated player-action verb. Slitherwisp ("you
+    /// draw a card and each opponent loses 1 life"), Curry Favor, Disinformation
+    /// Campaign, Bad Deal, Clockwork Fox. The conjugated verb immediately after
+    /// the subject is the discriminator; a bare-noun continuation (Goblin
+    /// Chainwhirler's "and each creature you control") has no such verb.
+    #[test]
+    fn bare_and_clause_starts_on_each_player_predicate_subject() {
+        // Verb-axis coverage for "each opponent".
+        assert!(starts_bare_and_clause("each opponent loses 1 life"));
+        assert!(starts_bare_and_clause("each opponent discards a card"));
+        assert!(starts_bare_and_clause("each opponent discards two cards"));
+        assert!(starts_bare_and_clause("each opponent draws a card"));
+        assert!(starts_bare_and_clause("each opponent loses x life"));
+        // "each player" subject.
+        assert!(starts_bare_and_clause("each player loses 2 life"));
+        // NO-REGRESSION negatives:
+        // Bare-noun continuation — no conjugated player-action verb.
+        assert!(!starts_bare_and_clause("each creature you control"));
+        // Goblin Chainwhirler — "each opponent" with no verb before "and each
+        // creature ...": immediate-tag cannot match a downstream verb.
+        assert!(!starts_bare_and_clause(
+            "each opponent and each creature you control"
+        ));
+        // Possessive noun phrase — not a predicate clause.
+        assert!(!starts_bare_and_clause("each opponent's creatures"));
+    }
+
+    /// CR 102.2 + CR 608.2c: end-to-end chunk split. The "you draw ... and each
+    /// opponent <verb> ..." compound must split into TWO chunks (previously the
+    /// player-scoped conjunct was swallowed by the first effect and dropped).
+    /// Goblin Chainwhirler's bare-noun "and each creature you control" must stay
+    /// ONE chunk (no conjugated verb → no split).
+    #[test]
+    fn bare_and_splits_each_player_predicate_conjunct() {
+        assert_eq!(
+            clause_texts("you draw a card and each opponent loses 1 life"),
+            vec!["you draw a card", "each opponent loses 1 life"]
+        );
+        assert_eq!(
+            clause_texts("you draw two cards and each opponent discards two cards"),
+            vec!["you draw two cards", "each opponent discards two cards"]
+        );
+        // No-regression: Goblin Chainwhirler stays a single DamageAll chunk.
+        assert_eq!(
+            clause_texts("deals 1 damage to each opponent and each creature you control"),
+            vec!["deals 1 damage to each opponent and each creature you control"]
+        );
+    }
+
     /// CR 602.5 + CR 611.2c: Skulduggery — symmetric dual-target pump. The
     /// bare `" and "` between the two `"target creature ... gets +/-"` conjuncts
     /// must split so BOTH Pumps survive; previously the second (opponent-debuff)
@@ -7881,6 +7966,127 @@ mod tests {
             Some(ControllerRef::Opponent),
             "conjunct 2 must target an opponent's creature"
         );
+    }
+
+    /// CR 102.2 + CR 119.3 + CR 121.1 + CR 608.2c: full-card discriminating gate
+    /// for the bare-and "each opponent/player <verb>" split. Slitherwisp ("you
+    /// draw a card and each opponent loses 1 life"), Curry Favor (where-X bound to
+    /// BOTH conjuncts), Bad Deal (each-opponent discards two). Before the fix the
+    /// second conjunct was swallowed by the first effect and the player-scoped
+    /// half (life loss / discard) was dropped entirely.
+    #[test]
+    fn each_player_predicate_conjunct_parses_end_to_end() {
+        use super::super::parse_effect_chain;
+        use crate::types::ability::PlayerFilter;
+
+        // --- Slitherwisp: Draw (controller) + LoseLife (opponent, amount 1). ---
+        let def = parse_effect_chain(
+            "You draw a card and each opponent loses 1 life.",
+            AbilityKind::Spell,
+        );
+        let mut nodes: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            nodes.push(d);
+            node = d.sub_ability.as_deref();
+        }
+        let has_draw = nodes
+            .iter()
+            .any(|d| matches!(&*d.effect, Effect::Draw { .. }));
+        assert!(
+            has_draw,
+            "Slitherwisp must keep the controller Draw: {nodes:?}"
+        );
+        let lose = nodes
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::LoseLife { .. }))
+            .expect("Slitherwisp's each-opponent LoseLife conjunct was dropped before the fix");
+        assert_eq!(
+            lose.player_scope,
+            Some(PlayerFilter::Opponent),
+            "life loss is scoped to each opponent"
+        );
+        let Effect::LoseLife { amount, .. } = &*lose.effect else {
+            unreachable!()
+        };
+        assert_eq!(*amount, QuantityExpr::Fixed { value: 1 });
+
+        // --- Curry Favor: GainLife{Knights} + LoseLife{opponent, X=Knights}. ---
+        let def = parse_effect_chain(
+            "You gain X life and each opponent loses X life, where X is the number of Knights you control.",
+            AbilityKind::Spell,
+        );
+        let mut nodes: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            nodes.push(d);
+            node = d.sub_ability.as_deref();
+        }
+        let gain = nodes
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::GainLife { .. }))
+            .expect("Curry Favor must keep the controller GainLife conjunct");
+        let lose = nodes
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::LoseLife { .. }))
+            .expect("Curry Favor's each-opponent LoseLife conjunct was dropped before the fix");
+        assert_eq!(
+            lose.player_scope,
+            Some(PlayerFilter::Opponent),
+            "life loss is scoped to each opponent"
+        );
+        // where-X binds to BOTH conjuncts: neither amount is a bare Fixed(0).
+        let Effect::GainLife {
+            amount: gain_amt, ..
+        } = &*gain.effect
+        else {
+            unreachable!()
+        };
+        let Effect::LoseLife {
+            amount: lose_amt, ..
+        } = &*lose.effect
+        else {
+            unreachable!()
+        };
+        assert_ne!(
+            *gain_amt,
+            QuantityExpr::Fixed { value: 0 },
+            "X must bind on the gain conjunct (got {gain_amt:?})"
+        );
+        assert_ne!(
+            *lose_amt,
+            QuantityExpr::Fixed { value: 0 },
+            "X must bind on the loss conjunct (got {lose_amt:?})"
+        );
+        assert_eq!(
+            gain_amt, lose_amt,
+            "both conjuncts share the same where-X quantity"
+        );
+
+        // --- Bad Deal: each-opponent Discard (count 2, opponent scope) present. ---
+        let def = parse_effect_chain(
+            "You draw two cards and each opponent discards two cards. You lose 2 life and each opponent loses 4 life.",
+            AbilityKind::Spell,
+        );
+        let mut nodes: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            nodes.push(d);
+            node = d.sub_ability.as_deref();
+        }
+        let discard = nodes
+            .iter()
+            .find(|d| matches!(&*d.effect, Effect::Discard { .. }))
+            .expect("Bad Deal's each-opponent Discard conjunct was dropped before the fix");
+        assert_eq!(
+            discard.player_scope,
+            Some(PlayerFilter::Opponent),
+            "discard is scoped to each opponent"
+        );
+        let Effect::Discard { count, .. } = &*discard.effect else {
+            unreachable!()
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
     }
 
     /// CR 611.2c: No-regression guard for the shared-target rider shape. A
