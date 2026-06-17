@@ -3190,6 +3190,10 @@ pub enum WaitingFor {
         player: PlayerId,
         modal: ModalChoice,
         pending_cast: Box<PendingCast>,
+        /// Mode indices unavailable due to NoRepeat constraints or unsatisfied
+        /// targeting requirements (CR 700.2a-b). Mirrors `AbilityModeChoice`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unavailable_modes: Vec<usize>,
     },
     /// Player must choose which cards to discard down to maximum hand size (cleanup step).
     DiscardToHandSize {
@@ -8004,6 +8008,7 @@ mod tests {
                 ..Default::default()
             },
             pending_cast: dummy_pending(),
+            unavailable_modes: vec![],
         }));
         variants.push(Box::new(WaitingFor::DiscardToHandSize {
             player: PlayerId(0),
