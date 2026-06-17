@@ -13146,6 +13146,106 @@ mod tests {
         }
     }
 
+    /// CR 119.3 + CR 603.2c: "for each 1 life you gained/lost" on a
+    /// `Whenever you gain/lose life` trigger binds the per-1 multiplier to the
+    /// triggering `LifeChanged` amount via `EventContextAmount`. Regression gate
+    /// for Cradle of Vitality / Transcendence / Lich's Tomb: previously the
+    /// for-each parse failed and the count stayed `Fixed{1}` (or `Fixed{2}`).
+    #[test]
+    fn parse_for_each_one_life_changed_full_cards() {
+        use crate::types::ability::{AbilityDefinition, Effect, QuantityExpr, QuantityRef};
+
+        // Walk an ability-definition chain (effect + sub_ability) collecting the
+        // first matching effect predicate hit.
+        fn find_effect<'a>(
+            def: &'a AbilityDefinition,
+            pred: &dyn Fn(&Effect) -> bool,
+        ) -> Option<&'a Effect> {
+            if pred(def.effect.as_ref()) {
+                return Some(def.effect.as_ref());
+            }
+            if let Some(sub) = def.sub_ability.as_deref() {
+                if let Some(found) = find_effect(sub, pred) {
+                    return Some(found);
+                }
+            }
+            def.else_ability
+                .as_deref()
+                .and_then(|else_def| find_effect(else_def, pred))
+        }
+
+        fn execute_effect<'a>(
+            r: &'a ParsedAbilities,
+            pred: &dyn Fn(&Effect) -> bool,
+        ) -> &'a Effect {
+            r.triggers
+                .iter()
+                .filter_map(|t| t.execute.as_deref())
+                .find_map(|exec| find_effect(exec, pred))
+                .expect("expected matching effect in a trigger execute chain")
+        }
+
+        let event_amount = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+
+        // Cradle of Vitality — reflexive PutCounter for each 1 life gained.
+        let cradle = parse(
+            "Whenever you gain life, you may pay {1}{W}. If you do, put a +1/+1 \
+             counter on target creature for each 1 life you gained.",
+            "Cradle of Vitality",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        let put = execute_effect(&cradle, &|e| matches!(e, Effect::PutCounter { .. }));
+        let Effect::PutCounter { count, .. } = put else {
+            unreachable!()
+        };
+        assert_eq!(
+            count, &event_amount,
+            "Cradle of Vitality PutCounter.count must be the life-gained amount, not Fixed{{1}}"
+        );
+
+        // Transcendence — gain 2 life for each 1 life lost ⇒ Multiply{2, amount}.
+        let transcendence = parse(
+            "Whenever you lose life, you gain 2 life for each 1 life you lost.",
+            "Transcendence",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        let gain = execute_effect(&transcendence, &|e| matches!(e, Effect::GainLife { .. }));
+        let Effect::GainLife { amount, .. } = gain else {
+            unreachable!()
+        };
+        assert_eq!(
+            amount,
+            &QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(event_amount.clone()),
+            },
+            "Transcendence GainLife.amount must be 2 × life-lost, not Fixed{{2}}"
+        );
+
+        // Lich's Tomb — sacrifice a permanent for each 1 life lost.
+        let lichs_tomb = parse(
+            "Whenever you lose life, sacrifice a permanent for each 1 life you lost.",
+            "Lich's Tomb",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        let sac = execute_effect(&lichs_tomb, &|e| matches!(e, Effect::Sacrifice { .. }));
+        let Effect::Sacrifice { count, .. } = sac else {
+            unreachable!()
+        };
+        assert_eq!(
+            count, &event_amount,
+            "Lich's Tomb Sacrifice.count must be the life-lost amount, not Fixed{{1}}"
+        );
+    }
+
     #[test]
     fn parse_harmonize_wild_ride() {
         // Harmonize with lower cost
