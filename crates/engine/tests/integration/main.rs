@@ -32,6 +32,7 @@ mod cascade_intervening_if_pipeline;
 mod case_solve_condition;
 mod cast_during_resolution_pipeline;
 mod chain_of_smog_copy;
+mod chandra_revolution_doesnt_untap_slot;
 mod charging_cinderhorn_issue_2868;
 mod chatterstorm_storm;
 mod cleave_text_changing_cost;
