@@ -9,6 +9,7 @@ use nom::Parser;
 use super::animation::{
     animation_modifications_with_replacement, has_in_addition_to_other_types, parse_animation_spec,
 };
+use super::imperative;
 use super::lower::BOUNDED_TARGET_PHRASES;
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
@@ -397,6 +398,52 @@ fn try_parse_subject_restriction_clause(
             optional: false,
             unless_pay: None,
         });
+    }
+
+    // CR 508.1d (must-attack declaration) + CR 608.2c (one-shot anaphora binding)
+    // + CR 611.2c (continuous effect affected-set) — mirrors the " must be blocked"
+    // subject form (CR 509.1c). "[subject] attacks/attack this turn/combat if able"
+    // for a targeted or set subject (Boiling Blood, Heckling Fiends, Incite, …):
+    // the bare imperative recognizer drops the subject (target: None, affected:
+    // None), silently un-binding the MustAttack requirement. Split off the subject
+    // here and re-bind: target = the typed/targeted subject, static affected =
+    // ParentTarget so `register_transient_effect` produces a per-target
+    // SpecificObject TCE. Use `find_predicate_start`/`deconjugate_verb` (NOT
+    // `split_around`, which consumes the "attack" needle and leaves a tail the
+    // recognizer rejects) to yield subject + deconjugated "attack … if able"
+    // predicate, exactly as `try_parse_subject_become_clause` does.
+    if let Some(verb_start) = find_predicate_start(text) {
+        let subject = text[..verb_start].trim();
+        let predicate = deconjugate_verb(text[verb_start..].trim());
+        // Classify via the existing recognizer. Only the bare GenericEffect form
+        // (MustAttack) is re-bound here; the player-bound `ForceAttack` form
+        // ("attacks you/that player …") has its own targeted handling and must
+        // NOT be captured.
+        if let Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect { duration, .. })) =
+            imperative::try_parse_attack_if_able(&predicate)
+        {
+            // `?` here makes a bare/source-granted "attacks this turn if able"
+            // (empty subject, granted ability) fall through to None, preserving
+            // the existing target:None behavior for that class.
+            let application = parse_subject_application(subject, ctx)?;
+            let affected = static_affected_for_application(&application);
+            return Some(ParsedEffectClause {
+                effect: Effect::GenericEffect {
+                    static_abilities: vec![
+                        imperative::must_attack_static_definition().affected(affected)
+                    ],
+                    duration: duration.clone(),
+                    target: application.target,
+                },
+                distribute: None,
+                multi_target: application.multi_target,
+                duration,
+                sub_ability: None,
+                condition: None,
+                optional: application.is_optional,
+                unless_pay: None,
+            });
+        }
     }
 
     // CR 602.5 + CR 603.2a: "[subject] activated abilities can't be activated" —
