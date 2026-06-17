@@ -1961,6 +1961,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
                 let combined = merge_or_filters(left, other_filter);
                 let combined = distribute_shared_properties(combined, &properties);
                 let combined = distribute_controller_to_or(combined);
+                let combined = distribute_core_type_to_or(combined);
                 return (distribute_properties_to_or(combined), final_rest);
             }
         }
@@ -2982,6 +2983,51 @@ pub(crate) fn distribute_controller_to_or(filter: TargetFilter) -> TargetFilter 
         }
     }
 
+    TargetFilter::Or { filters }
+}
+
+/// Backfill the concrete core type onto `Or` legs assembled as `[TypeFilter::Any]`
+/// because the type noun appeared only after a later disjunct ("green or white
+/// creature" — the "green" leg is built with `Any` before "creature" is parsed,
+/// while the final "white creature" leg carries `[Creature]`). Without this, the
+/// `Any` leg imposes no type restriction (type_filters are ANDed in
+/// game/filter.rs), so a green noncreature would be a legal target.
+///
+/// CR 105.2 (color is a characteristic) + CR 109.2 (a type-word object
+/// description restricts to that card type): the trailing type word binds to
+/// EVERY disjunct of the color/adjective disjunction; an `Any`-only leg from a
+/// deferred type noun must inherit the concrete core type of the type-bearing leg.
+///
+/// Source: the LAST `Typed` leg whose type_filters is NOT exactly `[Any]`
+/// (`merge_or_filters` flattens ≥3-color disjunctions so all legs are siblings).
+/// Guards: only an exactly-`[Any]` leg is rewritten (an `[Artifact]` leg in
+/// "artifact or creature" is untouched); if NO leg has a concrete type (genuine
+/// "X or Y permanent" where every leg is `[Any]`/`[Permanent]`) there is no
+/// source → no-op; legs with a different explicit type keep it.
+pub(crate) fn distribute_core_type_to_or(filter: TargetFilter) -> TargetFilter {
+    let TargetFilter::Or { mut filters } = filter else {
+        return filter;
+    };
+    let source_types: Option<Vec<TypeFilter>> = filters.iter().rev().find_map(|f| {
+        if let TargetFilter::Typed(TypedFilter { type_filters, .. }) = f {
+            if type_filters.as_slice() == [TypeFilter::Any] {
+                None
+            } else {
+                Some(type_filters.clone())
+            }
+        } else {
+            None
+        }
+    });
+    if let Some(types) = source_types {
+        for f in &mut filters {
+            if let TargetFilter::Typed(ref mut typed) = f {
+                if typed.type_filters.as_slice() == [TypeFilter::Any] {
+                    typed.type_filters = types.clone();
+                }
+            }
+        }
+    }
     TargetFilter::Or { filters }
 }
 
@@ -9279,6 +9325,270 @@ mod tests {
             other => panic!("Expected Or filter, got {other:?}"),
         }
         assert_eq!(rest.trim(), "");
+    }
+
+    // CR 105.2 (color characteristic) + CR 109.2 (type-word object description):
+    // when the core type noun ("creature") appears only after a later color
+    // disjunct, the earlier color-only leg is assembled with `[TypeFilter::Any]`
+    // before "creature" is parsed. `distribute_core_type_to_or` backfills the
+    // concrete core type so EVERY leg carries the type restriction (type_filters
+    // are ANDed in game/filter.rs). Without it, a green noncreature would be a
+    // legal "green or white creature" target. These drive the real parse pipeline
+    // and assert each flat Or leg independently.
+
+    /// Extract the `HasColor` color from a Typed leg's properties, if present.
+    fn leg_color(filter: &TargetFilter) -> Option<ManaColor> {
+        typed_leg(filter).and_then(|tf| {
+            tf.properties.iter().find_map(|p| match p {
+                FilterProp::HasColor { color } => Some(*color),
+                _ => None,
+            })
+        })
+    }
+
+    #[test]
+    fn or_color_disjunction_backfills_core_type_deathmark() {
+        // Deathmark: "Destroy target green or white creature".
+        let (f, rest) = parse_target("target green or white creature");
+        assert_eq!(rest.trim(), "");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2, "expected 2-way OR, got {filters:#?}");
+        // Both legs must carry exactly [Creature] (the green leg was [Any]).
+        for (i, leg) in filters.iter().enumerate() {
+            let tf = typed_leg(leg).unwrap_or_else(|| panic!("leg {i} not Typed: {leg:?}"));
+            assert_eq!(
+                tf.type_filters,
+                vec![TypeFilter::Creature],
+                "leg {i} must be [Creature], got {:?}",
+                tf.type_filters
+            );
+        }
+        assert_eq!(
+            leg_color(&filters[0]),
+            Some(ManaColor::Green),
+            "leg 0 = green"
+        );
+        assert_eq!(
+            leg_color(&filters[1]),
+            Some(ManaColor::White),
+            "leg 1 = white"
+        );
+    }
+
+    #[test]
+    fn or_color_disjunction_backfills_core_type_tidebinder() {
+        // Tidebinder Mage: "tap target red or green creature an opponent controls".
+        let (f, rest) = parse_target("target red or green creature an opponent controls");
+        assert_eq!(rest.trim(), "");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2, "expected 2-way OR, got {filters:#?}");
+        for (i, leg) in filters.iter().enumerate() {
+            let tf = typed_leg(leg).unwrap_or_else(|| panic!("leg {i} not Typed: {leg:?}"));
+            assert_eq!(
+                tf.type_filters,
+                vec![TypeFilter::Creature],
+                "leg {i} must be [Creature], got {:?}",
+                tf.type_filters
+            );
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::Opponent),
+                "leg {i} must inherit opponent controller scope"
+            );
+        }
+        assert_eq!(leg_color(&filters[0]), Some(ManaColor::Red), "leg 0 = red");
+        assert_eq!(
+            leg_color(&filters[1]),
+            Some(ManaColor::Green),
+            "leg 1 = green"
+        );
+    }
+
+    #[test]
+    fn or_color_disjunction_backfills_core_type_self_inflicted_wound() {
+        // Self-Inflicted Wound: "a green or white creature of their choice".
+        // The filter-phrase level (parse_type_phrase) is what the parser produces;
+        // load-bearing assertion is that BOTH legs carry [Creature].
+        let (f, _rest) = parse_type_phrase("green or white creature");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2, "expected 2-way OR, got {filters:#?}");
+        for (i, leg) in filters.iter().enumerate() {
+            let tf = typed_leg(leg).unwrap_or_else(|| panic!("leg {i} not Typed: {leg:?}"));
+            assert_eq!(
+                tf.type_filters,
+                vec![TypeFilter::Creature],
+                "leg {i} must be [Creature], got {:?}",
+                tf.type_filters
+            );
+        }
+        assert_eq!(
+            leg_color(&filters[0]),
+            Some(ManaColor::Green),
+            "leg 0 = green"
+        );
+        assert_eq!(
+            leg_color(&filters[1]),
+            Some(ManaColor::White),
+            "leg 1 = white"
+        );
+    }
+
+    #[test]
+    fn distribute_core_type_to_or_backfills_every_flat_any_leg() {
+        // Building-block test: `merge_or_filters` flattens nested `Or`s, so a
+        // ≥3-disjunct list arrives at `distribute_core_type_to_or` as flat
+        // siblings. Drive the distributor directly with a flat 3-leg Or in which
+        // two legs are the deferred-type `[Any]` shape (color-only) and the last
+        // carries the concrete `[Creature]`. EVERY `[Any]` leg must inherit
+        // `[Creature]`; the type-bearing leg is untouched. (The surface parser
+        // does not yet assemble a ≥3 color-only disjunction — comma/no-comma color
+        // chains are a separate gap — so we pin the distributor at its own seam,
+        // which is exactly the level `merge_or_filters` feeds.)
+        let any_leg = |color: ManaColor| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Any],
+                controller: None,
+                properties: vec![FilterProp::HasColor { color }],
+            })
+        };
+        let creature_leg = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::HasColor {
+                color: ManaColor::Black,
+            }],
+        });
+        let input = TargetFilter::Or {
+            filters: vec![
+                any_leg(ManaColor::White),
+                any_leg(ManaColor::Blue),
+                creature_leg,
+            ],
+        };
+        let TargetFilter::Or { filters } = distribute_core_type_to_or(input) else {
+            panic!("distributor must preserve the Or shape");
+        };
+        assert_eq!(filters.len(), 3);
+        for (i, leg) in filters.iter().enumerate() {
+            let tf = typed_leg(leg).unwrap_or_else(|| panic!("leg {i} not Typed: {leg:?}"));
+            assert_eq!(
+                tf.type_filters,
+                vec![TypeFilter::Creature],
+                "leg {i} must inherit [Creature], got {:?}",
+                tf.type_filters
+            );
+        }
+        assert_eq!(
+            leg_color(&filters[0]),
+            Some(ManaColor::White),
+            "leg 0 = white"
+        );
+        assert_eq!(
+            leg_color(&filters[1]),
+            Some(ManaColor::Blue),
+            "leg 1 = blue"
+        );
+        assert_eq!(
+            leg_color(&filters[2]),
+            Some(ManaColor::Black),
+            "leg 2 = black"
+        );
+    }
+
+    #[test]
+    fn or_disjunction_distinct_explicit_types_untouched() {
+        // No-regression: "artifact or creature" — neither leg is [Any], so the
+        // backfill must NOT collapse the distinct types into one.
+        let (f, rest) = parse_type_phrase("artifact or creature");
+        assert_eq!(rest.trim(), "");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2, "expected 2-way OR, got {filters:#?}");
+        assert_eq!(
+            typed_leg(&filters[0]).unwrap().type_filters,
+            vec![TypeFilter::Artifact],
+            "leg 0 stays [Artifact]"
+        );
+        assert_eq!(
+            typed_leg(&filters[1]).unwrap().type_filters,
+            vec![TypeFilter::Creature],
+            "leg 1 stays [Creature]"
+        );
+    }
+
+    #[test]
+    fn or_disjunction_artifact_or_enchantment_untouched() {
+        // No-regression: both legs explicit, neither [Any] — untouched.
+        let (f, rest) = parse_type_phrase("artifact or enchantment");
+        assert_eq!(rest.trim(), "");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        assert_eq!(
+            typed_leg(&filters[0]).unwrap().type_filters,
+            vec![TypeFilter::Artifact]
+        );
+        assert_eq!(
+            typed_leg(&filters[1]).unwrap().type_filters,
+            vec![TypeFilter::Enchantment]
+        );
+    }
+
+    #[test]
+    fn single_green_creature_not_or_early_returns() {
+        // No-regression: a non-Or phrase early-returns from the distributor.
+        let (f, rest) = parse_type_phrase("green creature");
+        assert_eq!(rest.trim(), "");
+        match f {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                assert!(
+                    has_prop(
+                        &tf,
+                        FilterProp::HasColor {
+                            color: ManaColor::Green
+                        }
+                    ),
+                    "expected green color prop, got {tf:?}"
+                );
+            }
+            other => panic!("expected single Typed filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn or_spell_or_permanent_leaves_non_any_legs_alone() {
+        // Reviewer's extra guard: "target spell or permanent that's red or green"
+        // parses to an Or with a StackSpell-bearing leg + a [Permanent] leg.
+        // Neither leg is exactly [Any], so the backfill must leave the StackSpell
+        // leg and the [Permanent] leg untouched (no source → no-op anyway).
+        let (f, rest) = parse_target("target spell or permanent that's red or green");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        // The spell leg must remain a StackSpell (not rewritten into a Typed type).
+        assert!(
+            filters.iter().any(is_stack_spell_leg),
+            "spell leg must remain StackSpell: {filters:#?}"
+        );
+        // The permanent leg keeps [Permanent] — not collapsed to [Any] or rewritten.
+        assert!(
+            filters
+                .iter()
+                .filter_map(typed_leg)
+                .any(|tf| tf.type_filters == vec![TypeFilter::Permanent]),
+            "permanent leg must keep [Permanent]: {filters:#?}"
+        );
     }
 
     // CR 508.5 / CR 508.5a: the "defending player controls" controller suffix
