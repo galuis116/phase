@@ -2998,28 +2998,37 @@ pub(crate) fn distribute_controller_to_or(filter: TargetFilter) -> TargetFilter 
 /// EVERY disjunct of the color/adjective disjunction; an `Any`-only leg from a
 /// deferred type noun must inherit the concrete core type of the type-bearing leg.
 ///
-/// Source: the LAST `Typed` leg whose type_filters is NOT exactly `[Any]`
-/// (`merge_or_filters` flattens ≥3-color disjunctions so all legs are siblings).
-/// Guards: only an exactly-`[Any]` leg is rewritten (an `[Artifact]` leg in
-/// "artifact or creature" is untouched); if NO leg has a concrete type (genuine
-/// "X or Y permanent" where every leg is `[Any]`/`[Permanent]`) there is no
-/// source → no-op; legs with a different explicit type keep it.
+/// Source: the UNIQUE non-`[Any]` `type_filters` shared by every type-bearing
+/// `Typed` leg. Backfill happens ONLY when the disjunction is unambiguous — i.e.
+/// all non-`[Any]` Typed legs agree on the same `type_filters`. Guards:
+/// - only an exactly-`[Any]` leg is rewritten (an `[Artifact]` leg in "artifact
+///   or creature" is untouched);
+/// - if NO leg has a concrete type (genuine "X or Y permanent" where every leg
+///   is `[Any]`/`[Permanent]`) there is no source → no-op;
+/// - if the type-bearing legs DISAGREE (a compound disjunction like "red or
+///   green instant or sorcery spell", whose legs carry `[Instant]` vs
+///   `[Sorcery]`), there is no single core type to project onto the bare color
+///   legs, so the `[Any]` legs are left unchanged — preserving the prior, looser
+///   behavior the runtime relies on (e.g. Wort, the Raidmother granting conspire
+///   to a red *instant*). Over-narrowing such a leg to one branch's type
+///   ("[Sorcery]") would wrongly exclude the other ("a red instant").
+///
+/// The common case ("green or white creature" → exactly one type leg `[Creature]`)
+/// has a single distinct value and is backfilled onto the bare color legs.
 pub(crate) fn distribute_core_type_to_or(filter: TargetFilter) -> TargetFilter {
     let TargetFilter::Or { mut filters } = filter else {
         return filter;
     };
-    let source_types: Option<Vec<TypeFilter>> = filters.iter().rev().find_map(|f| {
+    let mut distinct: Vec<Vec<TypeFilter>> = Vec::new();
+    for f in &filters {
         if let TargetFilter::Typed(TypedFilter { type_filters, .. }) = f {
-            if type_filters.as_slice() == [TypeFilter::Any] {
-                None
-            } else {
-                Some(type_filters.clone())
+            if type_filters.as_slice() != [TypeFilter::Any] && !distinct.contains(type_filters) {
+                distinct.push(type_filters.clone());
             }
-        } else {
-            None
         }
-    });
-    if let Some(types) = source_types {
+    }
+    if distinct.len() == 1 {
+        let types = &distinct[0];
         for f in &mut filters {
             if let TargetFilter::Typed(ref mut typed) = f {
                 if typed.type_filters.as_slice() == [TypeFilter::Any] {
@@ -9498,6 +9507,56 @@ mod tests {
             leg_color(&filters[2]),
             Some(ManaColor::Black),
             "leg 2 = black"
+        );
+    }
+
+    #[test]
+    fn distribute_core_type_to_or_skips_disagreeing_type_legs() {
+        // Regression (Wort, the Raidmother / conspire): a COMPOUND disjunction
+        // "red or green instant or sorcery spell" yields an `[Any]`+red leg
+        // alongside DISAGREEING type legs (`[Instant]` and `[Sorcery]`). There is
+        // no single core type to project, so the `[Any]` leg must be LEFT
+        // UNCHANGED — over-narrowing it to one branch ("[Sorcery]") would wrongly
+        // stop a red *instant* from matching, so Wort would no longer grant it
+        // conspire. Backfilling here is unsafe; the distributor must no-op.
+        let any_red = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Any],
+            controller: None,
+            properties: vec![FilterProp::HasColor {
+                color: ManaColor::Red,
+            }],
+        });
+        let instant_leg = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Instant],
+            controller: None,
+            properties: vec![],
+        });
+        let sorcery_leg = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Sorcery],
+            controller: None,
+            properties: vec![],
+        });
+        let input = TargetFilter::Or {
+            filters: vec![any_red, instant_leg, sorcery_leg],
+        };
+        let TargetFilter::Or { filters } = distribute_core_type_to_or(input) else {
+            panic!("distributor must preserve the Or shape");
+        };
+        // The `[Any]`+red leg is unchanged (NOT narrowed to [Instant] or [Sorcery]).
+        let red = typed_leg(&filters[0]).expect("leg 0 Typed");
+        assert_eq!(
+            red.type_filters,
+            vec![TypeFilter::Any],
+            "the bare color leg must stay [Any] when type legs disagree, got {:?}",
+            red.type_filters
+        );
+        assert_eq!(
+            typed_leg(&filters[1]).unwrap().type_filters,
+            vec![TypeFilter::Instant]
+        );
+        assert_eq!(
+            typed_leg(&filters[2]).unwrap().type_filters,
+            vec![TypeFilter::Sorcery]
         );
     }
 
