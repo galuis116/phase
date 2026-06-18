@@ -75,7 +75,7 @@ jobs:
     # 99% of failures historically come from cross-platform-agnostic config or
     # generic Rust mistakes, not from platform-specific Tauri internals.
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
