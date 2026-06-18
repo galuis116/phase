@@ -415,4 +415,5 @@ mod who_villainous_choice_scoped_player;
 mod wise_mothman_milled_trigger;
 mod wise_mothman_target_distinctness;
 mod wrenn_and_six_up_to_one_optout;
+mod yare_extra_blockers;
 mod yuriko_combat_damage;
