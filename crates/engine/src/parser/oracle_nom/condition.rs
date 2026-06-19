@@ -2048,7 +2048,7 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         }
     }
 
-    // CR 119.1 + CR 104.3a: "you have more life than an opponent" — the
+    // CR 119: "you have more life than an opponent" — the
     // controller's life total strictly exceeds at least one opponent's. "an
     // opponent" is existential, so the predicate is "your life > the minimum
     // opponent life". This is the mirror of the existing "an opponent has more
@@ -9270,7 +9270,7 @@ mod tests {
 
     #[test]
     fn test_you_have_more_life_than_an_opponent() {
-        // CR 119.1 + CR 104.3a: mirror of "an opponent has more life than you".
+        // CR 119: mirror of "an opponent has more life than you".
         // "you have more life than an opponent" → your life > the minimum
         // opponent life (existential "an opponent"). Real cards: Glorious
         // Enforcer, Survival Cache, Feudkiller's Verdict. Before this fix the
