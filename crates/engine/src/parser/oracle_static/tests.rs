@@ -2437,11 +2437,11 @@ fn self_cost_reduction_another_filtered_spell_requires_prior_matching_spell() {
     );
 }
 
-/// CR 601.2f + CR 603.4: a self-spell cost reduction written with a LEADING
-/// condition — "If [condition], this spell costs {N} less to cast." — must
-/// attach the gate. Before the leading-`if` extraction fix the condition was
-/// silently dropped (the trailing-only `rfind(" if ")` scan never saw the
-/// front-of-line "if"), so every Avatar in the cycle reduced unconditionally.
+/// CR 601.2f: a self-spell cost reduction written with a LEADING condition —
+/// "If [condition], this spell costs {N} less to cast." — must attach the
+/// gate. Before the leading-`if` extraction fix the condition was silently
+/// dropped (the trailing-only `rfind(" if ")` scan never saw the front-of-line
+/// "if"), so every Avatar in the cycle reduced unconditionally.
 #[test]
 fn self_cost_reduction_leading_if_you_have_n_or_less_life() {
     // Avatar of Hope.

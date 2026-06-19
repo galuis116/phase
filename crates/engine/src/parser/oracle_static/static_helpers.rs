@@ -645,21 +645,25 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
         }
     }
 
-    // CR 601.2f + CR 603.4: Leading-condition form — "If [condition], this spell
-    // costs {N} less to cast." The trailing scan above misses this because the
-    // "if" is at the start of the line (no preceding space), so `rfind(" if ")`
-    // never matches it. Strip the leading "if ", consume the condition with the
-    // shared combinator, and accept it only when the remainder is the comma that
-    // separates the condition from the (already-parsed) cost clause. The Avatar
-    // cycle (Avatar of Fury/Hope/Might/Will/Woe) and "If you weren't the starting
-    // player, this spell costs {1} less" cards use this form.
+    // CR 601.2f: Leading-condition form — "If [condition], this spell costs
+    // {N} less to cast." The trailing scan above misses this because the "if"
+    // is at the start of the line (no preceding space), so `rfind(" if ")`
+    // never matches it. Consume the condition with the shared combinator and
+    // accept it only when followed by the comma separating it from the
+    // already-parsed cost clause. The Avatar cycle (Avatar of
+    // Fury/Hope/Might/Will/Woe) and "If you weren't the starting player, this
+    // spell costs {1} less" cards use this form.
     if definition.condition.is_none() {
-        if let Some(after_if) = lower.strip_prefix("if ") {
-            if let Ok((rest, sc)) = nom_condition::parse_inner_condition(after_if) {
-                if rest.trim_start().starts_with(',') {
-                    definition.condition = Some(sc);
-                }
-            }
+        if let Ok((_rest, sc)) = preceded(
+            tag("if "),
+            terminated(
+                nom_condition::parse_inner_condition,
+                (multispace0, tag(",")),
+            ),
+        )
+        .parse(lower)
+        {
+            definition.condition = Some(sc);
         }
     }
 
