@@ -1,9 +1,9 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::char;
-use nom::combinator::{all_consuming, map, map_opt, not, opt, rest as nom_rest, value};
-use nom::multi::many1;
+use nom::character::complete::{anychar, char};
+use nom::combinator::{all_consuming, map, map_opt, not, opt, recognize, rest as nom_rest, value};
+use nom::multi::{many1, separated_list1};
 use nom::sequence::{delimited, preceded, separated_pair, terminated};
 use nom::Parser;
 
@@ -1558,17 +1558,31 @@ fn parse_disjunctive_clause(clause: &str) -> Option<ManaSpendRestriction> {
 /// independently parse via [`parse_disjunctive_clause`]. Because the caller
 /// already tried the whole remainder as a single clause first, a type union
 /// inside one clause ("instant or sorcery spells") never reaches this path.
+/// CR 106.6: Recognize one disjunction clause — the run of input up to (but not
+/// including) the next clause delimiter (" or " / ", " / ", or ") or end of
+/// input. nom combinator (a `not`-guarded `anychar` repetition) per the
+/// parser-combinator mandate, rather than `str::split`.
+fn parse_one_disjunction_clause(input: &str) -> OracleResult<'_, &str> {
+    recognize(many1(preceded(
+        not(alt((tag(", or "), tag(", "), tag(" or ")))),
+        anychar,
+    )))
+    .parse(input)
+}
+
 fn parse_disjunctive_cast_clauses(rest: &str) -> Option<ManaSpendRestriction> {
-    // Split on the comma list first, then on " or " inside each comma chunk, so
-    // both plain " or " disjunctions and Oxford-comma forms (", or ") yield the
-    // same flat clause list. After an Oxford comma the trailing chunk begins
-    // "or …" (no leading space), so strip a leading "or " from each fragment.
-    let fragments: Vec<&str> = rest
-        .split(", ")
-        .flat_map(|chunk| chunk.split(" or "))
-        .map(|frag| frag.trim().strip_prefix("or ").unwrap_or(frag.trim()))
-        .filter(|s| !s.is_empty())
-        .collect();
+    // CR 106.6: Split the remainder into top-level disjunction clauses with a nom
+    // separated list — delimiters are " or " and the Oxford-comma forms (", " /
+    // ", or "). Longest delimiter first so ", or " wins over its ", " prefix.
+    // Each clause is the run of input up to the next delimiter; a type union
+    // inside one clause ("instant or sorcery spells") never reaches here because
+    // the caller tries the whole remainder as a single clause first.
+    let (_, fragments) = all_consuming(separated_list1(
+        alt((tag(", or "), tag(", "), tag(" or "))),
+        parse_one_disjunction_clause,
+    ))
+    .parse(rest)
+    .ok()?;
 
     if fragments.len() < 2 {
         return None;
