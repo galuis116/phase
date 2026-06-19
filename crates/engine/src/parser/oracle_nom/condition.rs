@@ -5544,6 +5544,30 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
         return Ok((rest2, condition));
     }
 
+    // CR 402.1 + CR 104.3a: "an opponent has no cards in hand" — existential
+    // over opponents (at least one opponent's hand is empty), i.e. the minimum
+    // opponent hand size is 0. Mirrors the Min-aggregate existential the
+    // life-comparison arms use. Cards: Rekindled Flame, Avatar of Will, Guul
+    // Draz Specter. `HandSize` resolves per-player through the same scalar path
+    // as `LifeTotal` (game::quantity::resolve_per_player_scalar), so the
+    // Opponent{Min} scope is already evaluated at runtime.
+    if let Ok((rest2, _)) = tag::<_, _, OracleError<'_>>("has no cards in hand").parse(rest) {
+        return Ok((
+            rest2,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Min,
+                        },
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            },
+        ));
+    }
+
     // "an opponent has more life than you"
     if let Ok((rest2, _)) = tag::<_, _, OracleError<'_>>("has more life than you").parse(rest) {
         return Ok((
@@ -9246,6 +9270,33 @@ mod tests {
                     },
             } => {}
             other => panic!("expected OpponentLifeTotal GT LifeTotal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_an_opponent_has_no_cards_in_hand() {
+        // CR 402.1 + CR 104.3a: existential "an opponent has no cards in hand" →
+        // min opponent hand size == 0. Real cards: Rekindled Flame, Avatar of
+        // Will, Guul Draz Specter. Before this fix the clause returned Err and
+        // the gating condition was silently dropped.
+        let (rest, c) = parse_inner_condition("an opponent has no cards in hand").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::HandSize {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Min,
+                                    },
+                            },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } => {}
+            other => panic!("expected OpponentHandSize(Min) EQ 0, got {other:?}"),
         }
     }
 
