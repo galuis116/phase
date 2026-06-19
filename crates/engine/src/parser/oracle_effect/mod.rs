@@ -2027,6 +2027,13 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
                 RestrictionPlayerScope::ParentTargetedPlayer,
                 tag("that player"),
             ),
+            // CR 508.5: "defending player" — the player being attacked by the
+            // source ("Whenever ~ attacks, defending player can't cast spells
+            // this turn." — Xantid Swarm).
+            value(
+                RestrictionPlayerScope::DefendingPlayer,
+                tag("defending player"),
+            ),
         ))
         .parse(input)
     })?;
@@ -12181,6 +12188,7 @@ fn lower_subject_predicate_ast(
                 return wrapped;
             }
             inject_subject_target(&mut clause.effect, &subject);
+            sync_subject_into_nested_shuffle_sub(&mut clause, &subject);
             // CR 109.4 + CR 608.2c (issue #534): When the subject phrase
             // resolved to the chosen player ("That player" after a
             // `Choose(Opponent)`/`Choose(Player)`), the predicate's possessive
@@ -12788,6 +12796,50 @@ fn parse_subject_exile_top_count(pred_lower: &str) -> QuantityExpr {
 /// the imperative fallback path, where the subject was stripped before parsing.
 /// Only applies to effects with a sentinel `TargetFilter::Any` that should inherit
 /// the subject's targeting information.
+fn sync_subject_into_nested_shuffle_sub(
+    clause: &mut ParsedEffectClause,
+    subject: &SubjectPhraseAst,
+) {
+    let subject_filter = subject.target.as_ref().unwrap_or(&subject.affected);
+    if !target_filter_can_target_player(subject_filter) {
+        return;
+    }
+
+    if !matches!(
+        &clause.effect,
+        Effect::ChangeZoneAll {
+            destination: Zone::Library,
+            ..
+        }
+    ) {
+        return;
+    }
+
+    let mut next = clause.sub_ability.as_mut();
+    while let Some(sub) = next {
+        // CR 701.24a + CR 608.2c: `lower_change_zone_all_to_library` chains
+        // `ChangeZoneAll { target: Controller }` for every additional origin
+        // zone, ending in `Shuffle { target: Controller }`. When the stripped
+        // subject is a player anaphor ("that player shuffles their hand into
+        // their library" — Jace, the Mind Sculptor −12), keep the whole
+        // mass-move/shuffle chain bound to that player.
+        match &mut *sub.effect {
+            Effect::ChangeZoneAll {
+                destination: Zone::Library,
+                target,
+                ..
+            }
+            | Effect::Shuffle { target }
+                if matches!(&*target, TargetFilter::Controller | TargetFilter::Any) =>
+            {
+                *target = subject_filter.clone();
+            }
+            _ => {}
+        }
+        next = sub.sub_ability.as_mut();
+    }
+}
+
 fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
     let subject_filter = subject.target.as_ref().unwrap_or(&subject.affected).clone();
     // CR 603.6 + CR 120.1: "that creature/permanent deals damage equal to
@@ -29078,6 +29130,53 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn compound_parent_target_shuffle_hand_and_graveyard_keeps_player_scope() {
+        let def = parse_effect_chain(
+            "Exile all cards from target player's library, then that player shuffles their hand and graveyard into their library.",
+            AbilityKind::Spell,
+        );
+
+        let hand = def
+            .sub_ability
+            .as_deref()
+            .expect("library exile should chain hand move");
+        assert!(matches!(
+            &*hand.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Hand),
+                destination: Zone::Library,
+                target: TargetFilter::ParentTargetController,
+                ..
+            }
+        ));
+
+        let graveyard = hand
+            .sub_ability
+            .as_deref()
+            .expect("hand move should chain graveyard move");
+        assert!(matches!(
+            &*graveyard.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Library,
+                target: TargetFilter::ParentTargetController,
+                ..
+            }
+        ));
+
+        let shuffle = graveyard
+            .sub_ability
+            .as_deref()
+            .expect("graveyard move should chain Shuffle");
+        assert!(matches!(
+            &*shuffle.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ParentTargetController
+            }
+        ));
+    }
+
     // Remaining tests truncated for space — they are identical to the original file.
     // Including a representative subset to verify compilation.
 
@@ -42398,6 +42497,31 @@ mod tests {
     }
 
     #[test]
+    fn cant_cast_spells_this_turn_defending_player() {
+        // CR 508.5 + CR 101.2: Xantid Swarm — "defending player can't cast
+        // spells this turn" (the combat-attack-trigger effect).
+        let def = parse_effect_chain(
+            "Defending player can't cast spells this turn.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::AddRestriction {
+                    restriction: GameRestriction::ProhibitActivity {
+                        affected_players: RestrictionPlayerScope::DefendingPlayer,
+                        expiry: RestrictionExpiry::EndOfTurn,
+                        activity: ProhibitedActivity::CastSpells { spell_filter: None },
+                        ..
+                    }
+                }
+            ),
+            "got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
     fn abeyance_clause_chain_parses_both_restrictions() {
         let def = parse_effect_chain(
             "Until end of turn, target player can't cast instant or sorcery spells, and that player can't activate abilities that aren't mana abilities. Draw a card.",
@@ -48761,6 +48885,51 @@ mod tests {
         assert_eq!(*target, TargetFilter::ParentTarget);
         assert!(*without_paying_mana_cost);
         assert!(cast.optional);
+
+        for cleanup in [cast.sub_ability.as_deref(), cast.else_ability.as_deref()] {
+            let cleanup = cleanup.expect("cleanup should run after accept or decline");
+            let Effect::PutAtLibraryPosition {
+                target,
+                count,
+                position,
+            } = &*cleanup.effect
+            else {
+                panic!(
+                    "expected PutAtLibraryPosition cleanup, got {:?}",
+                    cleanup.effect
+                );
+            };
+            assert_eq!(*target, TargetFilter::ExiledBySource);
+            assert_eq!(*count, QuantityExpr::Fixed { value: 0 });
+            assert_eq!(*position, LibraryPosition::Bottom);
+        }
+    }
+
+    /// CR 608.2c + CR 401.4: Sanwell, Avenger Ace exiles six, offers an optional
+    /// cast from among them, then puts the rest on the bottom in random order.
+    /// The cleanup clause must bind to `ExiledBySource` (cards in exile), not a
+    /// `TrackedSet` of library cards — issue #3267.
+    #[test]
+    fn sanwell_exile_top_optional_cast_and_rest_on_bottom() {
+        let def = parse_effect_chain(
+            "exile the top six cards of your library. You may cast a Vehicle or artifact creature spell from among them. Then put the rest on the bottom of your library in a random order.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::ExileTop { count, .. } = &*def.effect else {
+            panic!("expected ExileTop, got {:?}", def.effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 6 });
+
+        let cast = def
+            .sub_ability
+            .as_deref()
+            .expect("optional cast should chain after exile");
+        let Effect::CastFromZone { target, .. } = &*cast.effect else {
+            panic!("expected CastFromZone, got {:?}", cast.effect);
+        };
+        assert!(cast.optional);
+        assert!(target.references_exiled_by_source());
 
         for cleanup in [cast.sub_ability.as_deref(), cast.else_ability.as_deref()] {
             let cleanup = cleanup.expect("cleanup should run after accept or decline");
