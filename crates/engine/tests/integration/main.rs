@@ -329,6 +329,7 @@ mod magnetic_mountain_choose_and_pay;
 mod magus_of_the_abyss_scoped_chooser;
 mod mana_cost_reducers_issue_141;
 mod mana_drain_refund;
+mod maraxus_team_pump_anthem;
 mod mass_phase_out_1792_repro;
 mod master_of_ceremonies;
 mod memory_plunder_free_cast_2884;
