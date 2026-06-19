@@ -2048,6 +2048,34 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         }
     }
 
+    // CR 119.1 + CR 104.3a: "you have more life than an opponent" — the
+    // controller's life total strictly exceeds at least one opponent's. "an
+    // opponent" is existential, so the predicate is "your life > the minimum
+    // opponent life". This is the mirror of the existing "an opponent has more
+    // life than you" arm in `parse_opponent_comparison_conditions` (which uses
+    // the Max aggregate for its existential). Cards: Glorious Enforcer,
+    // Survival Cache, Feudkiller's Verdict.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("more life than an opponent").parse(rest) {
+        return Ok((
+            rest,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Min,
+                        },
+                    },
+                },
+            },
+        ));
+    }
+
     // "you have N or more [you-only quantity-suffix]"
     let (rest, n) = parse_number(rest)?;
 
@@ -9237,6 +9265,42 @@ mod tests {
                     },
             } => {}
             other => panic!("expected OpponentLifeTotal GT LifeTotal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_you_have_more_life_than_an_opponent() {
+        // CR 119.1 + CR 104.3a: mirror of "an opponent has more life than you".
+        // "you have more life than an opponent" → your life > the minimum
+        // opponent life (existential "an opponent"). Real cards: Glorious
+        // Enforcer, Survival Cache, Feudkiller's Verdict. Before this fix the
+        // clause was unmatched and the gating condition was silently dropped.
+        let (rest, c) = parse_inner_condition("you have more life than an opponent").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player: PlayerScope::Controller,
+                            },
+                    },
+                comparator: Comparator::GT,
+                rhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Min,
+                                    },
+                            },
+                    },
+            } => {}
+            other => panic!(
+                "expected LifeTotal{{Controller}} GT OpponentLifeTotal{{Min}}, got {other:?}"
+            ),
         }
     }
 
