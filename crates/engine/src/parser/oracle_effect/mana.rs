@@ -1519,7 +1519,9 @@ fn parse_disjunctive_clause(clause: &str) -> Option<ManaSpendRestriction> {
     })
     .is_some()
     {
-        let (_, source_quality) = parse_activation_tail_after_or(&clause_lower).ok()?;
+        let (_, source_quality) = all_consuming(parse_activation_tail_after_or)
+            .parse(clause_lower.as_str())
+            .ok()?;
         return Some(match source_quality {
             // CR 106.6: "activate an ability of an X source" — abilities of
             // permanents of type X. There is no pure "activate abilities of type
