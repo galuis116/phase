@@ -14370,6 +14370,118 @@ mod tests {
     }
 
     #[test]
+    fn mana_spend_restriction_negative_nonartifact() {
+        // CR 106.6: "this mana can't be spent to cast nonartifact spells" (Karn,
+        // Legacy Reforged) restricts spell-casting to artifact spells but leaves
+        // ability activation unrestricted — so it lowers to the OR variant with
+        // `ability: Any`, NOT a spells-only `SpellType` (which would wrongly
+        // forbid paying for abilities).
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::ManaSpendRestriction;
+        use crate::types::mana::AbilityActivationScope;
+        let result =
+            parse_mana_spend_restriction("this mana can't be spent to cast nonartifact spells");
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Artifact".to_string(),
+                ability: AbilityActivationScope::Any,
+            })
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_negative_article_singular_nonartifact() {
+        // CR 106.6: singular/article wording is the same restriction class
+        // (Hydraulic Helper: "a nonartifact spell"), and ability activation is
+        // still unrestricted because the clause only forbids casting spells.
+        let result = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+            "this mana can't be spent to cast a nonartifact spell",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(
+                crate::types::ability::ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type: "Artifact".to_string(),
+                    ability: crate::types::mana::AbilityActivationScope::Any,
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_negative_noncreature() {
+        // CR 106.6: the negative form generalizes across spell types — "non<TYPE>"
+        // strips to "<TYPE>" so the same combinator covers the whole class.
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::ManaSpendRestriction;
+        use crate::types::mana::AbilityActivationScope;
+        let result =
+            parse_mana_spend_restriction("this mana can't be spent to cast noncreature spells");
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                spell_type: "Creature".to_string(),
+                ability: AbilityActivationScope::Any,
+            })
+        );
+    }
+
+    #[test]
+    fn karn_legacy_reforged_mana_carries_negative_spend_restriction() {
+        // End-to-end: the full Karn, Legacy Reforged Oracle text must lower the
+        // upkeep "add {C} for each artifact … this mana can't be spent to cast
+        // nonartifact spells" clause to an `Effect::Mana` carrying the restriction
+        // (no `Effect::Unimplemented`). Issue #3893.
+        use crate::types::ability::{Effect, ManaSpendRestriction};
+        use crate::types::mana::AbilityActivationScope;
+        let oracle = "Karn's power and toughness are each equal to the greatest mana value among artifacts you control.\n\
+At the beginning of your upkeep, add {C} for each artifact you control. This mana can't be spent to cast nonartifact spells. Until end of turn, you don't lose this mana as steps and phases end.";
+        let parsed = super::parse_oracle_text(
+            oracle,
+            "Karn, Legacy Reforged",
+            &[],
+            &["Legendary".to_string(), "Artifact".to_string()],
+            &[],
+        );
+        let mut found = false;
+        fn walk(effect: &Effect, found: &mut bool) {
+            if let Effect::Mana { restrictions, .. } = effect {
+                if restrictions.contains(&ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type: "Artifact".to_string(),
+                    ability: AbilityActivationScope::Any,
+                }) {
+                    *found = true;
+                }
+            }
+        }
+        fn walk_ability(ab: &crate::types::ability::AbilityDefinition, found: &mut bool) {
+            walk(&ab.effect, found);
+            if let Some(sub) = ab.sub_ability.as_deref() {
+                walk_ability(sub, found);
+            }
+            if let Some(els) = ab.else_ability.as_deref() {
+                walk_ability(els, found);
+            }
+        }
+        for ab in &parsed.abilities {
+            walk_ability(ab, &mut found);
+        }
+        // The upkeep mana production is a triggered ability — walk each trigger's
+        // `execute` chain too.
+        for trig in &parsed.triggers {
+            if let Some(exec) = trig.execute.as_deref() {
+                walk_ability(exec, &mut found);
+            }
+        }
+        assert!(
+            found,
+            "Karn's upkeep mana must carry the nonartifact spend restriction, triggers={:?}",
+            parsed.triggers
+        );
+    }
+
+    #[test]
     fn mana_spend_restriction_x_cost_only() {
         use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
         use crate::types::ability::ManaSpendRestriction;
@@ -17519,6 +17631,85 @@ mod tests {
                 parsed.abilities,
             );
         }
+    }
+
+    /// CR 608.2c + CR 611.2a + CR 702.7: Gallant Fowlknight's ETB — the
+    /// pump's "also gain first strike" continuation on a subtype-filtered
+    /// controlled set ("Kithkin creatures you control also gain first strike
+    /// until end of turn") must parse end-to-end with ZERO `Unimplemented`. The
+    /// chain must carry both the all-creatures `PumpAll` and a
+    /// `GenericEffect { AddKeyword(FirstStrike) }` whose `affected` filter is
+    /// restricted to Kithkin creatures you control. Reverting the additive-"also"
+    /// strip in `strip_trailing_additive_adverb` regresses the second sentence to
+    /// an unimplemented "kithkin" effect and fails the zero-unimpl walk.
+    #[test]
+    fn gallant_fowlknight_subtype_also_grant_parses_without_unimplemented() {
+        let oracle = "When this creature enters, creatures you control get +1/+0 \
+                      until end of turn. Kithkin creatures you control also gain \
+                      first strike until end of turn.";
+        let parsed = parse(
+            oracle,
+            "Gallant Fowlknight",
+            &[],
+            &["Creature"],
+            &["Kithkin"],
+        );
+
+        let etb = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_deref())
+            .expect("ETB trigger must carry an execute chain");
+
+        // Walk the whole effect chain collecting every effect node.
+        let mut effects: Vec<&Effect> = Vec::new();
+        let mut node = Some(etb);
+        while let Some(d) = node {
+            assert!(
+                !matches!(*d.effect, Effect::Unimplemented { .. }),
+                "Gallant Fowlknight chain must have no Unimplemented, got {:?}",
+                d.effect
+            );
+            effects.push(&d.effect);
+            node = d.sub_ability.as_deref();
+        }
+
+        // First clause: pump every creature you control +1/+0.
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::PumpAll { power, .. } if *power == PtValue::Fixed(1))),
+            "expected a PumpAll(+1/+0) clause, got {effects:?}"
+        );
+
+        // Second clause: first strike grant restricted to Kithkin creatures you control.
+        let first_strike_grant = effects.iter().find_map(|e| match e {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => static_abilities.iter().find(|sd| {
+                sd.modifications
+                    .contains(&ContinuousModification::AddKeyword {
+                        keyword: Keyword::FirstStrike,
+                    })
+            }),
+            _ => None,
+        });
+        let grant = first_strike_grant.unwrap_or_else(|| {
+            panic!("expected a GenericEffect granting first strike, got {effects:?}")
+        });
+        let Some(TargetFilter::Typed(tf)) = &grant.affected else {
+            panic!(
+                "first strike grant must carry a Typed affected filter, got {:?}",
+                grant.affected
+            );
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You), "{tf:?}");
+        assert!(tf.type_filters.contains(&TypeFilter::Creature), "{tf:?}");
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Subtype("Kithkin".to_string())),
+            "first strike grant must be restricted to Kithkin, got {tf:?}"
+        );
     }
 
     /// hand-grant line through the full `parse_oracle_text` pipeline.
