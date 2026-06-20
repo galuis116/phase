@@ -12503,6 +12503,34 @@ fn cant_cast_spells_with_chosen_name_parenthetical() {
     assert_eq!(def.affected, Some(TargetFilter::HasChosenName));
 }
 
+/// CR 101.2 + CR 107.3: Gaddock Teeg class — passive-voice prohibition on
+/// spells with {X} in their mana cost. Combines a type prefix ("noncreature")
+/// with `HasXInManaCost`. The engine enforces this via `cant_cast_filter_matches`
+/// → `SpellCastRecord.has_x_in_cost`.
+#[test]
+fn passive_noncreature_spells_with_x_in_mana_cost_cant_be_cast() {
+    let def = parse_static_line("Noncreature spells with {X} in their mana costs can't be cast.")
+        .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantBeCast {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed filter, got {:?}", def.affected);
+    };
+    assert!(
+        tf.type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature))),
+        "expected noncreature type filter, got {tf:?}"
+    );
+    assert!(
+        tf.properties.contains(&FilterProp::HasXInManaCost),
+        "expected HasXInManaCost property, got {tf:?}"
+    );
+}
+
 // CR 201.3 / CR 113.6: Petrified Hamlet — "Lands with the chosen name
 // have \"{T}: Add {C}.\"" grants a quoted mana ability to every land
 // whose name matches the CardName persisted on the source by the
