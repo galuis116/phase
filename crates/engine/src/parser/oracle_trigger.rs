@@ -7830,10 +7830,26 @@ fn try_parse_event(
         ))
         .parse(input)
     }
-    if let Ok((tail, ())) = parse_draws_card.parse(rest) {
+    // CR 702.5a + CR 303.4 + CR 121.1: "enchanted player/opponent draws a card"
+    // (Curse of Fool's Wisdom, Psychic Possession). Recognized ONLY in the draws
+    // path — NOT in the shared parse_attached_to_prefix/_exact combinators, which
+    // feed every verb. Containing it here keeps "enchanted player is dealt damage"
+    // (Grievous Wound) honestly Unknown rather than a parses-but-dead
+    // DamageReceived/valid_card=AttachedTo trigger. The Enchant keyword already
+    // restricts attachment to the right player, so bare AttachedTo suffices.
+    let enchanted_player_subject: OracleResult<'_, ()> = alt((
+        value((), tag("enchanted player ")),
+        value((), tag("enchanted opponent ")),
+    ))
+    .parse(rest);
+    let (draws_subject, draws_rest) = match enchanted_player_subject {
+        Ok((after_prefix, ())) => (TargetFilter::AttachedTo, after_prefix),
+        Err(_) => (subject.clone(), rest),
+    };
+    if let Ok((tail, ())) = parse_draws_card.parse(draws_rest) {
         let mut def = make_base();
         def.mode = TriggerMode::Drawn;
-        def.valid_target = Some(subject.clone());
+        def.valid_target = Some(draws_subject.clone());
         // CR 603.4 + CR 102.1: "draws a card during their turn" — the trailing
         // timing tail restricts the trigger to the acting player's own turn.
         // Composed with the shared typed `parse_timing_tail` combinator.
@@ -19155,6 +19171,50 @@ mod tests {
             Some(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::Opponent)
             ))
+        );
+    }
+
+    /// CR 702.5a + CR 303.4 + CR 121.1: "Whenever enchanted player draws a card"
+    /// (Curse of Fool's Wisdom) lowers to a Drawn trigger scoped to the enchanted
+    /// player via `AttachedTo` — NOT `TriggerMode::Unknown` (which never fires).
+    #[test]
+    fn trigger_enchanted_player_draws_is_attached_to() {
+        let def = parse_trigger_line(
+            "Whenever enchanted player draws a card, they lose 2 life and you gain 2 life.",
+            "Curse of Fool's Wisdom",
+        );
+        assert_eq!(def.mode, TriggerMode::Drawn);
+        assert_eq!(def.valid_target, Some(TargetFilter::AttachedTo));
+    }
+
+    /// CR 702.5a: "Whenever enchanted opponent draws a card" (Psychic Possession).
+    /// "Enchant opponent" already restricts the attachment, so bare `AttachedTo`
+    /// resolves the enchanted opponent at runtime.
+    #[test]
+    fn trigger_enchanted_opponent_draws_is_attached_to() {
+        let def = parse_trigger_line(
+            "Whenever enchanted opponent draws a card, you may draw a card.",
+            "Psychic Possession",
+        );
+        assert_eq!(def.mode, TriggerMode::Drawn);
+        assert_eq!(def.valid_target, Some(TargetFilter::AttachedTo));
+    }
+
+    /// Containment guard: the "enchanted player/opponent" recognition lives ONLY
+    /// in the draws path, so "Whenever enchanted player is dealt damage" (Grievous
+    /// Wound) stays honestly `Unknown` rather than flipping to a parses-but-dead
+    /// `DamageReceived` trigger with `valid_card = AttachedTo` (which the runtime
+    /// rejects for player-recipient damage, so it would never fire).
+    #[test]
+    fn trigger_enchanted_player_is_dealt_damage_stays_unknown() {
+        let def = parse_trigger_line(
+            "Whenever enchanted player is dealt damage, they lose 2 life.",
+            "Grievous Wound",
+        );
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "expected Unknown, got {:?}",
+            def.mode
         );
     }
 
