@@ -1120,6 +1120,16 @@ fn parse_source_is_equipped(input: &str) -> OracleResult<'_, StaticCondition> {
     value(StaticCondition::SourceIsEquipped, tag("is equipped")).parse(rest)
 }
 
+/// CR 303.4: Parse "<subject> is enchanted" → SourceIsEnchanted.
+/// Aura-twin of `parse_source_is_equipped` (CR 301.5a). The count form
+/// "<subject> is enchanted by N Auras" (`parse_source_enchanted_by_aura_count`)
+/// is tried earlier in the `alt()` so this bare arm only matches the
+/// no-quantifier idiom.
+fn parse_source_is_enchanted(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = parse_source_subject(input)?;
+    value(StaticCondition::SourceIsEnchanted, tag("is enchanted")).parse(rest)
+}
+
 /// CR 701.37: Parse "<subject> is monstrous" → SourceIsMonstrous.
 fn parse_source_is_monstrous(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_source_subject(input)?;
@@ -1198,6 +1208,11 @@ fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         // CR 303.4 + CR 604.1 + CR 613.1g: "~ is enchanted by exactly N
         // Aura(s)" / "N or more Auras" (Timber Paladin tiered static P/T gates).
         parse_source_enchanted_by_aura_count,
+        // CR 303.4: bare "~ is enchanted" / "this creature is enchanted" →
+        // SourceIsEnchanted. MUST follow the count form above so
+        // "is enchanted by N Auras" (which requires `tag("is enchanted by ")`)
+        // still wins; this arm only matches the no-quantifier idiom.
+        parse_source_is_enchanted,
         // CR 122.1: "<subject> has <quantity> <counter_type> counter(s) on it"
         // — covers Unleash/Outlast/Renown bodies, Primordial Hydra's trample gate,
         // and every "as long as it has …" counter-comparator static.
@@ -7829,6 +7844,38 @@ mod tests {
         let (rest, c) = parse_inner_condition("this creature is equipped").unwrap();
         assert_eq!(rest, "");
         assert_eq!(c, StaticCondition::SourceIsEquipped);
+    }
+
+    // CR 303.4: bare SourceIsEnchanted predicate across subjects.
+    // Discriminating (fail-on-revert): if the `parse_source_is_enchanted` arm
+    // is removed these fall through to `Unrecognized` (evaluates always-true),
+    // re-breaking Pillar of War / Thran Golem / Gate Hound / Freewind Equenaut.
+    #[test]
+    fn test_source_is_enchanted() {
+        let (rest, c) = parse_inner_condition("this creature is enchanted").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::SourceIsEnchanted);
+
+        let (rest, c) = parse_inner_condition("~ is enchanted").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::SourceIsEnchanted);
+    }
+
+    // CR 303.4 + CR 613.1g: no-regression — the bare "is enchanted" arm must
+    // NOT intercept the count/comparison form "is enchanted by N Auras"
+    // (it is tried earlier in the `alt()` and requires `tag("is enchanted by ")`).
+    #[test]
+    fn test_source_is_enchanted_does_not_steal_aura_count() {
+        let (rest, c) = parse_inner_condition("~ is enchanted by exactly two Auras").unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::QuantityComparison {
+            comparator, rhs, ..
+        } = c
+        else {
+            panic!("expected QuantityComparison (count form), got {c:?}");
+        };
+        assert_eq!(comparator, Comparator::EQ);
+        assert_eq!(rhs, QuantityExpr::Fixed { value: 2 });
     }
 
     // CR 701.37: SourceIsMonstrous predicate across subjects.
