@@ -11714,11 +11714,10 @@ mod tests {
     /// source-referential `HasCounters` (it has no source-bound reading here).
     #[test]
     fn inner_condition_demonstrative_counter_does_not_yield_has_counters() {
-        match parse_inner_condition("that creature has a counter on it") {
-            Ok((_, StaticCondition::HasCounters { .. })) => {
-                panic!("demonstrative subject must not parse as source-referential HasCounters")
-            }
-            _ => {}
+        if let Ok((_, StaticCondition::HasCounters { .. })) =
+            parse_inner_condition("that creature has a counter on it")
+        {
+            panic!("demonstrative subject must not parse as source-referential HasCounters");
         }
     }
 
