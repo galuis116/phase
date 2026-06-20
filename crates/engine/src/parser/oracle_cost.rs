@@ -2582,6 +2582,47 @@ mod tests {
         );
     }
 
+    /// CR 305.6 + CR 601.2f: domain-scaled cost reduction — "costs {N} less to
+    /// activate/cast for each basic land type among lands you control" — must
+    /// resolve to the `BasicLandTypeCount` (domain) quantity. Covers Jodah's
+    /// Codex / Wandering Treefolk / Radha's Firebrand (activate) and Scion of
+    /// Draco (cast). Regression for the previously-dropped `for each` domain arm.
+    #[test]
+    fn cost_reduction_for_each_basic_land_type_is_domain() {
+        use crate::types::ability::{ControllerRef, QuantityRef};
+
+        // Activated-ability form (Jodah's Codex, Wandering Treefolk).
+        let activate = try_parse_cost_reduction(
+            "this ability costs {1} less to activate for each basic land type among lands you control",
+        )
+        .expect("domain cost reduction (activate) should parse");
+        assert_eq!(activate.amount_per, 1);
+        assert_eq!(activate.condition, None);
+        assert_eq!(
+            activate.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::BasicLandTypeCount {
+                    controller: ControllerRef::You,
+                },
+            },
+        );
+
+        // Spell form (Scion of Draco).
+        let cast = try_parse_cost_reduction(
+            "this spell costs {2} less to cast for each basic land type among lands you control",
+        )
+        .expect("domain cost reduction (cast) should parse");
+        assert_eq!(cast.amount_per, 2);
+        assert_eq!(
+            cast.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::BasicLandTypeCount {
+                    controller: ControllerRef::You,
+                },
+            },
+        );
+    }
+
     /// #3223: the self cost-reduction *head* recognizer matches both the bare
     /// sentence and a sentence carrying a trailing "if [condition]" tail; it
     /// rejects unrelated effect sentences. Drives the upstream

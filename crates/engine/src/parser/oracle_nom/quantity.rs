@@ -2753,6 +2753,12 @@ fn parse_for_each_clause_ref_with_they_controller(
         // Placed before `parse_for_each_controlled_type` so the bare "counter" token
         // does not commit to a type-phrase fallback.
         parse_for_each_counters_on_source,
+        // CR 305.6: "for each basic land type among lands you/they control" —
+        // domain scaling (Jodah's Codex, Wandering Treefolk, Radha's Firebrand,
+        // Scion of Draco). Reuses the shared bare-domain-suffix combinator and
+        // must precede the generic `<type> you control` arm so the leading
+        // "basic land type" is not mis-consumed as a creature/permanent type.
+        parse_basic_land_types_among_lands_controlled_by_ref,
         parse_for_each_controlled_type,
         // CR 201.2: "for each [other] <type> named <CardName> you control"
         // (Seven Dwarves). The `named X` qualifier sits between the type word
@@ -6871,6 +6877,34 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    /// CR 305.6 + CR 601.2f: domain must be reachable through the `for each`
+    /// clause path (not just `parse_quantity_ref`), so domain-scaled cost
+    /// reducers — "costs {1} less to activate for each basic land type among
+    /// lands you control" (Jodah's Codex, Wandering Treefolk, Scion of Draco) —
+    /// resolve their reduction quantity instead of dropping to `Unimplemented`.
+    #[test]
+    fn parse_for_each_clause_ref_handles_domain() {
+        let (rest, q) =
+            parse_for_each_clause_ref_complete("basic land type among lands you control").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::BasicLandTypeCount {
+                controller: ControllerRef::You,
+            }
+        );
+        assert_eq!(rest, "");
+
+        // "they control" controller axis (e.g. an opponent-scoped reducer).
+        let (_, q_they) =
+            parse_for_each_clause_ref_complete("basic land type among lands they control").unwrap();
+        assert_eq!(
+            q_they,
+            QuantityRef::BasicLandTypeCount {
+                controller: ControllerRef::TargetPlayer,
+            }
+        );
     }
 
     #[test]
