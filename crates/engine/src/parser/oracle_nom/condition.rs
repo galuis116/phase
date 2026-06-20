@@ -1290,15 +1290,28 @@ pub(crate) fn parse_source_has_counters(input: &str) -> OracleResult<'_, StaticC
     // it" (Ayara's Oathsworn) means the triggering source itself. The
     // recipient-bound "for as long as it has a counter" reading is the duration
     // grammar's job — see `parse_recipient_has_counters`.
-    let (rest, (_subject, counters, minimum, maximum)) = parse_has_counters_axes(input)?;
-    Ok((
-        rest,
-        StaticCondition::HasCounters {
-            counters,
-            minimum,
-            maximum,
-        },
-    ))
+    let (rest, (subject, counters, minimum, maximum)) = parse_has_counters_axes(input)?;
+    match subject {
+        // "~"/"this creature" and the bound pronoun "it" are both
+        // source-referential in this path (the intervening-"if" trigger /
+        // static-gate reading — #3084 Ayara's Oathsworn).
+        CounterConditionSubject::Source | CounterConditionSubject::RecipientPronoun => Ok((
+            rest,
+            StaticCondition::HasCounters {
+                counters,
+                minimum,
+                maximum,
+            },
+        )),
+        // A demonstrative subject ("that creature/land/permanent") is never
+        // source-referential — it names the affected object of a duration
+        // clause. Bail with a RECOVERABLE error so the enclosing `alt()`
+        // (parse_inner_condition) and the `.ok()?` caller in oracle_trigger
+        // fall through rather than silently coercing it to the source. The
+        // recipient-bound reading is produced by `parse_recipient_has_counters`
+        // in the duration grammar.
+        CounterConditionSubject::RecipientDemonstrative => Err(oracle_err(input)),
+    }
 }
 
 /// Recipient-bound counterpart to [`parse_source_has_counters`] for
@@ -1311,11 +1324,14 @@ pub(crate) fn parse_source_has_counters(input: &str) -> OracleResult<'_, StaticC
 pub(crate) fn parse_recipient_has_counters(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, (subject, counters, minimum, maximum)) = parse_has_counters_axes(input)?;
     let condition = match subject {
-        CounterConditionSubject::Recipient => StaticCondition::RecipientHasCounters {
-            counters,
-            minimum,
-            maximum,
-        },
+        CounterConditionSubject::RecipientPronoun
+        | CounterConditionSubject::RecipientDemonstrative => {
+            StaticCondition::RecipientHasCounters {
+                counters,
+                minimum,
+                maximum,
+            }
+        }
         CounterConditionSubject::Source => StaticCondition::HasCounters {
             counters,
             minimum,
@@ -1355,16 +1371,27 @@ fn parse_has_counters_axes(
 }
 
 /// Subject axis for counter-has conditions. Accepts the canonical
-/// source-referential subjects and the bound pronoun `"it "` used in
-/// `"for as long as it has a counter on it"` style clauses. Kept separate
-/// from `parse_source_subject` because `"it "` would be ambiguous in the
-/// tapped/combat predicate family (which already uses `"it"` as part of
-/// longer phrases) — scoping the pronoun branch to this combinator avoids
-/// that coupling.
+/// source-referential subjects, the bound pronoun `"it "`, and the
+/// demonstrative anaphor `"that creature/land/permanent "` used in
+/// `"for as long as it/that creature has a counter on it"` style clauses.
+/// Kept separate from `parse_source_subject` because `"it "` would be
+/// ambiguous in the tapped/combat predicate family (which already uses
+/// `"it"` as part of longer phrases) — scoping the pronoun branch to this
+/// combinator avoids that coupling.
+///
+/// CR 611.3a: a continuous effect from a static ability "applies at any
+/// given moment to whatever its text indicates", so the demonstrative
+/// anaphor binds to the affected object (the recipient that received the
+/// counter) at evaluation time — the layer system resolves it, not this
+/// card's source. Both recipient subjects therefore lower to
+/// `RecipientHasCounters`; the discriminant is retained so
+/// `parse_source_has_counters` can reject the demonstrative (whose subject
+/// is never source-referential) rather than silently coercing it.
 #[derive(Clone, Copy)]
 enum CounterConditionSubject {
     Source,
-    Recipient,
+    RecipientPronoun,
+    RecipientDemonstrative,
 }
 
 fn parse_counter_condition_subject(input: &str) -> OracleResult<'_, CounterConditionSubject> {
@@ -1374,7 +1401,19 @@ fn parse_counter_condition_subject(input: &str) -> OracleResult<'_, CounterCondi
         value(CounterConditionSubject::Source, parse_source_subject),
         // The bound pronoun "it" — the recipient/affected object, e.g. the
         // creature controlled "for as long as it has a counter".
-        value(CounterConditionSubject::Recipient, tag("it ")),
+        value(CounterConditionSubject::RecipientPronoun, tag("it ")),
+        // CR 611.3a: demonstrative anaphor "that creature/land/permanent" — the
+        // ParentTarget that received the counter (recipient-bound; the layer
+        // system evaluates it against the affected object, not this card's
+        // source).
+        value(
+            CounterConditionSubject::RecipientDemonstrative,
+            alt((
+                tag("that creature "),
+                tag("that land "),
+                tag("that permanent "),
+            )),
+        ),
     ))
     .parse(input)
 }
@@ -11581,6 +11620,105 @@ mod tests {
                 maximum: None,
             }
         );
+    }
+
+    // --- Demonstrative subject (CR 611.3a recipient anaphor) ----------------
+    //
+    // "for as long as that creature/land has a [type] counter on it"
+    // (Mathas Fiend Seeker, Obsidian Fireheart, Minas Morgul, Ultima, etc.).
+    // The demonstrative is recipient-bound: it must lower to
+    // `RecipientHasCounters` so the granted ability expires when the counter
+    // is removed, NOT to `Unrecognized` (which evaluates true forever).
+
+    /// Mathas Fiend Seeker: "that creature has a bounty counter on it".
+    #[test]
+    fn has_counters_demonstrative_creature_bounty_is_recipient() {
+        let (rest, c) =
+            parse_recipient_has_counters("that creature has a bounty counter on it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::RecipientHasCounters {
+                counters: CounterMatch::OfType(CounterType::Generic("bounty".to_string())),
+                minimum: 1,
+                maximum: None,
+            }
+        );
+    }
+
+    /// Obsidian Fireheart: "that land has a blaze counter on it".
+    #[test]
+    fn has_counters_demonstrative_land_blaze_is_recipient() {
+        let (rest, c) =
+            parse_recipient_has_counters("that land has a blaze counter on it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::RecipientHasCounters {
+                counters: CounterMatch::OfType(CounterType::Generic("blaze".to_string())),
+                minimum: 1,
+                maximum: None,
+            }
+        );
+    }
+
+    /// "that permanent" demonstrative arm with a generic charge counter.
+    #[test]
+    fn has_counters_demonstrative_permanent_charge_is_recipient() {
+        let (rest, c) =
+            parse_recipient_has_counters("that permanent has a charge counter on it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::RecipientHasCounters {
+                counters: CounterMatch::OfType(CounterType::Generic("charge".to_string())),
+                minimum: 1,
+                maximum: None,
+            }
+        );
+    }
+
+    /// End-to-end: Minas Morgul "for as long as that creature has a shadow
+    /// counter on it" must lower to `ForAsLongAs { RecipientHasCounters }` —
+    /// NOT the `Unrecognized` fallback that never expires (game/layers.rs).
+    #[test]
+    fn for_as_long_as_demonstrative_counter_is_recipient_not_unrecognized() {
+        use crate::parser::oracle_nom::duration::parse_for_as_long_as_condition;
+        use crate::types::ability::Duration;
+        use crate::types::keywords::KeywordKind;
+        let (rest, dur) =
+            parse_for_as_long_as_condition("that creature has a shadow counter on it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            dur,
+            Duration::ForAsLongAs {
+                condition: StaticCondition::RecipientHasCounters {
+                    counters: CounterMatch::OfType(CounterType::Keyword(KeywordKind::Shadow)),
+                    minimum: 1,
+                    maximum: None,
+                }
+            }
+        );
+    }
+
+    /// Negative: the source-referential `parse_source_has_counters` must REJECT
+    /// a demonstrative subject (recoverable Err) rather than coercing "that
+    /// creature" to the source.
+    #[test]
+    fn source_has_counters_rejects_demonstrative() {
+        assert!(parse_source_has_counters("that creature has a bounty counter on it").is_err());
+    }
+
+    /// Negative: the demonstrative-Err guard makes `parse_inner_condition` fall
+    /// through — "that creature has a counter on it" must NOT yield a
+    /// source-referential `HasCounters` (it has no source-bound reading here).
+    #[test]
+    fn inner_condition_demonstrative_counter_does_not_yield_has_counters() {
+        if let Ok((_, StaticCondition::HasCounters { .. })) =
+            parse_inner_condition("that creature has a counter on it")
+        {
+            panic!("demonstrative subject must not parse as source-referential HasCounters");
+        }
     }
 
     /// "exactly N" variant.
