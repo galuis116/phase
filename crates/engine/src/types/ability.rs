@@ -7009,15 +7009,18 @@ pub enum Effect {
     /// `DealDamage { amount, damage_source }` cannot express N independent
     /// (power, source) pairs aimed at one recipient.
     ///
-    /// Covers Band Together, Allies at Last, Combo Attack, Friendly Rivalry,
-    /// and Graceful Takedown — the count ("up to two" / "two") and the
-    /// recipient's controller restriction are encoded in `sources` /
-    /// `recipient` filters plus the ability's `multi_target` spec.
+    /// Covers Band Together, Allies at Last, Friendly Rivalry, and Graceful
+    /// Takedown — the count ("up to two") and the recipient's controller
+    /// restriction are encoded in `sources` / `recipient` filters plus the
+    /// ability's `multi_target` spec. Combo Attack ("two target creatures *your
+    /// team* controls") is out of scope: the Two-Headed Giant team scope (CR
+    /// 810) has no model, so it fails closed to `Unimplemented` rather than
+    /// mis-targeting a single player's creatures.
     EachDealsDamageEqualToPower {
         /// CR 115.1d: The targeted source creatures ("up to two target creatures
-        /// you control" / "two target creatures your team controls"). The count
-        /// bound (0..=2 or exactly 2) lives in the ability's `multi_target`
-        /// spec; this filter pins the per-object legality (creature you control).
+        /// you control"). The count bound (0..=2 or exactly 2) lives in the
+        /// ability's `multi_target` spec; this filter pins the per-object
+        /// legality (creature you control).
         sources: TargetFilter,
         /// CR 115.1: The single targeted recipient that each source damages.
         recipient: TargetFilter,

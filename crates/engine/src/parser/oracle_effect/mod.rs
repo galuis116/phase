@@ -21092,6 +21092,26 @@ mod tests {
         }
     }
 
+    // CR 810: Combo Attack's "two target creatures *your team* controls" must
+    // FAIL CLOSED (Unimplemented), not silently collapse to "you control" —
+    // Two-Headed Giant team control is not the caster's controller, so parsing
+    // it as one-player targeting would damage the wrong objects. Guards against
+    // re-introducing the team→you normalization.
+    #[test]
+    fn each_deals_damage_team_scope_fails_closed_not_mistargeted() {
+        let effect = parse_effect(
+            "Two target creatures your team controls each deal damage equal to their power to target creature.",
+        );
+        assert!(
+            !matches!(effect, Effect::EachDealsDamageEqualToPower { .. }),
+            "team-scope source must not be parsed as the each-deals effect, got {effect:?}"
+        );
+        assert!(
+            matches!(effect, Effect::Unimplemented { .. }),
+            "team-scope line must fall through to Unimplemented, got {effect:?}"
+        );
+    }
+
     // CR 701.20a: a comma+or disjunctive reveal-until filter list ("X card, a Y,
     // or a Z card") must split into an Or of three distinct filters. Building
     // block exercised with a non-WHO 3-element list; An Unearthly Child is the

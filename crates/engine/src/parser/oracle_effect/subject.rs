@@ -3582,12 +3582,14 @@ pub(super) fn try_parse_each_deals_damage_equal_to_power(text: &str) -> Option<P
     // 0..=2; "one or two" → 1..=2. Each axis is one `tag()` alternative.
     let (after_count, multi_target) = parse_each_deals_source_count(lower.as_str())?;
 
-    // CR 115.1: the source set. "your team controls" (Two-Headed Giant wording)
-    // collapses to "you control" in the engine's non-team play (CR 810 teams are
-    // unsupported), so normalize it before `parse_target`. Both forms pin a
-    // creature-you-control source.
-    let normalized_sources = after_count.replacen("your team controls", "you control", 1);
-    let (sources, after_sources) = parse_target(normalized_sources.as_str());
+    // CR 115.1: the source set, as a TARGETED creature filter. "your team
+    // controls" (Two-Headed Giant team scope, CR 810) is intentionally NOT
+    // collapsed to "you control": a team is not the caster's controller, so a
+    // card that uses it (Combo Attack) must fail closed rather than mis-target a
+    // single player's creatures. `parse_target` does not consume the non-standard
+    // "your team controls" controller phrase, so it stays in `after_sources` and
+    // the verb-phrase `tag` below rejects the line (-> Unimplemented).
+    let (sources, after_sources) = parse_target(after_count);
     if !target_filter_is_targeted_creature(&sources) {
         return None;
     }
