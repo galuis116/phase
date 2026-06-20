@@ -10,8 +10,8 @@ use nom::Parser;
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
-    AbilityKind, Comparator, Effect, LinkedExileScope, ManaContribution, ManaProduction,
-    ManaSpendRestriction, QuantityExpr, QuantityRef,
+    AbilityKind, AbilityTag, Comparator, Effect, LinkedExileScope, ManaContribution,
+    ManaProduction, ManaSpendRestriction, QuantityExpr, QuantityRef,
 };
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{
@@ -84,6 +84,23 @@ fn try_parse_for_each_color_mana(text: &str, lower: &str) -> Option<Effect> {
     let (_, type_text_lower) = take_until::<_, _, OracleError<'_>>(", add one mana of that color")
         .parse(rest)
         .ok()?;
+    // CR 702.167c + CR 105.1: "For each color among the exiled cards used to craft
+    // this creature, add one mana of that color" (Sunbird Effigy) — the iteration
+    // source is the craft-material linked-exile pool, not a battlefield type
+    // phrase. Tried first so the craft noun phrase wins over `parse_type_phrase`.
+    if let Ok((craft_rest, filter)) =
+        crate::parser::oracle_nom::quantity::parse_craft_materials_filter(type_text_lower.trim())
+    {
+        if craft_rest.trim().is_empty() {
+            return Some(Effect::Mana {
+                produced: ManaProduction::DistinctColorsAmongPermanents { filter },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            });
+        }
+    }
     // Recover original-cased slice for parse_type_phrase.
     let offset = lower_trimmed.len() - rest.len();
     let original_trimmed = text.trim_end_matches('.').trim();
@@ -1414,6 +1431,20 @@ pub(crate) fn parse_mana_spend_restriction(
     })?;
     let base = base.trim_end_matches(['.', '"']);
     let base_lower = base.to_lowercase();
+
+    // CR 106.6: "spend this mana only to activate power-up abilities" -- tag-scoped.
+    // Try BEFORE the broader "to activate abilities" arm (more-specific-first) so
+    // Quinjet's {R}{R} does not collapse to ActivateOnly.
+    if nom_on_lower(base, &base_lower, |i| {
+        value((), tag("to activate power-up abilities")).parse(i)
+    })
+    .is_some()
+    {
+        return Some((
+            ManaSpendRestriction::ActivateTagged(AbilityTag::PowerUp),
+            vec![],
+        ));
+    }
 
     // "spend this mana only to activate abilities" -- activation-only
     if nom_on_lower(base, &base_lower, |i| {

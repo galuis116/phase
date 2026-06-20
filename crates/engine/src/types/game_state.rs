@@ -560,6 +560,17 @@ pub struct BattlefieldEntryRecord {
     pub supertypes: Vec<Supertype>,
     #[serde(default)]
     pub colors: Vec<ManaColor>,
+    /// CR 403.3 + CR 603.10: keyword abilities the object had at the moment it
+    /// entered (entry snapshot per CR 403.3), so look-back conditions ("a creature
+    /// with flying entered this turn") evaluate via the CR 603.10 last-known-state
+    /// against entry-time characteristics (like the existing core_types/colors
+    /// snapshots). KNOWN LIMITATION: this captures the object's keywords at record
+    /// time, which is BEFORE the layer system re-evaluates (layers are only marked
+    /// dirty, not recomputed, at zone-change). Printed flyers and keyword-counter /
+    /// intrinsic flyers are counted; a creature granted flying ONLY by a Layer-6
+    /// continuous effect (e.g. an anthem) at the moment it enters is NOT counted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<Keyword>,
     pub controller: PlayerId,
 }
 
@@ -5851,6 +5862,14 @@ pub struct GameState {
     /// set is the authoritative "was exerted this turn" record.
     #[serde(default)]
     pub exerted_this_turn: std::collections::HashSet<ObjectId>,
+    /// CR 701.26 + CR 603.4: Count of times each object became tapped this turn,
+    /// keyed by object id. Populated at the central `GameEvent::PermanentTapped`
+    /// observer (the same sink that records damage), so combat, effect, and crew
+    /// taps all count. Cleared at turn start. A value of 1 means "first time this
+    /// turn" — the count model (not a HashSet) keeps the CR 603.4 resolution-time
+    /// re-check of `FirstTimeObjectTappedThisTurn` correct.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub object_tap_count_this_turn: std::collections::HashMap<ObjectId, u32>,
     /// CR 508.1g + CR 508.2: Declaration events (e.g. `AttackersDeclared`) held
     /// while the active player resolves the optional "exert as it attacks"
     /// sub-step. Because triggers are matched against the per-action event slice
@@ -5928,6 +5947,18 @@ pub struct GameState {
     /// resetting the slot when the source leaves and re-enters play.
     #[serde(default)]
     pub exile_cast_permissions_used: HashSet<ObjectId>,
+    /// CR 601.2a + CR 401.5: Tracks `OncePerTurn`
+    /// `StaticMode::TopOfLibraryCastPermission` sources that have already had a
+    /// spell cast through them this turn (Assemble the Players, Johann,
+    /// Apprentice Sorcerer — "Once each turn, you may cast … from the top of
+    /// your library"). Keyed by the granting permanent's ObjectId. `Unlimited`
+    /// frequency permissions (Realmwalker, Future Sight, Bolas's Citadel) never
+    /// populate this set. Cleared at the start of each turn alongside the other
+    /// per-turn cast-permission slots.
+    /// CR 400.7: Zone change creates a new source `ObjectId`, naturally
+    /// resetting the slot when the source leaves and re-enters play.
+    #[serde(default)]
+    pub top_of_library_cast_permissions_used: HashSet<ObjectId>,
     /// CR 113.6b + CR 601.2a: Per-turn rolling list of cards that have been
     /// exiled "with" each linked-exile source during the current turn. Keyed
     /// by the source's `ObjectId`; the `Vec` is the list of card `ObjectId`s
@@ -7078,6 +7109,7 @@ impl GameState {
             loyalty_abilities_activated_this_turn: HashMap::new(),
             extra_loyalty_activations_this_turn: HashMap::new(),
             exerted_this_turn: std::collections::HashSet::new(),
+            object_tap_count_this_turn: std::collections::HashMap::new(),
             pending_attack_trigger_events: Vec::new(),
             ability_resolutions_this_turn: HashMap::new(),
             graveyard_cast_permissions_used: HashSet::new(),
@@ -7087,6 +7119,7 @@ impl GameState {
             exile_play_permissions_used: HashSet::new(),
             exile_play_single_use_consumed: HashSet::new(),
             exile_cast_permissions_used: HashSet::new(),
+            top_of_library_cast_permissions_used: HashSet::new(),
             cards_exiled_with_source_this_turn: HashMap::new(),
             first_card_drawn_this_turn: HashMap::new(),
             cards_drawn_this_turn: HashMap::new(),

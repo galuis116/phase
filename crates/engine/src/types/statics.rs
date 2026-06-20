@@ -932,6 +932,16 @@ pub enum StaticMode {
         /// non-land spells (cast as a spell). `Cast` covers only spells.
         /// Realmwalker = `Cast`; Future Sight + Bolas's Citadel = `Play`.
         play_mode: CardPlayMode,
+        /// CR 601.2a: Per-turn cast frequency, the same axis carried by the
+        /// sibling `GraveyardCastPermission` / `ExileCastPermission` permissions.
+        /// `Unlimited` (default) preserves the Realmwalker / Future Sight /
+        /// Bolas's Citadel shape (no per-turn cap). `OncePerTurn` gates the
+        /// permission to one cast per turn from this source — "Once each turn,
+        /// you may cast … from the top of your library." (Assemble the Players,
+        /// Johann, Apprentice Sorcerer). Tracked by the source's `ObjectId` in
+        /// `GameState::top_of_library_cast_permissions_used`.
+        #[serde(default)]
+        frequency: CastFrequency,
         /// CR 118.9 + CR 119.4: Optional alternative cost paid in lieu of the
         /// spell's mana cost when cast via this permission. Bolas's Citadel
         /// uses `Some(AbilityCost::PayLife { amount: SelfManaValue })`.
@@ -1471,9 +1481,12 @@ pub enum StaticMode {
     /// counters into the entry's counter list.
     ///
     /// Class members (fixed-count form): Kalain, Reclusive Painter; Bard Class;
-    /// Gorma the Gullet; Master Chef. The dynamic-count form (Gev, "for each
-    /// opponent who lost life") is intentionally NOT matched by the parser and
-    /// remains Unimplemented until a dynamic-count axis is added.
+    /// Gorma the Gullet; Master Chef. The dynamically *scaled* distributive form
+    /// (Gev, Scaled Scorch — "enter with … counter on them for each opponent who
+    /// lost life this turn") is NOT modeled here (this mode carries a fixed
+    /// `count`); it routes instead to the dynamic-capable
+    /// `ReplacementEvent::ChangeZone` + `Effect::PutCounter { count: QuantityExpr }`
+    /// path via the enters-with-counter replacement parser.
     EntersWithAdditionalCounters {
         counter_type: super::counter::CounterType,
         count: u32,
@@ -1553,9 +1566,15 @@ impl Hash for StaticMode {
                 play_mode.hash(state);
                 graveyard_destination_replacement.hash(state);
             }
-            StaticMode::TopOfLibraryCastPermission { play_mode, .. } => {
-                // alt_cost contains AbilityCost which lacks Hash; discriminant + play_mode only.
+            StaticMode::TopOfLibraryCastPermission {
+                play_mode,
+                frequency,
+                ..
+            } => {
+                // alt_cost contains AbilityCost which lacks Hash; discriminant +
+                // play_mode + frequency only.
                 play_mode.hash(state);
+                frequency.hash(state);
             }
             StaticMode::CastFromHandFree { frequency, origin } => {
                 frequency.hash(state);
@@ -1833,12 +1852,24 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::TopOfLibraryCastPermission {
                 play_mode,
+                frequency,
                 alt_cost,
             } => {
-                if alt_cost.is_some() {
-                    write!(f, "TopOfLibraryCastPermission({play_mode},alt_cost)")
+                // CR 601.2a: `frequency` is appended as a tagged segment only
+                // when non-default (`OncePerTurn`) so the historical
+                // 1-/2-segment Unlimited forms keep parsing unchanged.
+                let freq_seg = if frequency.is_unlimited() {
+                    String::new()
                 } else {
-                    write!(f, "TopOfLibraryCastPermission({play_mode})")
+                    format!(",freq={frequency}")
+                };
+                if alt_cost.is_some() {
+                    write!(
+                        f,
+                        "TopOfLibraryCastPermission({play_mode}{freq_seg},alt_cost)"
+                    )
+                } else {
+                    write!(f, "TopOfLibraryCastPermission({play_mode}{freq_seg})")
                 }
             }
             StaticMode::CastFromHandFree { frequency, origin } => {
@@ -2211,16 +2242,34 @@ impl FromStr for StaticMode {
             // not the FromStr round-trip), so FromStr defaults alt_cost to None.
             "TopOfLibraryCastPermission" => StaticMode::TopOfLibraryCastPermission {
                 play_mode: CardPlayMode::Cast,
+                frequency: CastFrequency::Unlimited,
                 alt_cost: None,
             },
             s if s.starts_with("TopOfLibraryCastPermission(") => {
+                // Display form: "TopOfLibraryCastPermission(<play_mode>
+                // [,freq=<frequency>][,alt_cost])". The first segment is
+                // positional; the tagged freq= segment and the "alt_cost"
+                // marker are present only when non-default, so the historical
+                // 1-/2-segment forms round-trip unchanged.
                 let inner = s
                     .strip_prefix("TopOfLibraryCastPermission(")
                     .and_then(|s| s.strip_suffix(')'))
                     .unwrap_or("");
-                let pm_token = inner.split(',').next().unwrap_or("Cast");
+                let mut parts = inner.split(',');
+                let play_mode = parts
+                    .next()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(CardPlayMode::Cast);
+                let frequency = parts
+                    .clone()
+                    .find_map(|p| p.strip_prefix("freq="))
+                    .and_then(|f| f.parse().ok())
+                    .unwrap_or(CastFrequency::Unlimited);
                 StaticMode::TopOfLibraryCastPermission {
-                    play_mode: pm_token.parse().unwrap_or(CardPlayMode::Cast),
+                    play_mode,
+                    frequency,
+                    // CR 118.9: the alt_cost payload is preserved through serde,
+                    // not the FromStr round-trip, so FromStr defaults to None.
                     alt_cost: None,
                 }
             }

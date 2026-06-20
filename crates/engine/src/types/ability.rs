@@ -1464,6 +1464,9 @@ pub enum ManaSpendRestriction {
     /// "Spend this mana only to activate abilities."
     /// Cannot be used to cast spells; only for ability activation costs.
     ActivateOnly,
+    /// CR 106.6: "Spend this mana only to activate power-up abilities." Keyed on
+    /// the activating ability's keyword tag (Quinjet Technician).
+    ActivateTagged(AbilityTag),
     /// "Spend this mana only on costs that include {X}."
     /// Only permits spending on spells or abilities with {X} in their cost.
     XCostOnly,
@@ -1594,8 +1597,14 @@ pub enum ProhibitedActivity {
         spell_filter: Option<TargetFilter>,
     },
     /// CR 101.2 + CR 602.5 + CR 605.1a: Prevent activating abilities, optionally
-    /// exempting mana abilities.
-    ActivateAbilities { exemption: ActivationExemption },
+    /// exempting mana abilities. `only_tag = None` prohibits all activations;
+    /// `Some(tag)` scopes the prohibition to abilities carrying that keyword tag
+    /// (Kang → power-up), leaving every other activation legal.
+    ActivateAbilities {
+        exemption: ActivationExemption,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        only_tag: Option<AbilityTag>,
+    },
 }
 
 /// When a game restriction expires.
@@ -1604,7 +1613,19 @@ pub enum ProhibitedActivity {
 pub enum RestrictionExpiry {
     EndOfTurn,
     EndOfCombat,
-    UntilPlayerNextTurn { player: PlayerId },
+    UntilPlayerNextTurn {
+        player: PlayerId,
+    },
+    /// CR 514.2 + CR 500.7: Mirrors `Duration::UntilEndOfNextTurnOf`. Created
+    /// pre-armed; at `player`'s next untap step it is CONVERTED to
+    /// `RestrictionExpiry::EndOfTurn` (mirroring `prune_until_next_turn_effects`),
+    /// so the existing cleanup-step prune ends it at THAT turn's cleanup — it
+    /// persists through `player`'s entire next turn (Kang's extra turn). It
+    /// survives the creating turn's own cleanup because that turn's untap step
+    /// already passed before creation.
+    UntilEndOfNextTurnOf {
+        player: PlayerId,
+    },
 }
 
 /// Limits the scope of a game restriction to specific sources or targets.
@@ -8137,17 +8158,32 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
-    /// CR 701.10a: Double power/toughness of target creature.
+    /// CR 701.10a + CR 613.4c: Multiply power/toughness of target creature by
+    /// `factor` via a layer-7c continuous modification. `factor: 2` is "double"
+    /// (CR 701.10a/b); `factor: 3` is "triple" (Tifa's Limit Break — Final
+    /// Heaven). Higher factors compose the same way: each adds `(factor-1)x` the
+    /// snapshot value (CR 701.10b templating generalized — "double" gives +X,
+    /// "triple" gives +2X). The `factor` axis parameterizes the multiplier so
+    /// "double"/"triple"/… share one P/T-modifying effect rather than a
+    /// Double/Triple sibling cluster.
     DoublePT {
         mode: DoublePTMode,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        /// Multiplier applied to the snapshot P/T. Defaults to 2 ("double") for
+        /// forward compatibility with hand-authored fixtures and pre-`factor`
+        /// serialized card data.
+        #[serde(default = "default_pt_factor")]
+        factor: u32,
     },
-    /// CR 701.10a: Double power/toughness of all matching creatures.
+    /// CR 701.10a + CR 613.4c: Multiply power/toughness of all matching creatures
+    /// by `factor` (see `DoublePT` for the `factor` semantics).
     DoublePTAll {
         mode: DoublePTMode,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        #[serde(default = "default_pt_factor")]
+        factor: u32,
     },
     /// CR 122.5 + CR 122.8: Transfer counters from source onto target.
     /// `mode` records whether Oracle says to move counters (remove then put)
@@ -8553,6 +8589,19 @@ pub enum Effect {
     /// target creature. Idempotent: if not prepared, no event fires. Assign
     /// when WotC publishes SOS CR update.
     BecomeUnprepared {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
+    /// CR 702.171b: the target permanent becomes saddled until end of turn.
+    /// Distinct from the Saddle keyword's activated ability (CR 702.171a,
+    /// `KeywordAction::Saddle`) which is paid by tapping creatures: this is the
+    /// effect-level designation toggle used by "becomes saddled" instructions
+    /// (Guidelight Matrix, Kolodin, Alacrian Armory) that grant the designation
+    /// without paying the saddle cost. Idempotent: if already saddled, no event
+    /// fires. CR 702.171b: only permanents can become saddled, the designation
+    /// is cleared at end of turn / when the permanent leaves the battlefield,
+    /// and it is not part of the permanent's copiable values.
+    BecomeSaddled {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
@@ -9642,6 +9691,14 @@ fn default_one() -> u32 {
     1
 }
 
+/// CR 701.10a: A bare "double power/toughness" effect multiplies by 2. Used as
+/// the `serde` default for `Effect::DoublePT`/`DoublePTAll` `factor` so existing
+/// serialized card data (no `factor` key) and hand-authored fixtures keep the
+/// historical doubling behavior.
+fn default_pt_factor() -> u32 {
+    2
+}
+
 /// Deserialize a `TapCreaturesRequirement`, accepting both the current tagged
 /// map form (`{"requirement":"count","count":N}` /
 /// `{"requirement":"aggregate","stat":"TotalPower","comparator":"GE","value":N}`)
@@ -10409,6 +10466,7 @@ impl Effect {
             | Effect::ForceAttack { target, .. }
             | Effect::BecomePrepared { target, .. }
             | Effect::BecomeUnprepared { target, .. }
+            | Effect::BecomeSaddled { target, .. }
             | Effect::CastFromZone { target, .. }
             | Effect::PreventDamage { target, .. }
             | Effect::Exploit { target, .. }
@@ -10863,6 +10921,7 @@ impl Effect {
             | Effect::ForceAttack { .. }
             | Effect::BecomePrepared { .. }
             | Effect::BecomeUnprepared { .. }
+            | Effect::BecomeSaddled { .. }
             | Effect::CastFromZone { .. }
             | Effect::PreventDamage { .. }
             | Effect::Exploit { .. }
@@ -11072,6 +11131,7 @@ impl Effect {
             | Effect::ForceAttack { .. }
             | Effect::BecomePrepared { .. }
             | Effect::BecomeUnprepared { .. }
+            | Effect::BecomeSaddled { .. }
             | Effect::CastFromZone { .. }
             | Effect::PreventDamage { .. }
             | Effect::Exploit { .. }
@@ -11256,6 +11316,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::SolveCase => "SolveCase",
         Effect::BecomePrepared { .. } => "BecomePrepared",
         Effect::BecomeUnprepared { .. } => "BecomeUnprepared",
+        Effect::BecomeSaddled { .. } => "BecomeSaddled",
         Effect::SetClassLevel { .. } => "SetClassLevel",
         Effect::CreateDelayedTrigger { .. } => "CreateDelayedTrigger",
         Effect::AddTargetReplacement { .. } => "AddTargetReplacement",
@@ -11462,6 +11523,8 @@ pub enum EffectKind {
     BecomePrepared,
     /// CR 702.xxx: Prepare (Strixhaven) — clear prepared state on target.
     BecomeUnprepared,
+    /// CR 702.171b: mark the target permanent as saddled until end of turn.
+    BecomeSaddled,
     SetClassLevel,
     CreateDelayedTrigger,
     AddTargetReplacement,
@@ -11679,6 +11742,7 @@ impl From<&Effect> for EffectKind {
             Effect::SolveCase => EffectKind::SolveCase,
             Effect::BecomePrepared { .. } => EffectKind::BecomePrepared,
             Effect::BecomeUnprepared { .. } => EffectKind::BecomeUnprepared,
+            Effect::BecomeSaddled { .. } => EffectKind::BecomeSaddled,
             Effect::SetClassLevel { .. } => EffectKind::SetClassLevel,
             Effect::CreateDelayedTrigger { .. } => EffectKind::CreateDelayedTrigger,
             Effect::AddTargetReplacement { .. } => EffectKind::AddTargetReplacement,
@@ -11975,6 +12039,26 @@ pub enum AbilityTag {
     Cycling,
     /// CR 702.165a: ability originated from a Backup keyword definition.
     Backup,
+    /// CR 602.5b + CR 602.1: This ability originated from a Power-up keyword definition.
+    PowerUp,
+}
+
+impl AbilityTag {
+    /// CR 602.1: Canonical lowercase keyword string for this ability tag.
+    /// Single authority shared by the per-turn and per-game activation-limit
+    /// paths and the static activated-ability cost-reduction gate, so the
+    /// tag→keyword mapping lives in one place.
+    pub fn keyword_str(self) -> &'static str {
+        match self {
+            AbilityTag::Boast => "boast",
+            AbilityTag::Evolve => "evolve",
+            AbilityTag::Exhaust => "exhaust",
+            AbilityTag::Outlast => "outlast",
+            AbilityTag::Cycling => "cycling",
+            AbilityTag::Backup => "backup",
+            AbilityTag::PowerUp => "power-up",
+        }
+    }
 }
 
 /// Structured activation-time restrictions parsed from Oracle text.
@@ -13667,6 +13751,13 @@ pub enum TriggerCondition {
     /// [source filter] dies" — death trigger gated on the dying creature having been
     /// dealt damage this turn by a source matching the filter (e.g. Shelob's Spider gate).
     DealtDamageThisTurnBySource { source: TargetFilter },
+
+    /// CR 701.26 + CR 603.4: True iff the triggering object (the permanent that
+    /// became tapped) has become tapped exactly once so far this turn — i.e. this
+    /// is the first time. Read from `GameState.object_tap_count_this_turn` against
+    /// the tapped object's id. Per CR 603.4 it is checked at both trigger time and
+    /// resolution; the count model lets the resolution-time re-check stay correct.
+    FirstTimeObjectTappedThisTurn,
 
     /// CR 400.7 + CR 603.10: "if it was a [type]" — true when the trigger source's
     /// last known information includes the specified core type. Used by the Glimmer cycle
@@ -17609,6 +17700,54 @@ mod tests {
         let json = serde_json::to_string(&filter).unwrap();
         let deserialized: TargetFilter = serde_json::from_str(&json).unwrap();
         assert_eq!(filter, deserialized);
+    }
+
+    #[test]
+    fn power_up_keyword_types_serde_roundtrip() {
+        // CR 602.5b: new AbilityTag leaf.
+        let tag = AbilityTag::PowerUp;
+        let json = serde_json::to_string(&tag).unwrap();
+        assert_eq!(serde_json::from_str::<AbilityTag>(&json).unwrap(), tag);
+        assert_eq!(tag.keyword_str(), "power-up");
+
+        // CR 500.7 + CR 514.2: new RestrictionExpiry temporal anchor.
+        let expiry = RestrictionExpiry::UntilEndOfNextTurnOf {
+            player: crate::types::player::PlayerId(1),
+        };
+        let json = serde_json::to_string(&expiry).unwrap();
+        assert_eq!(
+            serde_json::from_str::<RestrictionExpiry>(&json).unwrap(),
+            expiry
+        );
+
+        // CR 101.2 + CR 602.5: only_tag parameterization round-trips, and an
+        // omitted only_tag (legacy serialized state) defaults to None.
+        let activity = ProhibitedActivity::ActivateAbilities {
+            exemption: ActivationExemption::None,
+            only_tag: Some(AbilityTag::PowerUp),
+        };
+        let json = serde_json::to_string(&activity).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ProhibitedActivity>(&json).unwrap(),
+            activity
+        );
+        let legacy: ProhibitedActivity =
+            serde_json::from_str(r#"{"type":"ActivateAbilities","exemption":"None"}"#).unwrap();
+        assert_eq!(
+            legacy,
+            ProhibitedActivity::ActivateAbilities {
+                exemption: ActivationExemption::None,
+                only_tag: None,
+            }
+        );
+
+        // CR 106.6: tag-scoped mana-spend parser restriction round-trips.
+        let restriction = ManaSpendRestriction::ActivateTagged(AbilityTag::PowerUp);
+        let json = serde_json::to_string(&restriction).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ManaSpendRestriction>(&json).unwrap(),
+            restriction
+        );
     }
 
     #[test]
