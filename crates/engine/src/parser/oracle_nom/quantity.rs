@@ -636,8 +636,9 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_target_life_ref,
         parse_basic_land_type_count,
         // Bare suffix form — reachable when a parent combinator has already
-        // consumed "there are N " (see `parse_there_are_conditions`).
-        parse_basic_land_types_among_lands_controlled_by_ref,
+        // consumed "there are N " (see `parse_there_are_conditions`). Anaphoric
+        // "they control" binds to a target player here (not a for-each scope).
+        |i| parse_basic_land_types_among_lands_controlled_by_ref(i, ControllerRef::TargetPlayer),
         parse_devotion_ref,
         parse_counters_among_ref,
         // CR 402.1: "the player with the {most|fewest} cards in hand" — the
@@ -2527,13 +2528,17 @@ fn parse_target_life_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// appears after "for each"; the plural form appears after "the number of".
 fn parse_basic_land_types_among_lands_controlled_by_ref(
     input: &str,
+    they_controller: ControllerRef,
 ) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("basic land type").parse(input)?;
     let (rest, _) = opt(tag("s")).parse(rest)?;
     let (rest, _) = tag(" among lands ").parse(rest)?;
     let (rest, controller) = alt((
         value(ControllerRef::You, tag("you control")),
-        value(ControllerRef::TargetPlayer, tag("they control")),
+        // CR 109.5: "they control" binds to the caller-supplied controller — the
+        // iterating/scoped player inside a `for each` clause (`ScopedPlayer`), or
+        // an anaphoric target player in a "the number of …" reference.
+        value(they_controller, tag("they control")),
     ))
     .parse(rest)?;
     Ok((rest, QuantityRef::BasicLandTypeCount { controller }))
@@ -2543,7 +2548,9 @@ fn parse_basic_land_types_among_lands_controlled_by_ref(
 fn parse_basic_land_type_count(input: &str) -> OracleResult<'_, QuantityRef> {
     preceded(
         tag("the number of "),
-        parse_basic_land_types_among_lands_controlled_by_ref,
+        // CR 109.5: anaphoric "the number of basic land types among lands they
+        // control" binds "they" to a target player (not a for-each scope here).
+        |i| parse_basic_land_types_among_lands_controlled_by_ref(i, ControllerRef::TargetPlayer),
     )
     .parse(input)
 }
@@ -2758,7 +2765,8 @@ fn parse_for_each_clause_ref_with_they_controller(
         // Scion of Draco). Reuses the shared bare-domain-suffix combinator and
         // must precede the generic `<type> you control` arm so the leading
         // "basic land type" is not mis-consumed as a creature/permanent type.
-        parse_basic_land_types_among_lands_controlled_by_ref,
+        // CR 109.5: "they control" binds to the iterating/scoped player here.
+        |i| parse_basic_land_types_among_lands_controlled_by_ref(i, they_controller.clone()),
         parse_for_each_controlled_type,
         // CR 201.2: "for each [other] <type> named <CardName> you control"
         // (Seven Dwarves). The `named X` qualifier sits between the type word
@@ -6896,13 +6904,16 @@ mod tests {
         );
         assert_eq!(rest, "");
 
-        // "they control" controller axis (e.g. an opponent-scoped reducer).
+        // CR 109.5: inside a `for each` clause, "they control" binds to the
+        // iterating/scoped player (the default `they_controller`), NOT a target
+        // player — so per-player/per-opponent domain reducers count the right
+        // player's lands.
         let (_, q_they) =
             parse_for_each_clause_ref_complete("basic land type among lands they control").unwrap();
         assert_eq!(
             q_they,
             QuantityRef::BasicLandTypeCount {
-                controller: ControllerRef::TargetPlayer,
+                controller: ControllerRef::ScopedPlayer,
             }
         );
     }
