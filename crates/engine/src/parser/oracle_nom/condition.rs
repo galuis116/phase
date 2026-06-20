@@ -2586,17 +2586,35 @@ fn parse_creature_attacking_you(input: &str) -> OracleResult<'_, StaticCondition
     ))
 }
 
+/// CR 109.5 (you = the controller of the object the ability is on) +
+/// CR 102.2 / CR 102.3 (an opponent of that player). Parse "you control
+/// a/an/another [type]" AND "an opponent controls a/an/another [type]" →
+/// `IsPresent` whose
+/// filter carries the matched `ControllerRef` (You / Opponent).
+///
+/// The verb is parameterized over the controller axis: the leading verb phrase
+/// selects `ControllerRef::You` or `ControllerRef::Opponent`, and the SAME
+/// downstream parse (required article, `parse_type_phrase`, full-consume) runs
+/// for both. CR 611.3a: this is a static "as long as" gate, so the condition is
+/// re-evaluated continuously rather than locked in. CR 109.4: the injected
+/// `InZone { Battlefield }` reflects that only the battlefield (and stack) has a
+/// controller, so the presence check is battlefield-scoped.
 fn parse_you_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
-    // Strip "you control " prefix, then pass the rest (including a/an/another) to parse_type_phrase.
-    // parse_type_phrase handles "a ", "an ", and "another " as article/modifier prefixes.
-    let (rest, _) = tag("you control ").parse(input)?;
-    // Must start with an article or "another" — reject bare "you control creatures" (that's count)
-    if !rest.starts_with("a ") && !rest.starts_with("an ") && !rest.starts_with("another ") {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        )));
-    }
+    // Verb axis: select the controller from the leading verb phrase. The rest of
+    // the parse is identical for both branches.
+    let (rest, ctrl) = alt((
+        value(ControllerRef::You, tag("you control ")),
+        value(ControllerRef::Opponent, tag("an opponent controls ")),
+    ))
+    .parse(input)?;
+    // Required article — reject bare-plural "you control creatures" (that's a
+    // count, handled elsewhere). A required combinator (not opt) preserves the
+    // hard rejection the previous starts_with guard enforced. `peek` requires
+    // the article without consuming it, so the article-inclusive `rest` still
+    // flows to `parse_type_phrase` (which strips "a "/"an " itself and maps
+    // "another " to `FilterProp::Another`).
+    let (rest, _article) =
+        nom::combinator::peek(alt((tag("a "), tag("an "), tag("another ")))).parse(rest)?;
     let (filter, remainder) = parse_type_phrase(rest);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -2604,7 +2622,7 @@ fn parse_you_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
             nom::error::ErrorKind::Fail,
         )));
     }
-    let filter = inject_controller_you(filter);
+    let filter = inject_controller(filter, ctrl);
     let consumed = input.len() - remainder.len();
     Ok((
         &input[consumed..],
@@ -2844,11 +2862,13 @@ fn parse_filter_have_total_property(input: &str) -> OracleResult<'_, StaticCondi
     ))
 }
 
-/// Inject `ControllerRef::You` into a TargetFilter produced by `parse_type_phrase`.
-pub(crate) fn inject_controller_you(filter: TargetFilter) -> TargetFilter {
+/// Inject a controller (CR 109.5 You / CR 102.2 Opponent) into a TargetFilter
+/// produced by `parse_type_phrase`, and ensure the filter is battlefield-scoped
+/// (CR 109.4: only the battlefield and stack have a controller).
+pub(crate) fn inject_controller(filter: TargetFilter, ctrl: ControllerRef) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut tf) => {
-            tf.controller = Some(ControllerRef::You);
+            tf.controller = Some(ctrl);
             if !tf
                 .properties
                 .iter()
@@ -2862,6 +2882,12 @@ pub(crate) fn inject_controller_you(filter: TargetFilter) -> TargetFilter {
         }
         other => other,
     }
+}
+
+/// Inject `ControllerRef::You` into a TargetFilter produced by `parse_type_phrase`.
+/// Thin wrapper over `inject_controller` for the many "you control" call sites.
+pub(crate) fn inject_controller_you(filter: TargetFilter) -> TargetFilter {
+    inject_controller(filter, ControllerRef::You)
 }
 
 /// CR 102.2 + CR 102.3: Recognize opponent possessive prefixes. Shared
@@ -6858,6 +6884,95 @@ mod tests {
         let (rest, c) = parse_inner_condition("you control an artifact").unwrap();
         assert_eq!(rest, "");
         assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+    }
+
+    /// CR 102.2: "an opponent controls a/an [type]" → `IsPresent` with the filter
+    /// carrying `ControllerRef::Opponent` + battlefield zone (Tide Shaper "+1/+1
+    /// as long as an opponent controls an Island"). DISCRIMINATING: fails on
+    /// revert (revert hardcodes You / falls to Unrecognized).
+    #[test]
+    fn test_opponent_controls_an_island() {
+        let (rest, c) = parse_inner_condition("an opponent controls an island").unwrap();
+        assert_eq!(rest, "");
+        let tf = typed_presence(&c);
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::Opponent),
+            "controller should be Opponent, got {tf:?}"
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::InZone {
+                    zone: Zone::Battlefield
+                }
+            )),
+            "filter should be battlefield-scoped, got {tf:?}"
+        );
+    }
+
+    /// The "as long as <condition>" body fed to the static gate parses the SAME
+    /// way `parse_static_condition` delegates (it strips "as long as " then calls
+    /// `parse_inner_condition`). Confirms the SelfRef anthem static (Tide Shaper)
+    /// gets `IsPresent { controller: Opponent }`, NOT `Unrecognized`.
+    #[test]
+    fn test_opponent_controls_static_condition_body() {
+        let condition_text = "an opponent controls an island";
+        let (rest, c) = parse_inner_condition(condition_text).unwrap();
+        assert!(
+            rest.trim().is_empty(),
+            "static gate requires full consume; leftover {rest:?}"
+        );
+        let tf = typed_presence(&c);
+        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+    }
+
+    /// Color-permanent form (Scarab cycle "+2/+2 as long as an opponent controls
+    /// a [color] permanent").
+    #[test]
+    fn test_opponent_controls_a_red_permanent() {
+        let (rest, c) = parse_inner_condition("an opponent controls a red permanent").unwrap();
+        assert_eq!(rest, "");
+        let tf = typed_presence(&c);
+        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+        assert_has_color(tf, ManaColor::Red);
+    }
+
+    /// GUARD (scope containment): "an opponent controls no creatures" is owned by
+    /// `parse_you_control_no` ("you control no ", untouched) and must NOT be
+    /// corrupted into `IsPresent { Opponent }`. The verb alt requires an article;
+    /// "no" is not one, so this errors out of `parse_you_control_a`.
+    #[test]
+    fn test_opponent_controls_no_creatures_not_corrupted() {
+        assert!(
+            parse_you_control_a("an opponent controls no creatures").is_err(),
+            "no-creatures must NOT become IsPresent{{Opponent}}"
+        );
+    }
+
+    /// GUARD (reviewer-required article pin): bare-plural "you control creatures"
+    /// / "an opponent controls creatures" must still be rejected by the REQUIRED
+    /// article combinator. Would PASS WRONGLY if `opt()` were used instead.
+    #[test]
+    fn test_control_bare_plural_rejected() {
+        assert!(
+            parse_you_control_a("you control creatures").is_err(),
+            "bare-plural 'you control creatures' must be rejected (count, not presence)"
+        );
+        assert!(
+            parse_you_control_a("an opponent controls creatures").is_err(),
+            "bare-plural 'an opponent controls creatures' must be rejected"
+        );
+    }
+
+    /// NO-REGRESSION: the "you control a" branch is byte-identical to before —
+    /// `IsPresent { controller: You }`.
+    #[test]
+    fn test_you_control_a_creature_still_you() {
+        let (rest, c) = parse_inner_condition("you control a creature").unwrap();
+        assert_eq!(rest, "");
+        let tf = typed_presence(&c);
+        assert_eq!(tf.controller, Some(ControllerRef::You));
     }
 
     /// The "Villain" creature subtype (Marvel set) must be recognized so that
