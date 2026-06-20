@@ -1377,7 +1377,8 @@ pub fn resolve_each_player(
 
 /// CR 120.1 + CR 120.3: "Up to two target creatures you control each deal damage
 /// equal to their power to target creature" (Band Together, Allies at Last,
-/// Combo Attack, Friendly Rivalry, Graceful Takedown).
+/// Friendly Rivalry, Graceful Takedown). Combo Attack's "your team controls"
+/// (Two-Headed Giant team scope, CR 810) is out of scope and fails closed.
 ///
 /// Each chosen source creature deals damage equal to ITS OWN power to the single
 /// recipient, with that source creature as the damage source (CR 120.1). The
