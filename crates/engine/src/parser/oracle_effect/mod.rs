@@ -6602,7 +6602,10 @@ fn parse_reveal_cards_from_library_until(input: &str) -> nom::IResult<&str, (), 
 
 fn parse_reveal_until_prefix(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
     let (input, _) = parse_reveal_cards_from_library_until(input)?;
-    // Active-voice pronoun + matching verb form.
+    // Active-voice pronoun + matching verb form. Stops before the count
+    // quantifier — the caller (`try_parse_reveal_until`) consumes the article
+    // ("a"/"an" → one match) or a spelled count ("three" → N matches) via
+    // `parse_reveal_until_count`.
     let (input, _) = alt((
         tag("you reveal "),
         tag("they reveal "),
@@ -6611,8 +6614,27 @@ fn parse_reveal_until_prefix(input: &str) -> nom::IResult<&str, (), OracleError<
         tag("it reveals "),
     ))
     .parse(input)?;
-    let (input, _) = nom_primitives::parse_article(input)?;
     Ok((input, ()))
+}
+
+/// CR 701.20a + CR 115.1d: Parse the count quantifier that follows
+/// `"until <pronoun> reveal[s] "`. `"a"`/`"an"` → exactly one match (the
+/// singular reveal-until shape); a spelled or digit count (`"three"`) → that
+/// many matches (Fathom Trawl). Dynamic counts (`"X"`, `"that many"`) are not
+/// modeled — they leave the input unconsumed so the whole active parse fails
+/// closed to `Unimplemented` rather than mis-modeling a battlefield / shuffle /
+/// per-opponent continuation as a flat hand/library reveal.
+fn parse_reveal_until_count(input: &str) -> OracleResult<'_, QuantityExpr> {
+    // "a"/"an" → one. `parse_article` consumes the trailing space, so the filter
+    // noun follows immediately (matching the pre-count behavior).
+    if let Ok((rest, ())) = nom_primitives::parse_article(input) {
+        return Ok((rest, QuantityExpr::Fixed { value: 1 }));
+    }
+    // A spelled/digit count ("two", "three", …) followed by a space before the
+    // (plural) filter noun.
+    let (rest, n) = nom_primitives::parse_number(input)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    Ok((rest, QuantityExpr::Fixed { value: n as i32 }))
 }
 
 /// CR 701.20a: Parse the **passive-voice** prefix `"reveal[s] cards from the top of
@@ -6635,6 +6657,13 @@ fn parse_reveal_until_active_filter_text(input: &str) -> OracleResult<'_, &str> 
     // *whole* alt in one `all_consuming` would NOT backtrack: `alt` commits to
     // the first matching arm before `all_consuming` checks the remainder.
     alt((
+        // Plural head-noun ("three nonland cards") for the multi-count form;
+        // tried first so the singular `" card"` arm does not capture "nonland"
+        // and strand a trailing "s".
+        all_consuming(terminated(
+            take_until(" cards"),
+            (tag(" cards"), opt(tag("."))),
+        )),
         all_consuming(terminated(
             take_until(" card"),
             (tag(" card"), opt(tag("."))),
@@ -6766,7 +6795,20 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
     let active_result = nom_on_lower(tp.original, tp.lower, parse_reveal_until_prefix);
     if let Some((_, rest_orig)) = active_result {
         let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
-        let (_, filter_text) = parse_reveal_until_active_filter_text(rest_lower).ok()?;
+        // CR 701.20a + CR 115.1d: consume the count quantifier ("a"/"an" → one,
+        // "three" → N). A non-fixed count (X / "that many") fails this parse and
+        // falls through to the passive form, ultimately failing closed.
+        let (after_count_lower, count) = parse_reveal_until_count(rest_lower).ok()?;
+        // CR 810 + CR 701.20a: a multi-card reveal for anyone other than the
+        // controller ("each opponent ... until X land cards") needs per-player
+        // resolution this single-revealing-player effect does not model — fail
+        // closed instead of mis-resolving it to one player.
+        if !matches!(count, QuantityExpr::Fixed { value: 1 })
+            && !matches!(player, TargetFilter::Controller)
+        {
+            return None;
+        }
+        let (_, filter_text) = parse_reveal_until_active_filter_text(after_count_lower).ok()?;
         let filter = build_reveal_until_filter(filter_text);
         return Some(parsed_clause(Effect::RevealUntil {
             player,
@@ -6777,6 +6819,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
             enters_attacking: false,
             kept_optional_to: None,
             enters_under: None,
+            count,
         }));
     }
 
@@ -6827,6 +6870,9 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
         enters_attacking: false,
         kept_optional_to: None,
         enters_under: None,
+        // CR 701.20a: the passive "until a/an <filter> is revealed" form is always
+        // singular — one match.
+        count: QuantityExpr::Fixed { value: 1 },
     }))
 }
 
@@ -45200,6 +45246,7 @@ mod tests {
                     enters_attacking: false,
                     kept_optional_to: None,
                     enters_under: None,
+                    count: _,
                 } if type_filters.contains(&TypeFilter::Creature)
             ),
             "expected RevealUntil player=Controller, creature->hand, rest->library, got: {:?}",
@@ -45207,6 +45254,85 @@ mod tests {
         );
         // No sub_ability — destinations are baked in
         assert!(def.sub_ability.is_none(), "should have no sub_ability");
+    }
+
+    /// CR 701.20a + CR 115.1d: the multi-count form "until you reveal N cards"
+    /// (Fathom Trawl — three nonland cards into hand, rest on the bottom). The
+    /// parser must consume the spelled count and emit `count = Fixed(3)`, not drop
+    /// the clause to `Unimplemented` (the singular path requires an article).
+    #[test]
+    fn reveal_until_three_nonland_cards_parses_count_three() {
+        let def = parse_effect_chain(
+            "Reveal cards from the top of your library until you reveal three nonland cards. \
+             Put the nonland cards revealed this way into your hand, then put the rest of the \
+             revealed cards on the bottom of your library in any order.",
+            AbilityKind::Activated,
+        );
+        let Effect::RevealUntil {
+            player,
+            filter,
+            kept_destination,
+            rest_destination,
+            count,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected RevealUntil, got {:?}", def.effect);
+        };
+        assert!(
+            matches!(player, TargetFilter::Controller),
+            "player: {player:?}"
+        );
+        assert_eq!(*kept_destination, Zone::Hand);
+        assert_eq!(*rest_destination, Zone::Library);
+        assert_eq!(
+            *count,
+            QuantityExpr::Fixed { value: 3 },
+            "count should be the spelled-out three"
+        );
+        // The plural "cards" head-noun must not leak into the filter: it stays a
+        // nonland (Non(Land)) creature-agnostic filter.
+        assert!(
+            matches!(
+                filter,
+                TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters.iter().any(|t| matches!(t, TypeFilter::Non(b) if matches!(**b, TypeFilter::Land)))
+            ),
+            "filter should be nonland, got {filter:?}"
+        );
+        // The "Put the nonland cards revealed this way into your hand, then put the
+        // rest on the bottom" continuation is fully covered by the baked-in
+        // kept/rest destinations — it must be swallowed, not left as a redundant
+        // ChangeZone sub-ability that would double-move the revealed cards.
+        assert!(
+            def.sub_ability.is_none(),
+            "continuation should be swallowed, got sub_ability {:?}",
+            def.sub_ability
+        );
+    }
+
+    /// CR 810 + CR 701.20a: dynamic / multi-player counts are not modeled and must
+    /// FAIL CLOSED (→ `Unimplemented`), never mis-parse into a flat single-player
+    /// hand/library reveal. Covers the `X` count (Kindred Summons / Mind Grind),
+    /// the "that many" count (Mass Polymorph), and the per-opponent multi-card
+    /// reveal (Mind Grind's "each opponent ... until X land cards").
+    #[test]
+    fn reveal_until_dynamic_or_multiplayer_counts_fail_closed() {
+        for line in [
+            // X count, single player, onto battlefield (Kindred Summons shape).
+            "Reveal cards from the top of your library until you reveal X creature cards.",
+            // "that many" dynamic count (Mass Polymorph shape).
+            "Reveal cards from the top of your library until you reveal that many creature cards.",
+            // Per-opponent multi-card reveal (Mind Grind shape).
+            "Each opponent reveals cards from the top of their library until they reveal X land cards.",
+        ] {
+            let def = parse_effect_chain(line, AbilityKind::Activated);
+            assert!(
+                !matches!(&*def.effect, Effect::RevealUntil { .. }),
+                "unsupported count must not parse to RevealUntil: {line:?} -> {:?}",
+                def.effect
+            );
+        }
     }
 
     /// CR 701.20a + CR 205.3m: "reveal cards ... until you reveal a Time Lord
@@ -45267,6 +45393,7 @@ mod tests {
                     enters_attacking: false,
                     kept_optional_to: None,
                     enters_under: None,
+                    count: _,
                 } if type_filters.contains(&TypeFilter::Creature)
             ),
             "expected RevealUntil player=ParentTargetController, got: {:?}",
@@ -45344,6 +45471,7 @@ mod tests {
                     enters_attacking: false,
                     kept_optional_to: None,
                     enters_under: None,
+                    count: _,
                 } if type_filters.contains(&TypeFilter::Land)
             ),
             "expected RevealUntil(kept=Graveyard, rest=Graveyard), got: {:?}",
@@ -45422,6 +45550,7 @@ mod tests {
                     enters_attacking: false,
                     kept_optional_to: None,
                     enters_under: None,
+                    count: _,
                 } if type_filters.contains(&TypeFilter::Artifact)
             ),
             "expected RevealUntil player=Controller, artifact->battlefield, got: {:?}",

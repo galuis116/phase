@@ -11,13 +11,17 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
-/// CR 701.20a: Reveal cards from the top of the controller's library one at a
-/// time until a card matching the filter is found. The matching card goes to
-/// `kept_destination`, the remaining revealed cards go to `rest_destination`.
+/// CR 701.20a: Reveal cards from the top of the revealing player's library one
+/// at a time until `count` cards matching the filter are found (`count == 1` is
+/// the common "until you reveal a card matching the filter" shape; `count > 1`
+/// models "until you reveal N cards", e.g. Fathom Trawl's three). The matching
+/// cards go to `kept_destination`, the remaining revealed cards to
+/// `rest_destination`.
 ///
 /// All revealed cards are marked as publicly revealed and a `CardsRevealed`
-/// event is emitted. If the library is exhausted without finding a match, all
-/// revealed cards go to `rest_destination`.
+/// event is emitted. If the library is exhausted before `count` matches are
+/// found, the matches found go to `kept_destination` and the rest to
+/// `rest_destination`.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -32,6 +36,7 @@ pub fn resolve(
         enters_attacking,
         kept_optional_to,
         enters_under,
+        count,
     ) = match &ability.effect {
         Effect::RevealUntil {
             player,
@@ -42,6 +47,7 @@ pub fn resolve(
             enters_attacking,
             kept_optional_to,
             enters_under,
+            count,
         } => (
             player,
             filter,
@@ -51,9 +57,17 @@ pub fn resolve(
             *enters_attacking,
             *kept_optional_to,
             enters_under.as_ref(),
+            count,
         ),
         _ => return Err(EffectError::MissingParam("RevealUntil".to_string())),
     };
+
+    // CR 701.20a: how many matching cards to reveal before stopping. `1` is the
+    // common "until you reveal a card matching the filter" shape; `> 1` models
+    // "until you reveal N cards" (e.g. Fathom Trawl's three). A count below 1 is
+    // meaningless for a reveal-until, so clamp to at least one.
+    let target_count =
+        crate::game::quantity::resolve_quantity_with_targets(state, count, ability).max(1) as usize;
 
     // CR 109.5 + CR 701.20a: Resolve which player's library is revealed.
     // `Controller` → activator (Jalira-style "you reveal..."); `ParentTargetController`
@@ -71,20 +85,23 @@ pub fn resolve(
     // Snapshot library (top = index 0) to iterate without borrow conflicts.
     let library: Vec<ObjectId> = player.library.iter().copied().collect();
     let mut revealed_misses: Vec<ObjectId> = Vec::new();
-    let mut hit_card: Option<ObjectId> = None;
+    let mut hit_cards: Vec<ObjectId> = Vec::new();
 
     // CR 107.3a + CR 601.2b: Evaluate the filter with the ability in scope so
     // dynamic thresholds (e.g. `Variable("X")`) resolve correctly.
     let ctx = FilterContext::from_ability(ability);
 
-    // CR 701.20a: Reveal cards one at a time.
+    // CR 701.20a: Reveal cards one at a time until `target_count` cards match the
+    // filter (or the library is exhausted).
     for &card_id in &library {
         // Mark as revealed (CR 701.20b: card stays in library zone during reveal).
         state.revealed_cards.insert(card_id);
 
         if matches_target_filter(state, card_id, filter, &ctx) {
-            hit_card = Some(card_id);
-            break;
+            hit_cards.push(card_id);
+            if hit_cards.len() >= target_count {
+                break;
+            }
         } else {
             revealed_misses.push(card_id);
         }
@@ -92,9 +109,7 @@ pub fn resolve(
 
     // Build the full list of revealed card IDs for the event.
     let mut all_revealed: Vec<ObjectId> = revealed_misses.clone();
-    if let Some(hit) = hit_card {
-        all_revealed.push(hit);
-    }
+    all_revealed.extend(hit_cards.iter().copied());
 
     // Emit CardsRevealed for all revealed cards.
     let card_names: Vec<String> = all_revealed
@@ -109,6 +124,30 @@ pub fn resolve(
 
     // Store revealed IDs for downstream reference.
     state.last_revealed_ids = all_revealed;
+
+    // CR 701.20a: the multi-match "until you reveal N cards" form (N > 1, e.g.
+    // Fathom Trawl). All matching cards go to `kept_destination` and the rest to
+    // `rest_destination`, delivered as one simultaneous batch. The single-match
+    // form (N == 1) keeps its dedicated tail below (optional-keep choice,
+    // enters-attacking, per-zone deferral) byte-for-byte. The count parser only
+    // produces N > 1 for the unconditional-keep shape, so `kept_optional_to` is
+    // always `None` here.
+    if target_count > 1 {
+        return resolve_multi_match(
+            state,
+            ability,
+            revealing_player,
+            kept_destination,
+            rest_destination,
+            enter_tapped,
+            enters_under,
+            &hit_cards,
+            &revealed_misses,
+            events,
+        );
+    }
+
+    let hit_card: Option<ObjectId> = hit_cards.first().copied();
 
     // CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" — when
     // the kept destination is a controller choice and a hit was found, pause for
@@ -312,6 +351,109 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 701.20a: Resolve the multi-match ("until you reveal N cards", N > 1) form.
+/// Every matching card goes to `kept_destination` and every non-matching revealed
+/// card to `rest_destination`, delivered through a single simultaneous batch so
+/// per-card `Moved` redirects fire (CR 614.6) and a mid-batch CR 616.1 ordering
+/// pause defers the marker-clear + `EffectResolved` onto a cleanup-only
+/// `RevealRestPile` completion (mirroring the single-match tail). The count parser
+/// only emits N > 1 for the unconditional-keep shape, so there is no optional-keep
+/// (`kept_optional_to`) or `enters_attacking` handling here.
+#[allow(clippy::too_many_arguments)]
+fn resolve_multi_match(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    revealing_player: PlayerId,
+    kept_destination: Zone,
+    rest_destination: Zone,
+    enter_tapped: crate::types::zones::EtbTapState,
+    enters_under: Option<&crate::types::ability::ControllerRef>,
+    hit_cards: &[ObjectId],
+    revealed_misses: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    // CR 110.2a: resolve any "under your control" override for a battlefield keep.
+    let controller_override = super::change_zone::resolve_enters_under_player(
+        state,
+        ability,
+        "RevealUntil",
+        enters_under,
+    )?;
+
+    let mut reqs: Vec<ZoneMoveRequest> =
+        Vec::with_capacity(hit_cards.len() + revealed_misses.len());
+
+    // CR 701.20a: the matching cards → `kept_destination`. A battlefield keep
+    // carries the effect's tap-state / control override; a Library keep keeps the
+    // historical bottom placement.
+    for &hit in hit_cards {
+        let mut req = ZoneMoveRequest::effect(hit, kept_destination, ability.source_id);
+        match kept_destination {
+            Zone::Battlefield => {
+                req.mods.enter_tapped = enter_tapped;
+                if let Some(controller) = controller_override {
+                    req = req.under_control_of(controller);
+                }
+            }
+            Zone::Library => {
+                req = req.at_library_position(LibraryPosition::Bottom);
+            }
+            _ => {}
+        }
+        reqs.push(req);
+    }
+
+    // CR 701.20a + CR 614.6: the rest pile → `rest_destination`. A Library rest
+    // pile is placed on the bottom in a random order; any other destination is a
+    // flat per-card move (each card anchors its own attribution).
+    match rest_destination {
+        Zone::Library => reqs.extend(library_bottom_requests_in_random_order(
+            state,
+            revealed_misses,
+        )),
+        dest => reqs.extend(
+            revealed_misses
+                .iter()
+                .map(|&card_id| ZoneMoveRequest::effect(card_id, dest, card_id)),
+        ),
+    }
+
+    let mut clear_markers: Vec<ObjectId> = revealed_misses.to_vec();
+    clear_markers.extend(hit_cards.iter().copied());
+
+    // CR 603.10a + CR 616.1: deliver kept + rest as one simultaneous batch. On a
+    // synchronous completion, clear the reveal markers and emit `EffectResolved`
+    // inline (matching the single-match tail). On a mid-batch redirect pause,
+    // defer that cleanup onto a `RevealRestPile` completion so it runs once the
+    // pile lands and `EffectResolved` never lands over the parked prompt.
+    match zone_pipeline::move_objects_simultaneously_then(state, reqs, None, events) {
+        zone_pipeline::BatchMoveResult::Done => {}
+        zone_pipeline::BatchMoveResult::NeedsChoice => {
+            zone_pipeline::defer_completion_on_pause(
+                state,
+                BatchCompletion::RevealRestPile {
+                    player: revealing_player,
+                    rest_cards: Vec::new(),
+                    rest_destination,
+                    clear_markers,
+                    publish_tracked_set: None,
+                    emit_reveal_until_resolved: Some(ability.source_id),
+                },
+            );
+            return Ok(());
+        }
+    }
+
+    for &card_id in &clear_markers {
+        state.revealed_cards.remove(&card_id);
+    }
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::RevealUntil,
+        source_id: ability.source_id,
+    });
+    Ok(())
+}
+
 /// CR 109.5: Resolve the `player` filter on a [`RevealUntil`] effect into a
 /// concrete [`PlayerId`]. Mirrors [`crate::game::effects::token::resolve_token_owner`]:
 /// `Controller` → activator; `ParentTargetController` → controller of the parent
@@ -485,6 +627,7 @@ mod tests {
                 enters_attacking: false,
                 kept_optional_to: None,
                 enters_under: None,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
             },
             vec![],
             ObjectId(100),
@@ -510,6 +653,7 @@ mod tests {
                 enters_attacking: false,
                 kept_optional_to: None,
                 enters_under: None,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
             },
             targets,
             ObjectId(100),
@@ -587,6 +731,115 @@ mod tests {
             _ => None,
         });
         assert_eq!(revealed.unwrap().len(), 3);
+    }
+
+    fn make_reveal_until_ability_with_count(
+        controller: PlayerId,
+        filter: TargetFilter,
+        kept_destination: Zone,
+        rest_destination: Zone,
+        count: i32,
+    ) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter,
+                kept_destination,
+                rest_destination,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                kept_optional_to: None,
+                enters_under: None,
+                count: crate::types::ability::QuantityExpr::Fixed { value: count },
+            },
+            vec![],
+            ObjectId(100),
+            controller,
+        )
+    }
+
+    /// CR 701.20a + CR 115.1d: the multi-count form (Fathom Trawl). Reveal until
+    /// THREE creatures match: all three are kept, the interleaved non-matching
+    /// cards become the rest pile, and a card past the third match is never
+    /// revealed. With `count == 1` this same resolver keeps its single-match
+    /// behavior (exercised by `reveal_until_finds_creature_puts_to_hand`).
+    #[test]
+    fn reveal_until_count_three_keeps_three_matches() {
+        let mut state = GameState::new_two_player(42);
+
+        // Library top→bottom (creation order): creature, land, creature, land,
+        // creature, land. Revealing until 3 creatures match consumes the first
+        // five cards (3 creatures + 2 interleaved lands); the 6th (a land) is
+        // never reached.
+        let mut creatures = Vec::new();
+        let mut lands = Vec::new();
+        for i in 0..6u64 {
+            let is_creature = i % 2 == 0;
+            let id = create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                if is_creature { "Bear" } else { "Forest" }.to_string(),
+                Zone::Library,
+            );
+            let core = if is_creature {
+                CoreType::Creature
+            } else {
+                CoreType::Land
+            };
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(core);
+            if is_creature {
+                creatures.push(id);
+            } else {
+                lands.push(id);
+            }
+        }
+
+        let ability = make_reveal_until_ability_with_count(
+            PlayerId(0),
+            TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+            Zone::Hand,
+            Zone::Library,
+            3,
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // All three matching creatures kept to hand.
+        for c in &creatures {
+            assert!(
+                state.players[0].hand.contains(c),
+                "creature {c:?} should be kept to hand"
+            );
+            assert!(
+                !state.players[0].library.contains(c),
+                "creature {c:?} must not stay in library"
+            );
+        }
+        // The two revealed-miss lands return to the library; the third (never
+        // revealed) land is still there too.
+        for l in &lands {
+            assert!(
+                state.players[0].library.contains(l),
+                "land {l:?} should be in the library"
+            );
+        }
+        // CardsRevealed covers the 3 creatures + 2 interleaved lands (the 6th
+        // card is never revealed).
+        let revealed = events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::CardsRevealed { card_ids, .. } => Some(card_ids.clone()),
+                _ => None,
+            })
+            .expect("CardsRevealed emitted");
+        assert_eq!(revealed.len(), 5, "revealed: {revealed:?}");
     }
 
     /// C5 discriminating test (CR 614.6 + CR 701.20a): a kept card placed back
@@ -1066,6 +1319,7 @@ mod tests {
                     enters_attacking: false,
                     kept_optional_to: Some(Zone::Battlefield),
                     enters_under: None,
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 },
                 vec![],
                 ObjectId(100),
@@ -1184,6 +1438,7 @@ mod tests {
                 enters_attacking: false,
                 kept_optional_to: Some(Zone::Library),
                 enters_under: None,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
             },
             vec![],
             ObjectId(100),
@@ -1256,6 +1511,7 @@ mod tests {
                 enters_attacking: false,
                 kept_optional_to: Some(Zone::Battlefield),
                 enters_under: None,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
             },
             vec![],
             ObjectId(100),

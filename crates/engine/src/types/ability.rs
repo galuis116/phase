@@ -8873,6 +8873,15 @@ pub enum Effect {
         /// controller ("under your control" on Telemin Performance / Sméagol).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enters_under: Option<ControllerRef>,
+        /// CR 701.20a: How many matching cards to reveal before stopping. `1`
+        /// (the serde default) is the common "until you reveal a card matching
+        /// the filter" shape; `> 1` models "until you reveal N cards" (a fixed
+        /// count, e.g. Fathom Trawl's three, or `X`, e.g. Mind Grind). All
+        /// matching cards go to `kept_destination`, the rest to
+        /// `rest_destination`. Counts `> 1` are only produced for the
+        /// unconditional-keep form (`kept_optional_to == None`).
+        #[serde(default = "default_reveal_until_count")]
+        count: QuantityExpr,
     },
     /// CR 701.57a: Discover N — exile from top until nonland with MV ≤ N,
     /// cast free or put to hand, rest to bottom in random order.
@@ -9526,6 +9535,13 @@ pub(crate) fn default_target_filter_any() -> TargetFilter {
 /// Default number of random nonland cards a Heist looks at (Arena reminder: 3).
 fn default_heist_look_count() -> u8 {
     3
+}
+
+/// Serde default for `Effect::RevealUntil::count`: the singular "until you
+/// reveal a card matching the filter" reading (one match) when `count` is
+/// omitted, preserving every pre-existing serialized single-reveal ability.
+fn default_reveal_until_count() -> QuantityExpr {
+    QuantityExpr::Fixed { value: 1 }
 }
 
 pub(crate) fn default_target_filter_permanent() -> TargetFilter {

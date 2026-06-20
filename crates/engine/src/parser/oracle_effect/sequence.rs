@@ -4473,7 +4473,16 @@ pub(super) fn parse_followup_continuation_ast(
             if nom_primitives::scan_contains(&lower, "put that card")
                 || nom_primitives::scan_contains(&lower, "puts that card")
                 || nom_primitives::scan_contains(&lower, "put it")
-                || nom_primitives::scan_contains(&lower, "puts it") =>
+                || nom_primitives::scan_contains(&lower, "puts it")
+                // CR 701.20a: the multi-count kept clause "put the <filter> cards
+                // revealed this way into your hand / onto the battlefield" (Fathom
+                // Trawl's "Put the nonland cards revealed this way into your hand").
+                // Distinct from "put those cards" (the whole pile to one zone,
+                // handled by the next arm), so exclude it here.
+                || (nom_primitives::scan_contains(&lower, "cards revealed this way")
+                    && (nom_primitives::scan_contains(&lower, "into your hand")
+                        || nom_primitives::scan_contains(&lower, "onto the battlefield"))
+                    && !nom_primitives::scan_contains(&lower, "those cards")) =>
         {
             let (destination, enter_tapped, enters_attacking) =
                 if nom_primitives::scan_contains(&lower, "onto the battlefield") {

@@ -8032,6 +8032,7 @@ mod tests {
                 enters_attacking: false,
                 kept_optional_to: None,
                 enters_under: None,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
             },
             vec![],
             ObjectId(900),
