@@ -134,7 +134,10 @@ use self::sequence::{
     parse_followup_continuation_ast, parse_intrinsic_continuation_ast, split_clause_sequence,
     try_parse_repeat_process_for_keywords, try_parse_same_is_true_continuation,
 };
-use self::subject::{try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life};
+use self::subject::{
+    try_parse_each_deals_damage_equal_to_power, try_parse_subject_predicate_ast,
+    try_parse_targeted_controller_gain_life,
+};
 use crate::parser::oracle_ir::ast::*;
 pub(crate) use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
@@ -8857,6 +8860,14 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     // "Its controller gains life equal to its power/toughness" — subject must be preserved
     // because the life recipient is not the caster but the targeted permanent's controller.
     if let Some(clause) = try_parse_targeted_controller_gain_life(text) {
+        return clause;
+    }
+
+    // CR 120.1 + CR 115.1d: "Up to two target creatures you control each deal
+    // damage equal to their power to target creature." The targeted source set
+    // and the recipient must both be preserved as independent targets, so this
+    // runs before generic subject stripping / damage-compound splitting.
+    if let Some(clause) = try_parse_each_deals_damage_equal_to_power(text) {
         return clause;
     }
 
@@ -21029,6 +21040,57 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::parser::parse_oracle_text;
+
+    // CR 120.1 + CR 115.1d: "Up to two target creatures you control each deal
+    // damage equal to their power to target creature" (Band Together) parses to
+    // `EachDealsDamageEqualToPower` with a you-control creature source filter and
+    // a creature recipient, and an "up to two" (0..=2) multi-target spec.
+    #[test]
+    fn each_deals_damage_equal_to_power_up_to_two() {
+        use crate::types::ability::ControllerRef;
+        let def = parse_effect_chain(
+            "Up to two target creatures you control each deal damage equal to their power to another target creature.",
+            AbilityKind::Spell,
+        );
+        let Effect::EachDealsDamageEqualToPower { sources, recipient } = &*def.effect else {
+            panic!("expected EachDealsDamageEqualToPower, got {:?}", def.effect);
+        };
+        // CR 115.1: the source set is a creature controlled by the caster.
+        let TargetFilter::Typed(tf) = sources else {
+            panic!("expected Typed source filter, got {sources:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        // CR 115.1: the recipient is a creature ("another target creature").
+        assert!(matches!(recipient, TargetFilter::Typed(rt)
+            if rt.type_filters.contains(&TypeFilter::Creature)));
+        // CR 115.1d: "up to two" → 0..=2.
+        assert_eq!(def.multi_target, Some(MultiTargetSpec::fixed(0, 2)));
+    }
+
+    // CR 120.1: The in-scope cards' damage lines parse to the new effect (not
+    // `Unimplemented`), with the recipient's controller restriction carried on
+    // the recipient filter. Combo Attack ("Two target creatures *your team*
+    // controls") is intentionally out of scope — the Two-Headed Giant team scope
+    // is a separate, niche axis and is left as a known gap rather than mismodeled.
+    #[test]
+    fn each_deals_damage_equal_to_power_all_in_scope_cards() {
+        let lines = [
+            // Allies at Last
+            "Up to two target creatures you control each deal damage equal to their power to target creature an opponent controls.",
+            // Band Together
+            "Up to two target creatures you control each deal damage equal to their power to another target creature.",
+            // Friendly Rivalry / Graceful Takedown
+            "Up to two target creatures you control each deal damage equal to their power to target creature you don't control.",
+        ];
+        for line in lines {
+            let effect = parse_effect(line);
+            assert!(
+                matches!(effect, Effect::EachDealsDamageEqualToPower { .. }),
+                "line did not parse to EachDealsDamageEqualToPower: {line:?} -> {effect:?}"
+            );
+        }
+    }
 
     // CR 701.20a: a comma+or disjunctive reveal-until filter list ("X card, a Y,
     // or a Z card") must split into an Or of three distinct filters. Building

@@ -2472,6 +2472,9 @@ pub fn resolve_effect(
         Effect::StartYourEngines { .. } => speed_effects::resolve_start(state, ability, events),
         Effect::ChangeSpeed { .. } => speed_effects::resolve_change_speed(state, ability, events),
         Effect::DealDamage { .. } => deal_damage::resolve(state, ability, events),
+        Effect::EachDealsDamageEqualToPower { .. } => {
+            deal_damage::resolve_each_deals_equal_to_power(state, ability, events)
+        }
         Effect::Draw { .. } => draw::resolve(state, ability, events),
         Effect::Pump { .. } => pump::resolve(state, ability, events),
         Effect::PairWith { .. } => pair_with::resolve(state, ability, events),

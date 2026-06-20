@@ -1375,6 +1375,154 @@ pub fn resolve_each_player(
     Ok(())
 }
 
+/// CR 120.1 + CR 120.3: "Up to two target creatures you control each deal damage
+/// equal to their power to target creature" (Band Together, Allies at Last,
+/// Combo Attack, Friendly Rivalry, Graceful Takedown).
+///
+/// Each chosen source creature deals damage equal to ITS OWN power to the single
+/// recipient, with that source creature as the damage source (CR 120.1). The
+/// per-source `DamageContext` is built from each source object so its keywords
+/// (deathtouch, lifelink, …) and identity travel with its damage. Power is read
+/// from the live object, falling back to last known information (CR 113.7a) when
+/// a source has left the battlefield between announcement and resolution.
+///
+/// Target layout: the source slots are surfaced first (0..=2) and the recipient
+/// slot last by `ability_utils::collect_target_slots`, so `ability.targets` is
+/// `[source.., recipient]`. The recipient is the final object target; every
+/// earlier object target is a source.
+pub fn resolve_each_deals_equal_to_power(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    if !matches!(ability.effect, Effect::EachDealsDamageEqualToPower { .. }) {
+        return Err(EffectError::MissingParam(
+            "EachDealsDamageEqualToPower".to_string(),
+        ));
+    }
+
+    // CR 115.1: collect the chosen object targets in declaration order.
+    let object_targets: Vec<ObjectId> = ability
+        .targets
+        .iter()
+        .filter_map(|t| match t {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        })
+        .collect();
+
+    // The recipient is the last object target; the sources are the rest. With
+    // zero sources chosen ("up to two" → 0) there is exactly one object target
+    // (the recipient) and no damage is dealt. Fewer than one object target means
+    // the recipient became illegal and the spell did nothing (CR 608.2b).
+    let Some((&recipient_id, source_ids)) = object_targets.split_last() else {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    };
+
+    for (i, &source_id) in source_ids.iter().enumerate() {
+        // CR 113.7a + CR 208.3: power from the live object, falling back to LKI
+        // when the source left the battlefield after targets were chosen.
+        let power = object_power_with_lki(state, source_id);
+        if power <= 0 {
+            continue;
+        }
+        // CR 120.1: each source creature is the source of its own damage.
+        let ctx = DamageContext::from_source(state, source_id)
+            .unwrap_or_else(|| DamageContext::fallback(source_id, ability.controller));
+        match apply_damage_to_target(
+            state,
+            &ctx,
+            TargetRef::Object(recipient_id),
+            power as u32,
+            false,
+            events,
+        )? {
+            DamageResult::Applied(_) => {}
+            DamageResult::NeedsChoice => {
+                // CR 120.3 + CR 616.1e: This source's damage paused for a
+                // replacement choice. Each remaining source deals its own power
+                // from its own object, so stash one continuation node per
+                // remaining source (each carrying its own `source_id`), then the
+                // parent sub_ability tail.
+                stash_remaining_each_deals_chain(
+                    state,
+                    ability,
+                    &source_ids[i + 1..],
+                    recipient_id,
+                );
+                mark_pending_continuation_parent(state, EffectKind::EachDealsDamageEqualToPower);
+                return Ok(());
+            }
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+    });
+
+    Ok(())
+}
+
+/// CR 208.3 + CR 113.7a: A creature's power from current state, falling back to
+/// Last Known Information when the object has left the battlefield. Mirrors the
+/// `ObjectScope::Source` arm of `quantity::resolve_object_pt`.
+fn object_power_with_lki(state: &GameState, id: ObjectId) -> i32 {
+    state
+        .objects
+        .get(&id)
+        .and_then(|obj| obj.power)
+        .or_else(|| state.lki_cache.get(&id).and_then(|lki| lki.power))
+        .unwrap_or(0)
+}
+
+/// CR 120.1 + CR 616.1e: Build one continuation node per remaining source after a
+/// replacement choice paused mid-resolution. Each node deals that source's power
+/// to the recipient with that source creature as the damage source (its own
+/// `source_id`). The parent's sub_ability tail is appended last so any downstream
+/// chain resumes once the choice resolves.
+fn stash_remaining_each_deals_chain(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    remaining_sources: &[ObjectId],
+    recipient_id: ObjectId,
+) {
+    let mut head: Option<ResolvedAbility> = None;
+    for &source_id in remaining_sources {
+        let power = object_power_with_lki(state, source_id);
+        if power <= 0 {
+            continue;
+        }
+        let node = build_remaining_damage_node(
+            source_id,
+            ability.controller,
+            TargetRef::Object(recipient_id),
+            power as u32,
+        );
+        match head.as_mut() {
+            Some(h) => append_to_sub_chain(h, node),
+            None => head = Some(node),
+        }
+    }
+    match head {
+        Some(mut h) => {
+            if let Some(sub) = ability.sub_ability.as_ref() {
+                append_to_sub_chain(&mut h, sub.as_ref().clone());
+            }
+            append_to_pending_continuation(state, Some(Box::new(h)));
+        }
+        None => {
+            if let Some(sub) = ability.sub_ability.as_ref() {
+                append_to_pending_continuation(state, Some(Box::new(sub.as_ref().clone())));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1403,6 +1551,60 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// CR 120.1 + CR 120.3: Band Together — casting "Up to two target creatures
+    /// you control each deal damage equal to their power to another target
+    /// creature" with a 3/2 and a 2/2 source each deals its own power (3 and 2)
+    /// to a single recipient, which therefore takes 5 marked damage. Each source
+    /// is its own damage source (CR 120.1); the recipient is the last target.
+    #[test]
+    fn band_together_two_sources_deal_combined_power_to_recipient() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        const BAND_TOGETHER: &str = "Up to two target creatures you control each deal damage equal to their power to another target creature.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let src_a = scenario.add_creature(P0, "Striker A", 3, 2).id();
+        let src_b = scenario.add_creature(P0, "Striker B", 2, 2).id();
+        // CR 120.3e: a 0/9 recipient survives 5 marked damage, so the marked
+        // total is directly observable post-resolution.
+        let recipient = scenario.add_creature(P1, "Big Wall", 0, 9).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Band Together", false, BAND_TOGETHER)
+            .id();
+        // Fund the pool generously; the source/recipient choice is the only
+        // interaction under test.
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]); 6],
+        );
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P0;
+            state.priority_player = P0;
+        }
+
+        // CR 601.2c: source slots first (src_a, src_b), recipient slot last.
+        let outcome = runner
+            .cast(spell)
+            .target_objects(&[src_a, src_b, recipient])
+            .resolve();
+
+        // CR 120.1 + CR 120.3e: 3 (Striker A) + 2 (Striker B) = 5 marked on the
+        // recipient.
+        assert_eq!(
+            outcome.damage_marked(recipient),
+            5,
+            "recipient should take each source's power (3 + 2) = 5"
+        );
+        // CR 120.1: the sources are not damaged (one-directional, unlike fight).
+        assert_eq!(outcome.damage_marked(src_a), 0);
+        assert_eq!(outcome.damage_marked(src_b), 0);
     }
 
     /// CR 122.1c: damage to a permanent with a shield counter is prevented and

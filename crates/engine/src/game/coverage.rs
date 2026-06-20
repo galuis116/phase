@@ -1865,6 +1865,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("amount".into(), fmt_quantity(amount)));
             d.push(("target".into(), fmt_target(target)));
         }
+        Effect::EachDealsDamageEqualToPower { sources, recipient } => {
+            d.push(("sources".into(), fmt_target(sources)));
+            d.push(("recipient".into(), fmt_target(recipient)));
+        }
         Effect::SearchOutsideGame {
             filter,
             count,
