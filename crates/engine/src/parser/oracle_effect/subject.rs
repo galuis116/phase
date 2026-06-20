@@ -49,11 +49,12 @@ pub(super) fn try_parse_subject_predicate_ast(
         return None;
     }
 
-    // CR 120.1 + CR 115.1d: defer "up to two target creatures you control each
-    // deal damage equal to their power to target creature" to the imperative
+    // CR 120.1 + CR 115.1d: defer the "up to two target creatures you control each
+    // deal damage equal to their power to target creature" shape to the imperative
     // path, which preserves both the targeted source set and the recipient as
     // independent targets. Splitting it into subject + imperative-fallback here
-    // would drop the per-source damage semantics.
+    // would drop the per-source damage semantics. (The team-scope variant fails
+    // closed to `Unimplemented` earlier, in `parse_effect_clause_inner`.)
     if try_parse_each_deals_damage_equal_to_power(text).is_some() {
         return None;
     }

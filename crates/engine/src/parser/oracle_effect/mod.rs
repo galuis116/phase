@@ -4550,6 +4550,21 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
+    // CR 810: the "two target creatures your team controls each deal damage equal
+    // to their power to target creature" shape (Combo Attack). Two-Headed Giant
+    // team control is not the caster's controller, so this is unmodeled and
+    // `try_parse_each_deals_damage_equal_to_power` returns an explicit
+    // `Unimplemented`. Intercept it HERE, before the generic exactly-two-targets
+    // parser further down would mis-accept the leading "two target creatures …" as
+    // a bare `TargetOnly` clause. The supported "you control" variants return the
+    // real `EachDealsDamageEqualToPower` effect (not `Unimplemented`) and fall
+    // through to their dedicated dispatch in `lower_imperative_clause`.
+    if let Some(clause) = try_parse_each_deals_damage_equal_to_power(text) {
+        if matches!(clause.effect, Effect::Unimplemented { .. }) {
+            return clause;
+        }
+    }
+
     // CR 608.2c: Deconjugate bare third-person verbs that appear after ", then" splits
     // where the subject carried over from the previous clause.
     // E.g., "draws seven cards" → "draw seven cards" (from "Each player discards
