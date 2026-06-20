@@ -3596,9 +3596,29 @@ pub(super) fn try_parse_each_deals_damage_equal_to_power(text: &str) -> Option<P
 
     // CR 120.1: the verb phrase. Each chosen source deals damage equal to its own
     // power. `parse()` returns `(remaining, output)` — bind the remaining text.
-    let (after_verb, _) = tag::<_, _, OracleError<'_>>("each deal damage equal to their power to ")
-        .parse(after_sources.trim_start())
-        .ok()?;
+    let after_sources_trimmed = after_sources.trim_start();
+    let after_verb = match tag::<_, _, OracleError<'_>>("each deal damage equal to their power to ")
+        .parse(after_sources_trimmed)
+    {
+        Ok((rest, _)) => rest,
+        // CR 810: the team-up shape carrying an unmodelable "your team controls"
+        // source scope (Combo Attack). `parse_target` leaves "your team controls
+        // …" in the remainder, so the verb tag above misses. Fail CLOSED to a
+        // DETERMINISTIC `Unimplemented` rather than returning `None`: `None` would
+        // let a generic target-only fallback non-deterministically accept the
+        // leading "two target creatures …" as a bare `TargetOnly` clause (the
+        // fallback order is HashMap-seed dependent).
+        Err(_)
+            if tag::<_, _, OracleError<'_>>(
+                "your team controls each deal damage equal to their power to ",
+            )
+            .parse(after_sources_trimmed)
+            .is_ok() =>
+        {
+            return Some(super::parsed_clause(Effect::unimplemented("deal", text)));
+        }
+        Err(_) => return None,
+    };
 
     // CR 115.1: the single recipient creature ("target creature", "target
     // creature an opponent controls", "another target creature", "target
