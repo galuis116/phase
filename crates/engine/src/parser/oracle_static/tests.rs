@@ -4015,6 +4015,23 @@ fn static_as_long_as_unrecognized_condition() {
 }
 
 #[test]
+fn static_enchanted_or_equipped_stays_unrecognized() {
+    // Novice Knight: "As long as this creature is enchanted or equipped, ~ has
+    // first strike." The rhs "equipped" elides its subject, so the disjunction
+    // cannot be decomposed — the whole condition falls through to Unrecognized
+    // (no regression: it is Unrecognized today, and the new bare "is enchanted"
+    // arm intentionally does NOT salvage half of it).
+    let def =
+        parse_static_line("As long as this creature is enchanted or equipped, ~ has first strike.")
+            .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(matches!(
+        def.condition,
+        Some(StaticCondition::Unrecognized { .. })
+    ));
+}
+
+#[test]
 fn static_has_keyword_as_long_as() {
     let def = parse_static_line("Tarmogoyf has trample as long as a land card is in a graveyard.")
         .unwrap();
@@ -5105,6 +5122,108 @@ fn parse_continuous_modifications_grants_all_activated_abilities_of_exiled() {
         )
         .is_empty(),
         "typed 'creature cards exiled with it' must stay a gap (follow-up)"
+    );
+}
+
+/// CR 305.6 + CR 305.7 + CR 205.3i: "gain all basic land types" (and the
+/// has/have/are/is copula variants) maps to `AddAllBasicLandTypes`; "gain all
+/// land types" maps to `AddAllLandTypes`. Building-block coverage for the whole
+/// "[lands you control] gain all basic land types until <duration>" class
+/// (Energybending), not a single card.
+#[test]
+fn parse_continuous_modifications_gain_all_basic_land_types() {
+    for predicate in [
+        "gain all basic land types",
+        "gains all basic land types",
+        "have all basic land types",
+        "has all basic land types",
+        "are all basic land types",
+        "is all basic land types",
+        "gain all basic land types.",
+    ] {
+        assert_eq!(
+            parse_continuous_modifications(predicate),
+            vec![ContinuousModification::AddAllBasicLandTypes],
+            "predicate: {predicate}"
+        );
+    }
+
+    // CR 205.3i: the broader "all land types" form grants every land subtype.
+    for predicate in ["gain all land types", "have all land types"] {
+        assert_eq!(
+            parse_continuous_modifications(predicate),
+            vec![ContinuousModification::AddAllLandTypes],
+            "predicate: {predicate}"
+        );
+    }
+
+    // Negative: a single named basic land type must NOT route through the
+    // all-types path (it is owned by the additive/replacement type parsers).
+    assert!(
+        !parse_continuous_modifications("gain all basic land types")
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddAllLandTypes)),
+        "'all basic land types' must not be widened to all 17 land types"
+    );
+}
+
+/// CR 305.6 + CR 611.2a: Energybending's full Oracle text — "Lands you control
+/// gain all basic land types until end of turn. Draw a card." — must parse with
+/// ZERO `Effect::Unimplemented`. The land-type clause lowers to a
+/// `GenericEffect { AddAllBasicLandTypes }` over "lands you control" for
+/// `UntilEndOfTurn`, with "Draw a card" chained as a `SequentialSibling`
+/// `Effect::Draw` sub-ability.
+#[test]
+fn energybending_full_oracle_has_no_unimplemented() {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{AbilityDefinition, Effect};
+
+    let parsed = parse_oracle_text(
+        "Lands you control gain all basic land types until end of turn.\nDraw a card.",
+        "Energybending",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+
+    // Walk the whole ability tree (each ability plus its sub_ability chain),
+    // since "Draw a card" is chained as a SequentialSibling under the land-type
+    // GenericEffect rather than appearing as a separate top-level ability.
+    fn walk<'a>(ability: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+        out.push(&ability.effect);
+        if let Some(sub) = &ability.sub_ability {
+            walk(sub, out);
+        }
+    }
+    let mut effects = Vec::new();
+    for ability in &parsed.abilities {
+        walk(ability, &mut effects);
+    }
+
+    for effect in &effects {
+        assert!(
+            !matches!(effect, Effect::Unimplemented { .. }),
+            "Energybending must not emit Effect::Unimplemented, got {effect:?}"
+        );
+    }
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::GenericEffect { static_abilities, .. }
+                if static_abilities.iter().any(|sd| sd
+                    .modifications
+                    .iter()
+                    .any(|m| matches!(m, ContinuousModification::AddAllBasicLandTypes)))
+        )),
+        "expected a GenericEffect adding all basic land types, got {:?}",
+        parsed.abilities
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Draw { .. })),
+        "expected a Draw effect, got {:?}",
+        parsed.abilities
     );
 }
 
@@ -12401,6 +12520,34 @@ fn cant_cast_spells_with_chosen_name_parenthetical() {
     assert_eq!(def.affected, Some(TargetFilter::HasChosenName));
 }
 
+/// CR 101.2 + CR 107.3: Gaddock Teeg class — passive-voice prohibition on
+/// spells with {X} in their mana cost. Combines a type prefix ("noncreature")
+/// with `HasXInManaCost`. The engine enforces this via `cant_cast_filter_matches`
+/// → `SpellCastRecord.has_x_in_cost`.
+#[test]
+fn passive_noncreature_spells_with_x_in_mana_cost_cant_be_cast() {
+    let def = parse_static_line("Noncreature spells with {X} in their mana costs can't be cast.")
+        .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantBeCast {
+            who: ProhibitionScope::AllPlayers,
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = &def.affected else {
+        panic!("expected Typed filter, got {:?}", def.affected);
+    };
+    assert!(
+        tf.type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature))),
+        "expected noncreature type filter, got {tf:?}"
+    );
+    assert!(
+        tf.properties.contains(&FilterProp::HasXInManaCost),
+        "expected HasXInManaCost property, got {tf:?}"
+    );
+}
+
 // CR 201.3 / CR 113.6: Petrified Hamlet — "Lands with the chosen name
 // have \"{T}: Add {C}.\"" grants a quoted mana ability to every land
 // whose name matches the CardName persisted on the source by the
@@ -18084,6 +18231,85 @@ fn aura_static_does_not_bind_it_pronoun_to_source() {
             d.condition
         );
     }
+}
+
+#[test]
+fn self_static_resolves_it_pronoun_combat_state_to_source() {
+    // CR 508.1k / 509.1g / 509.1h: "it" in a self-referential combat-state gate
+    // refers to the source, so "as long as it's attacking/blocking/blocked" must
+    // type to the same Source* condition as the explicit "~ is …" form — not fall
+    // through to Unrecognized. Discriminating: before EDIT 1 these came back
+    // StaticCondition::Unrecognized { text: "it's attacking" }, which evals
+    // always-true (a permanent buff). Fails on revert.
+    let attacking = parse_static_line("This creature gets +1/+0 as long as it's attacking.") // Grasping Scoundrel
+        .expect("self static def");
+    assert_eq!(
+        attacking.condition,
+        Some(StaticCondition::SourceIsAttacking),
+        "expected SourceIsAttacking, got {:?}",
+        attacking.condition
+    );
+
+    let blocking = parse_static_line("This creature gets +1/+0 as long as it's blocking.")
+        .expect("self static def");
+    assert_eq!(
+        blocking.condition,
+        Some(StaticCondition::SourceIsBlocking),
+        "expected SourceIsBlocking, got {:?}",
+        blocking.condition
+    );
+
+    let blocked = parse_static_line("This creature gets +1/+0 as long as it's blocked.")
+        .expect("self static def");
+    assert_eq!(
+        blocked.condition,
+        Some(StaticCondition::SourceIsBlocked),
+        "expected SourceIsBlocked, got {:?}",
+        blocked.condition
+    );
+}
+
+#[test]
+fn aura_static_does_not_bind_it_pronoun_combat_state_to_source() {
+    // GUARD (anaphor trap): Tahngarth's Rage shape — the Aura's "it" refers to the
+    // ENCHANTED creature, not the Aura source, so it must NOT collapse to
+    // SourceIsAttacking. The ~745 SelfRef guard keeps it an honest Unrecognized gap.
+    let defs = parse_static_line_multi("Enchanted creature gets +3/+0 as long as it's attacking.");
+    assert!(!defs.is_empty(), "expected at least one static def");
+    for d in &defs {
+        assert_ne!(
+            d.condition,
+            Some(StaticCondition::SourceIsAttacking),
+            "Aura 'it' must not resolve to the source, got {:?}",
+            d.condition
+        );
+        assert_eq!(
+            d.condition,
+            Some(StaticCondition::Unrecognized {
+                text: "it's attacking".to_string(),
+            }),
+            "Aura combat-state gate must stay an honest Unrecognized gap, got {:?}",
+            d.condition
+        );
+    }
+}
+
+#[test]
+fn self_pronoun_combat_state_exact_match_excludes_attacking_alone() {
+    // NO-REGRESSION: the rewrite is exact-match. "it's attacking alone" must NOT
+    // hit the new arm (rest.trim() == "attacking alone" != the three literals);
+    // it stays routed to SourceAttackingAlone via its existing path. Exercised
+    // end-to-end via parse_static_line (rewrite_self_pronoun_subject is private to
+    // the anthem module), mirroring self_static_resolves_it_pronoun_subject_to_source.
+    let def = parse_static_line("This creature can't be blocked as long as it's attacking alone.")
+        .expect("self static def");
+    assert_eq!(def.condition, Some(StaticCondition::SourceAttackingAlone));
+
+    // And the bare "it's attacking" sibling DOES collapse to SourceIsAttacking,
+    // confirming the two literals route differently.
+    let buff = parse_static_line("This creature gets +1/+0 as long as it's attacking.")
+        .expect("self static def");
+    assert_eq!(buff.condition, Some(StaticCondition::SourceIsAttacking));
 }
 
 /// CR 702.16p: Benevolent Blessing — "Enchanted creature has protection from the
