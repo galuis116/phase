@@ -518,9 +518,14 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
 
     // --- "[Subject] enters/escapes with N [type] counter(s)" ---
     // CR 614.1c: Handles "enters with", "escapes with" (CR 702.138), and
-    // kicker-conditional "if was kicked, it enters with" (CR 702.33d).
+    // kicker-conditional "if was kicked, it enters with" (CR 702.33d). The
+    // bare-verb plural-subject forms ("Other creatures you control enter with …"
+    // — Gev, Scaled Scorch) use "enter"/"escape" rather than the singular
+    // "enters"/"escapes", so accept both at word boundaries.
     if (nom_primitives::scan_contains(&lower, "enters")
-        || nom_primitives::scan_contains(&lower, "escapes"))
+        || nom_primitives::scan_contains(&lower, "escapes")
+        || nom_primitives::scan_contains(&lower, "enter with")
+        || nom_primitives::scan_contains(&lower, "escape with"))
         && nom_primitives::scan_contains(&lower, "counter")
     {
         if let Some(def) = parse_enters_with_counters(&norm_lower, &text) {
@@ -2341,11 +2346,10 @@ fn parse_enters_with_counters(
     // CR 702.33d: kicker condition gates the replacement effect.
     let (kicker_condition, work_text) = extract_kicker_enters_condition(norm_lower);
 
-    // CR 702.138c: "escapes with" is semantically "enters with" gated on escape.
-    // Use nom take_until to scan for the "escapes with" phrase at word boundaries.
-    let is_escape = take_until::<_, _, OracleError<'_>>("escapes with")
-        .parse(work_text)
-        .is_ok();
+    // CR 702.138c: "escapes with" / plural-subject "escape with" is
+    // semantically "enters with" gated on escape.
+    let is_escape = nom_primitives::scan_contains(work_text, "escapes with")
+        || nom_primitives::scan_contains(work_text, "escape with");
 
     // Find "with [N] [type] counter" to extract count and counter type.
     // For escape, the "with" follows "escapes"; for enters, it follows "enters".
@@ -2695,9 +2699,16 @@ fn parse_enters_counter_for_each_suffix(after_counter: &str) -> Option<QuantityE
     let (rest, _) = opt(tag::<_, _, OracleError<'_>>("s"))
         .parse(after_counter)
         .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(" on it for each ")
-        .parse(rest)
-        .ok()?;
+    // CR 614.12: the self-referential recipient is "it" for a single permanent
+    // and "them" for a distributive subject (e.g. Gev, Scaled Scorch's "Other
+    // creatures you control enter with … counter on them for each …"). Both
+    // forms precede the per-each scaling clause identically.
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>(" on it for each "),
+        tag(" on them for each "),
+    ))
+    .parse(rest)
+    .ok()?;
     if let Ok((rest, qty)) = parse_for_each_convoked_creature_clause(rest) {
         if rest.trim().is_empty() {
             return Some(qty);
@@ -4070,6 +4081,14 @@ pub(crate) fn parse_oneshot_damage_replacement(norm_lower: &str) -> Option<Effec
         return Some(effect);
     }
 
+    // CR 614.9: the mirror shape — the ORIGINAL recipient is a chosen TARGET and
+    // the damage is redirected to the source (`~`) or its controller (`you`)
+    // (Daughter of Autumn, Vassal's Duty). Tried after the self-recipient form so
+    // the en-Kor "...dealt to ~ this turn..." case is claimed there first.
+    if let Some(effect) = parse_oneshot_next_n_damage_to_target_redirect(norm_lower) {
+        return Some(effect);
+    }
+
     // CR 614.1a + CR 514.2: "the next time ... this turn" — a replacement effect
     // ("instead", CR 614.1a) with a "this turn" duration that ends at cleanup
     // (CR 514.2). The one-opportunity consumption is CR 614.5 (see resolver).
@@ -4225,6 +4244,83 @@ fn parse_oneshot_next_n_damage_to_self_redirect(norm_lower: &str) -> Option<Effe
         redirect_amount: Some(PreventionAmount::Next(amount)),
         redirect_object_filter: Some(redirect_object_filter),
         recipient_object_filter: Some(TargetFilter::SelfRef),
+    })
+}
+
+/// CR 614.9: one-shot redirection whose ORIGINAL recipient is a CHOSEN TARGET and
+/// whose redirect destination is the source itself (`~` → `SourceObject`) or its
+/// controller (`you` → `Controller`): "the next N damage that would be dealt to
+/// <target> this turn is dealt to <~|you> instead" (Daughter of Autumn, Vassal's
+/// Duty). This is the mirror of `parse_oneshot_next_n_damage_to_self_redirect`
+/// with the recipient/redirect roles swapped — there the recipient is `~` and the
+/// redirect a chosen target; here the recipient is the chosen target and the
+/// redirect is `~`/`you`. `Controller`/`SourceObject` need no chosen redirect slot
+/// (see `chosen_redirect_object`), so `redirect_object_filter` is `None` and the
+/// targeting layer (CR 115.1) surfaces only the recipient slot.
+fn parse_oneshot_next_n_damage_to_target_redirect(norm_lower: &str) -> Option<Effect> {
+    let (rest, (_, amount, _)) = (
+        tag::<_, _, OracleError<'_>>("the next "),
+        nom_primitives::parse_number,
+        tag::<_, _, OracleError<'_>>(" damage that would be dealt to "),
+    )
+        .parse(norm_lower)
+        .ok()?;
+
+    // CR 115.1: the original recipient is a chosen object target ("target white
+    // creature", "target legendary creature you control", …). Capture the target
+    // phrase up to the " this turn is dealt to " spine.
+    let (rest, recipient_text) = take_until::<_, _, OracleError<'_>>(" this turn is dealt to ")
+        .parse(rest)
+        .ok()?;
+    // CR 115.1: the original recipient must be an explicit chosen target
+    // ("target white creature", "target legendary creature you control"). Gate on
+    // the `target` keyword via a combinator — the en-Kor `~` recipient (owned by
+    // the sibling function above) and bare scopes ("a creature") fail closed here.
+    if tag::<_, _, OracleError<'_>>("target ")
+        .parse(recipient_text)
+        .is_err()
+    {
+        return None;
+    }
+    let (recipient_filter, leftover) = crate::parser::oracle_target::parse_target(recipient_text);
+    if !leftover.trim().is_empty() {
+        return None;
+    }
+
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" this turn is dealt to ")
+        .parse(rest)
+        .ok()?;
+
+    // CR 614.9: redirect destination — `~` (the source object) or `you` (its
+    // controller). Both need no chosen redirect slot.
+    let (rest, redirect_to) = alt((
+        value(
+            DamageRedirectTarget::SourceObject,
+            tag::<_, _, OracleError<'_>>("~"),
+        ),
+        value(
+            DamageRedirectTarget::Controller,
+            tag::<_, _, OracleError<'_>>("you"),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" instead").parse(rest).ok()?;
+    let (rest, _) = opt(char::<_, OracleError<'_>>('.')).parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(Effect::CreateDamageReplacement {
+        source_filter: None,
+        combat_scope: None,
+        target_filter: None,
+        modification: None,
+        redirect_to: Some(redirect_to),
+        redirect_amount: Some(PreventionAmount::Next(amount)),
+        redirect_object_filter: None,
+        recipient_object_filter: Some(recipient_filter),
     })
 }
 
@@ -9979,6 +10075,27 @@ mod tests {
         assert_eq!(def.condition, Some(ReplacementCondition::CastViaEscape));
     }
 
+    #[test]
+    fn plural_subject_escape_with_counter_keeps_escape_condition() {
+        // CR 702.138c: plural-subject "escape with" is still escape-gated, not
+        // an unconditional battlefield-entry counter replacement.
+        let def = parse_replacement_line(
+            "Creatures you control escape with a +1/+1 counter on them.",
+            "Escape Anthem",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            } if *counter_type == CounterType::Plus1Plus1
+        ));
+        assert_eq!(def.condition, Some(ReplacementCondition::CastViaEscape));
+    }
+
     // ── Kicker-conditional enters-with-counters ──
 
     #[test]
@@ -13578,6 +13695,79 @@ mod snapshot_tests {
             "the next time you would draw a card this turn, draw two cards instead"
         )
         .is_none());
+    }
+
+    #[test]
+    fn oneshot_next_n_damage_to_target_redirected_to_source() {
+        // Daughter of Autumn — "{W}: The next 1 damage that would be dealt to
+        // target white creature this turn is dealt to ~ instead." The ORIGINAL
+        // recipient is a chosen target; the redirect destination is the source
+        // itself (`~` → SourceObject), which needs no redirect slot.
+        let effect = parse_oneshot_damage_replacement(
+            "the next 1 damage that would be dealt to target white creature this turn is dealt to ~ instead",
+        )
+        .expect("must parse redirect-target-to-source one-shot");
+        match effect {
+            Effect::CreateDamageReplacement {
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::SourceObject),
+                redirect_amount: Some(PreventionAmount::Next(1)),
+                // CR 115.1: the protected creature is a chosen original-recipient
+                // target (surfaces the recipient slot), not a broad scope.
+                recipient_object_filter: Some(TargetFilter::Typed(_)),
+                redirect_object_filter: None,
+                source_filter: None,
+                combat_scope: None,
+                target_filter: None,
+            } => {}
+            other => panic!("expected redirect-target->source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oneshot_next_n_damage_to_target_redirected_to_controller() {
+        // Vassal's Duty — "{1}: The next 1 damage that would be dealt to target
+        // legendary creature you control this turn is dealt to you instead." The
+        // redirect destination is the controller (`you` → Controller).
+        let effect = parse_oneshot_damage_replacement(
+            "the next 1 damage that would be dealt to target legendary creature you control this turn is dealt to you instead",
+        )
+        .expect("must parse redirect-target-to-controller one-shot");
+        match effect {
+            Effect::CreateDamageReplacement {
+                modification: None,
+                redirect_to: Some(DamageRedirectTarget::Controller),
+                redirect_amount: Some(PreventionAmount::Next(1)),
+                recipient_object_filter: Some(TargetFilter::Typed(_)),
+                redirect_object_filter: None,
+                source_filter: None,
+                combat_scope: None,
+                target_filter: None,
+            } => {}
+            other => panic!("expected redirect-target->controller, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oneshot_target_redirect_does_not_steal_en_kor_self_recipient() {
+        // The en-Kor self-recipient form ("...dealt to ~ this turn is dealt to
+        // target creature...") must still parse via its own sibling (recipient =
+        // SelfRef), NOT the new target-recipient arm.
+        let effect = parse_oneshot_damage_replacement(
+            "the next 1 damage that would be dealt to ~ this turn is dealt to target creature you control instead",
+        )
+        .expect("en-Kor self redirect must still parse");
+        assert!(
+            matches!(
+                effect,
+                Effect::CreateDamageReplacement {
+                    recipient_object_filter: Some(TargetFilter::SelfRef),
+                    redirect_to: Some(DamageRedirectTarget::ChosenObjectTarget),
+                    ..
+                }
+            ),
+            "en-Kor self-recipient form regressed: {effect:?}"
+        );
     }
 
     /// CR 614.1a + CR 614.6 + CR 121.6 + CR 701.20a: Abundance — the
