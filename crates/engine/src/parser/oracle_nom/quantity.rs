@@ -2668,7 +2668,7 @@ fn parse_devotion_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     ))
 }
 
-/// CR 700.x: Chroma — "the number of \<color\> mana symbols in the mana costs of
+/// CR 700.5: Chroma — "the number of \<color\> mana symbols in the mana costs of
 /// permanents you control" counts the same colored mana symbols among permanents
 /// you control as devotion, so it maps to the existing `Devotion` quantity
 /// (Outrage Shaman, Primalcrux). The graveyard-scope and single-object Chroma
@@ -6964,7 +6964,7 @@ mod tests {
         assert_eq!(rest, "");
     }
 
-    /// CR 700.x: the Chroma wording for devotion — "the number of <color> mana
+    /// CR 700.5: the Chroma wording for devotion — "the number of <color> mana
     /// symbols in the mana costs of permanents you control" (Outrage Shaman,
     /// Primalcrux) — maps to the same `Devotion` quantity as "your devotion to
     /// <color>".
