@@ -340,6 +340,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         QuantityRef::HandSize { .. }
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::GraveyardChroma { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
         | QuantityRef::ObjectCount { .. }
@@ -596,6 +597,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::GraveyardChroma { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
         | QuantityRef::PlayerCount { .. }
@@ -779,6 +781,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::GraveyardChroma { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
         | QuantityRef::PlayerCount { .. }
@@ -1486,6 +1489,17 @@ fn resolve_ref(
                 usize_to_i32_saturating(p.graveyard.len())
             })
         }
+        // CR 700.5-style Chroma over a graveyard population (Umbra Stalker): the
+        // number of `color` mana symbols among the mana costs of cards in the
+        // scoped player's graveyard. The graveyard sibling of `Devotion`.
+        QuantityRef::GraveyardChroma {
+            color,
+            player: scope,
+        } => resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
+            u32_to_i32_saturating(crate::game::devotion::count_chroma_in_graveyard(
+                state, p.id, *color,
+            ))
+        }),
         QuantityRef::LifeAboveStarting => {
             player.map_or(0, |p| p.life - state.format_config.starting_life)
         }

@@ -32,6 +32,35 @@ pub fn count_devotion(state: &GameState, player: PlayerId, colors: &[ManaColor])
     total
 }
 
+/// Count `color` mana symbols among the mana costs of cards in `player`'s
+/// graveyard — the "Chroma" wording's graveyard population (Umbra Stalker).
+///
+/// This is the graveyard sibling of [`count_devotion`]: devotion (CR 700.5) is
+/// defined over permanents you control, while this counts the same colored mana
+/// symbols among a player's graveyard cards. Hybrid symbols (e.g. {U/B}) count
+/// as one symbol toward each color they contain, mirroring `count_devotion`.
+pub fn count_chroma_in_graveyard(state: &GameState, player: PlayerId, color: ManaColor) -> u32 {
+    let Some(p) = state.players.iter().find(|p| p.id == player) else {
+        return 0;
+    };
+    let mut total = 0u32;
+    for &id in &p.graveyard {
+        let Some(obj) = state.objects.get(&id) else {
+            continue;
+        };
+        if let ManaCost::Cost { ref shards, .. } = obj.mana_cost {
+            // CR 700.5: each mana symbol is counted once; a hybrid symbol counts
+            // toward each of its colors but is still a single symbol.
+            for shard in shards {
+                if shard.contributes_to(color) {
+                    total += 1;
+                }
+            }
+        }
+    }
+    total
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,6 +91,54 @@ mod tests {
 
         assert_eq!(count_devotion(&state, PlayerId(0), &[ManaColor::Blue]), 2);
         assert_eq!(count_devotion(&state, PlayerId(0), &[ManaColor::Red]), 0);
+    }
+
+    #[test]
+    fn graveyard_chroma_counts_matching_shards_in_graveyard() {
+        let mut state = setup();
+        // Card with cost {B}{B} in the player's graveyard → 2 chroma to black;
+        // a permanent of the same cost on the battlefield must NOT contribute
+        // (this counts graveyard, not devotion).
+        let gy = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Graveyard Card".to_string(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&gy).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            generic: 1,
+        };
+        let bf = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Battlefield Card".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&bf).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+            ],
+            generic: 0,
+        };
+
+        assert_eq!(
+            count_chroma_in_graveyard(&state, PlayerId(0), ManaColor::Black),
+            2
+        );
+        assert_eq!(
+            count_chroma_in_graveyard(&state, PlayerId(0), ManaColor::Red),
+            0
+        );
+        // An opponent's graveyard is a separate population.
+        assert_eq!(
+            count_chroma_in_graveyard(&state, PlayerId(1), ManaColor::Black),
+            0
+        );
     }
 
     #[test]

@@ -3685,6 +3685,16 @@ pub enum QuantityRef {
     /// covers "an opponent['s] graveyard" thresholds (e.g. Merfolk Windrobber,
     /// See Double — "if an opponent has eight or more cards in their graveyard").
     GraveyardSize { player: PlayerScope },
+    /// CR 700.5-style Chroma over a graveyard population: the number of `color`
+    /// mana symbols among the mana costs of cards in `player`'s graveyard
+    /// (Umbra Stalker). The graveyard sibling of [`QuantityRef::Devotion`],
+    /// which CR 700.5 defines over permanents you control only — kept a distinct
+    /// variant for that categorical boundary, and parameterized by `player`
+    /// (whose graveyard) so it is not card-specific.
+    GraveyardChroma {
+        color: ManaColor,
+        player: PlayerScope,
+    },
     /// Controller's life total minus the format's starting life total.
     /// Used for "N or more life more than your starting life total" conditions.
     LifeAboveStarting,
