@@ -2183,6 +2183,65 @@ pub fn declare_attackers_with_bands(
         }
     }
 
+    // CR 508.1c + CR 109.5: Player-scoped temporary attack prohibitions
+    // (`GameRestriction::ProhibitActivity { activity: Attack { defended } }` —
+    // Willie Lumpkin: "that player can't attack you or permanents you control
+    // during their next turn"). Each restriction defends a specific player (the
+    // grant's controller per CR 109.5) against the affected players. Reuse the
+    // SAME `attack_target_matches_defended_scope` authority static `CantAttack`
+    // uses, so both seams share one scope matcher.
+    for (attacker_id, target) in attacks {
+        let Some(attacker_controller) = state.objects.get(attacker_id).map(|o| o.controller) else {
+            continue;
+        };
+        for restriction in &state.restrictions {
+            let crate::types::ability::GameRestriction::ProhibitActivity {
+                source,
+                affected_players,
+                activity: crate::types::ability::ProhibitedActivity::Attack { defended },
+                ..
+            } = restriction
+            else {
+                continue;
+            };
+            // CR 109.5: the protected player ("you") is the grant's controller.
+            let Some(protected) = state.objects.get(source).map(|o| o.controller) else {
+                continue;
+            };
+            // CR 101.2: only the affected players are prohibited. Targeted scopes
+            // are resolved to `SpecificPlayer` by `add_restriction` before this
+            // gate ever runs.
+            let attacker_is_affected = match affected_players {
+                crate::types::ability::RestrictionPlayerScope::AllPlayers => true,
+                crate::types::ability::RestrictionPlayerScope::SpecificPlayer(p) => {
+                    *p == attacker_controller
+                }
+                crate::types::ability::RestrictionPlayerScope::OpponentsOfSourceController => {
+                    attacker_controller != protected
+                }
+                crate::types::ability::RestrictionPlayerScope::TargetedPlayer
+                | crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer
+                | crate::types::ability::RestrictionPlayerScope::DefendingPlayer => false,
+            };
+            if !attacker_is_affected {
+                continue;
+            }
+            // CR 508.5: the defended planeswalker/battle compares on controller,
+            // so pass `protected` as both source-controller and source-owner.
+            if crate::game::restrictions::attack_target_matches_defended_scope(
+                state,
+                Some(target),
+                defended,
+                protected,
+                protected,
+            ) {
+                return Err(format!(
+                    "{attacker_id:?} can't attack {target:?} (CR 508.1c player-scoped attack prohibition)"
+                ));
+            }
+        }
+    }
+
     // CR 701.15b: a goaded creature must attack a player other than the goading
     // player *if able*. "Able" is measured against the players this creature
     // could legally be declared attacking: `get_valid_attack_targets` already
@@ -7920,6 +7979,79 @@ mod tests {
         assert!(
             state.layers_dirty.is_dirty(),
             "placing a creature already attacking must mark layers dirty"
+        );
+    }
+
+    /// CR 508.1b + CR 702.19a (Oviya, Automech Artisan): the static
+    /// "Each creature that's attacking one of your opponents has trample" must
+    /// parse to a `Continuous` static whose affected filter carries
+    /// `Attacking { defender: Some(Opponent) }` and grant Trample only to
+    /// creatures attacking the controller's opponent — not to a creature that
+    /// isn't attacking. Drives the REAL static parser (`parse_static_line`) →
+    /// `evaluate_layers`.
+    ///
+    /// REVERT-PROOF: reverting the `parse_attacking_defender_suffix` "that's
+    /// attacking one of your opponents" extension leaves the static line at
+    /// `Effect::Unimplemented` (no `StaticDefinition` produced), so
+    /// `parse_static_line` returns `None`, the `.expect` below panics, and the
+    /// grant never reaches the attacker.
+    #[test]
+    fn oviya_grants_trample_only_to_creatures_attacking_an_opponent() {
+        use crate::game::layers::evaluate_layers;
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+
+        // Oviya on the battlefield, controlled by PlayerId(0). Static parsed
+        // from its printed Oracle text.
+        let oviya = create_creature(&mut state, PlayerId(0), "Oviya, Automech Artisan", 2, 2);
+        let def =
+            parse_static_line("Each creature that's attacking one of your opponents has trample.")
+                .expect("Oviya static line must parse to a StaticDefinition");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![FilterProp::Attacking {
+                    defender: Some(ControllerRef::Opponent),
+                }]
+            ))),
+            "affected filter must scope to creatures attacking an opponent"
+        );
+        state
+            .objects
+            .get_mut(&oviya)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        // An attacker controlled by PlayerId(0) attacking the opponent.
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        // A second creature that is NOT attacking — the negative control.
+        let idle = create_creature(&mut state, PlayerId(0), "Wall", 0, 4);
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        assert!(
+            state
+                .objects
+                .get(&attacker)
+                .unwrap()
+                .has_keyword(&Keyword::Trample),
+            "a creature attacking the controller's opponent must gain trample"
+        );
+        assert!(
+            !state
+                .objects
+                .get(&idle)
+                .unwrap()
+                .has_keyword(&Keyword::Trample),
+            "a creature that isn't attacking must NOT gain trample"
         );
     }
 }

@@ -1528,6 +1528,14 @@ pub enum ManaSpendRestriction {
     /// accepts the legacy bare-`Zone` serialized form for backward compatibility,
     /// mapping it to the inclusion reading.
     SpellFromZone(ZoneSpend),
+    /// CR 106.6 + CR 116.2m + CR 709.5e: "Spend this mana only to unlock
+    /// [a ]door[s]" — the special-action half of a spend restriction. A leaf of
+    /// the [`ManaSpendRestriction::Any`] disjunction (Smoky Lounge: "cast Room
+    /// spells and unlock doors"). Lowered to
+    /// [`ManaRestriction::OnlyForSpecialAction(SpecialAction::UnlockDoor)`](super::mana::ManaRestriction::OnlyForSpecialAction),
+    /// enforced when a Room's CR 709.5e unlock cost is paid through
+    /// [`PaymentContext::SpecialAction`](super::mana::PaymentContext::SpecialAction).
+    UnlockDoor,
     /// CR 106.6: Disjunction of spend restrictions ("cast X or Y or activate Z").
     /// Lowered to `ManaRestriction::OnlyForAny`.
     Any(Vec<ManaSpendRestriction>),
@@ -1626,6 +1634,14 @@ pub enum ProhibitedActivity {
         exemption: ActivationExemption,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         only_tag: Option<AbilityTag>,
+    },
+    /// CR 508.1c: A temporary effect prohibits an affected player from declaring
+    /// attacks against the defended scope ("that player can't attack you [or your
+    /// permanents/planeswalkers]"). The scope rides the shared `AttackTargetFilter`
+    /// so the declare-attackers gate reuses the same defended-scope matcher as
+    /// static `CantAttack` restrictions.
+    Attack {
+        defended: crate::types::triggers::AttackTargetFilter,
     },
 }
 
@@ -1867,7 +1883,7 @@ pub enum CastingPermission {
 }
 
 /// CR 609.4b: Permission modifying how mana may be spent to pay a cost.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaSpendPermission {
     /// Mana may be spent as though it were mana of any type or color for this
     /// payment. This preserves the Oracle distinction without changing the
@@ -3292,6 +3308,16 @@ pub enum TargetFilter {
     TriggeringPlayer,
     /// CR 603.7c: Resolves to the source object of the triggering event.
     TriggeringSource,
+    /// CR 603.7c + CR 109.4 + CR 110.2: Resolves to the *controller* of the
+    /// triggering event's source object — the player-level counterpart of
+    /// `TriggeringSource`, mirroring how `TriggeringSpellController` is the
+    /// controller of `StackSpell`. Used by "the attacking player" / "its
+    /// controller" anaphors on `DamageReceived` triggers where the wanted
+    /// player is the controller of the creature that dealt combat damage, not
+    /// the damaged player (`TriggeringPlayer`). Powers Contested Game Ball
+    /// ("Whenever you're dealt combat damage, the attacking player gains
+    /// control of this artifact and untaps it.").
+    TriggeringSourceController,
     /// Resolves to the same target(s) as the parent ability.
     /// Used for anaphoric "it"/"that creature"/"that player" in compound effects
     /// (e.g., "tap target creature and put a stun counter on it").
@@ -9320,8 +9346,21 @@ pub enum Effect {
     },
     /// CR 701.57a: Discover N — exile from top until nonland with MV ≤ N,
     /// cast free or put to hand, rest to bottom in random order.
+    ///
+    /// `player` is the player who performs the discover. CR 701.57a is written
+    /// from the controller's perspective ("exile cards from the top of *your*
+    /// library"), so the default is `TargetFilter::Controller` and existing JSON
+    /// (which omits the field) keeps the controller-discovers reading. Cards like
+    /// Zoyowa's Justice ("Then *that player* discovers X") redirect the action to
+    /// another player by carrying a player `TargetFilter` here; the resolver maps
+    /// it through `resolve_player_for_context_ref`.
     Discover {
         mana_value_limit: QuantityExpr,
+        #[serde(
+            default = "default_target_filter_controller",
+            skip_serializing_if = "is_target_filter_controller"
+        )]
+        player: TargetFilter,
     },
     /// Heist — designed-for-digital (MTG Arena) keyword action. NOT in the
     /// Comprehensive Rules; operates per the Arena programmed rules (see
@@ -9665,10 +9704,25 @@ pub enum Effect {
     Endure {
         amount: u32,
     },
-    /// CR 701.68a: Blight N as an effect — the controller of this ability puts
-    /// N -1/-1 counters on a creature they control. Non-targeted controller choice.
+    /// CR 701.68a: Blight N as an effect — the blighting player puts N -1/-1
+    /// counters on a creature *they* control. Non-targeted: the player choosing
+    /// which of their own creatures to blight is a choice, not a target
+    /// (CR 701.68a — hexproof/shroud are irrelevant).
+    ///
+    /// `player` is the player instructed to blight. The default
+    /// `TargetFilter::Controller` keeps the common "you blight" reading and lets
+    /// existing JSON (which omits the field) deserialize unchanged. Cards like
+    /// Champion of the Weird ("Target opponent blights 2") redirect the action to
+    /// a chosen player by carrying a player `TargetFilter` here; the resolver maps
+    /// it through `resolve_player_for_context_ref` and scopes eligible creatures
+    /// to that player.
     BlightEffect {
         count: u32,
+        #[serde(
+            default = "default_target_filter_controller",
+            skip_serializing_if = "is_target_filter_controller"
+        )]
+        player: TargetFilter,
     },
     /// Alchemy digital-only: randomly pick card(s) from library matching filter,
     /// put to destination (default hand). No reveal, no shuffle, no player choice.
@@ -10667,7 +10721,15 @@ impl Effect {
             // CR 119.3: `GainLife.player` is a TargetFilter. `extract_target_filter_from_effect`
             // drops context-refs (Controller) via `.filter(|t| !t.is_context_ref())`, so the
             // default "you gain life" still surfaces no target slot.
-            | Effect::GainLife { player, .. } => Some(player),
+            | Effect::GainLife { player, .. }
+            // CR 701.57a: Discover's discovering player. CR 701.68a: Blight's
+            // blighting player. Both default to `TargetFilter::Controller` (a
+            // context ref), so bare "discover N" / "blight N" surface no target
+            // slot; "Target opponent blights N" surfaces the opponent as a real
+            // target via the same `is_context_ref()` filter the other player-axis
+            // effects use.
+            | Effect::Discover { player, .. }
+            | Effect::BlightEffect { player, .. } => Some(player),
 
             // CR 115.1a + CR 601.2c: "Create a [Role/Aura] token attached to
             // target creature" targets its host — surface `attach_to` as the
@@ -10820,7 +10882,6 @@ impl Effect {
             | Effect::ChooseFromZone { .. }
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::GainEnergy { .. }
-            | Effect::Discover { .. }
             | Effect::HeistExile
             | Effect::Cascade
             | Effect::Ripple { .. }
@@ -10869,10 +10930,6 @@ impl Effect {
             | Effect::Forage
             | Effect::CollectEvidence { .. }
             | Effect::Endure { .. }
-            // CR 701.68a: BlightEffect is a non-targeted controller choice — no
-            // targeting slot. The chosen creature is picked at resolution time
-            // via WaitingFor::EffectZoneChoice, not declared as a target.
-            | Effect::BlightEffect { .. }
             | Effect::ExploreAll { .. }
             | Effect::Seek { .. }
             | Effect::SetDayNight { .. }
@@ -12200,6 +12257,8 @@ pub enum AbilityTag {
     Backup,
     /// CR 602.5b + CR 602.1: This ability originated from a Power-up keyword definition.
     PowerUp,
+    /// CR 702.6a: This ability originated from an Equip keyword definition.
+    Equip,
 }
 
 impl AbilityTag {
@@ -12216,6 +12275,7 @@ impl AbilityTag {
             AbilityTag::Cycling => "cycling",
             AbilityTag::Backup => "backup",
             AbilityTag::PowerUp => "power-up",
+            AbilityTag::Equip => "equip",
         }
     }
 }
@@ -12812,11 +12872,13 @@ impl SubAbilityLink {
 /// `repeat_for` (a fixed `QuantityExpr` count) — this predicate decides
 /// per-iteration whether to re-follow the resolving ability's instructions.
 ///
-/// Currently a single-variant enum: only the controller-decision form ("you
-/// may repeat this process any number of times") is modeled. The game-state
-/// predicate form ("if you do, repeat this process" — Primal Surge) is a
-/// separately-tracked deferred unit; it will add a `While(...)` variant once
-/// the optional-put pause semantics it depends on are designed.
+/// Three forms are modeled: the controller-decision form ("you may repeat this
+/// process any number of times", `ControllerChoice`), the stop-predicate form
+/// ("repeat this process until …", `UntilStopConditions`, Tainted Pact), and
+/// the game-state-predicate form ("[if condition,] repeat this process
+/// [once]", `WhileCondition`). The optional-put pause semantics that the
+/// `WhileCondition` loop depends on are shared with `UntilStopConditions` via
+/// the `pending_repeat_until` resume path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum RepeatContinuation {
@@ -12832,6 +12894,22 @@ pub enum RepeatContinuation {
     UntilStopConditions {
         stop_on_put_to_hand: bool,
         stop_on_duplicate_exiled_names: bool,
+    },
+    /// CR 608.2c: "[if <condition>,] repeat this process [once]" — after each
+    /// iteration fully resolves, the engine re-evaluates `condition` against the
+    /// just-resolved game state (the same `evaluate_condition` path used by
+    /// sub-ability gates) and auto-repeats while it holds. `condition` references
+    /// the iteration's freshly-resolved state (e.g. `RevealedHasCardType` reads
+    /// the card moved this iteration via `last_zone_changed_ids`; `QuantityCheck`
+    /// reads current battlefield counts). `max_iterations` caps the number of
+    /// *additional* iterations beyond the first ("once" → `Some(1)`, bare →
+    /// `None`). Sin, Spira's Punishment ("if the exiled card is a land card,
+    /// repeat this process"); Claim Jumper ("if an opponent controls more lands
+    /// than you, repeat this process once").
+    WhileCondition {
+        condition: Box<AbilityCondition>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_iterations: Option<u32>,
     },
 }
 
@@ -13322,6 +13400,11 @@ pub enum AbilityCondition {
     /// CR 500.8 + CR 506.1 + CR 608.2c: "if it's the first combat phase of the turn".
     /// Gates a follow-up effect on whether this is the first combat phase started this turn.
     FirstCombatPhaseOfTurn,
+    /// CR 500.8 + CR 513.1 + CR 608.2c: "if it's the first end step of the turn".
+    /// Gates a follow-up effect on whether this is the first end step started this
+    /// turn (Y'shtola Rhul's additional-end-step loop guard). End-step sibling of
+    /// `FirstCombatPhaseOfTurn`; both read a per-turn phase-occurrence counter.
+    FirstEndStepOfTurn,
     /// CR 608.2c: "If a [noun] was [verb]ed this way" — sub_ability executes only if
     /// the parent effect produced a zone change involving an object matching the filter.
     /// Evaluated by checking `state.last_zone_changed_ids` against the filter.

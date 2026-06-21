@@ -96,7 +96,21 @@ fn runtime_granted_graveyard_activated_abilities(
         .into_iter()
         .filter(|keyword| !obj.base_keywords.iter().any(|printed| printed == keyword))
         .filter_map(|keyword| {
-            crate::database::synthesis::graveyard_activated_ability_for_keyword(&keyword)
+            // CR 702.128a / CR 702.129a: Embalm / Eternalize granted with a
+            // self-cost ("the embalm cost is equal to its mana cost") carry
+            // `ManaCost::SelfManaCost`; concretize it to the card's mana cost
+            // before synthesizing the activated ability (the activated-ability
+            // payment path would otherwise treat SelfManaCost as free).
+            let keyword = super::keywords::resolve_self_cost_graveyard_activated_keyword(
+                state, source_id, &keyword,
+            );
+            crate::database::synthesis::graveyard_activated_ability_for_keyword(&keyword).or_else(
+                || {
+                    crate::database::embalm_eternalize::embalm_eternalize_ability_for_keyword(
+                        &keyword,
+                    )
+                },
+            )
         })
         .collect()
 }
@@ -663,7 +677,7 @@ fn graveyard_spell_objects_available_to_cast(
         // Cards in graveyard with graveyard-cast keywords. Escape and Retrace
         // must have enough eligible non-mana additional-cost material available.
         if has_effective_graveyard_cast_keyword(state, obj_id, obj)
-            && (has_harmonize_keyword(obj)
+            && (has_harmonize_keyword(state, obj_id)
                 || has_flashback_keyword(state, obj_id)
                 || has_aftermath_keyword(state, obj_id)
                 || has_disturb_keyword(state, obj_id)
@@ -752,11 +766,11 @@ fn can_pay_escape_additional_cost(
     residual.is_payable(state, player, escape_obj_id)
 }
 
-/// CR 702.180: Check if an object has the Harmonize keyword.
-fn has_harmonize_keyword(obj: &crate::game::game_object::GameObject) -> bool {
-    obj.keywords
-        .iter()
-        .any(|k| matches!(k, crate::types::keywords::Keyword::Harmonize(_)))
+/// CR 702.180: Check if an object has the Harmonize keyword. Off-zone-aware so a
+/// granted graveyard harmonize (Songcrafter Mage) is recognized, mirroring
+/// `has_flashback_keyword`.
+fn has_harmonize_keyword(state: &GameState, object_id: ObjectId) -> bool {
+    super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Harmonize)
 }
 
 /// CR 702.34: Check if an object has the Flashback keyword.
@@ -939,15 +953,14 @@ pub fn handle_foretell(
 fn has_effective_graveyard_cast_keyword(
     state: &GameState,
     object_id: ObjectId,
-    obj: &crate::game::game_object::GameObject,
+    // Retained for call-site symmetry with the surrounding graveyard scan; all
+    // keyword checks below are now off-zone-aware and key on `object_id` only.
+    _obj: &crate::game::game_object::GameObject,
 ) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Escape)
         || has_retrace_keyword(state, object_id)
         || jumpstart_castable_from_graveyard(state, object_id)
-        || obj
-            .keywords
-            .iter()
-            .any(|k| matches!(k, crate::types::keywords::Keyword::Harmonize(_)))
+        || has_harmonize_keyword(state, object_id)
         || has_flashback_keyword(state, object_id)
         || has_aftermath_keyword(state, object_id)
         || super::keywords::effective_disturb_cost(state, object_id).is_some()
@@ -1819,6 +1832,13 @@ pub(super) fn player_can_spend_as_any_color_for_optional_spell(
                     )
                 })
             })
+        // CR 609.4b: A battlefield `StaticMode::ExileCastPermission` static may
+        // grant "mana of any type can be spent to cast those spells" (Azula,
+        // Cunning Usurper) for the cards in its exile pool. Unlike the per-card
+        // `PlayFromExile` grant above, the concession lives on the static, so it
+        // is re-derived from the source's pool + filter at spend time.
+        || source_id
+            .is_some_and(|id| exile_static_permission_grants_any_color(state, player, id))
 }
 
 pub(super) fn player_can_spend_as_any_color_for_payment(
@@ -1935,6 +1955,13 @@ struct ExilePermissionSource<'a> {
     pool: ExileCardPool,
     /// CR 117.1c: When the permission functions — `AnyTime` or `YourTurnOnly`.
     timing: ExileCastTiming,
+    /// CR 609.4b: Optional any-type-mana spend concession riding alongside the
+    /// permission (Azula, Cunning Usurper). `Some(AnyTypeOrColor)` lets the
+    /// controller spend mana of any type to cast a spell offered by this source.
+    mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
+    /// CR 601.3b + CR 702.8a: When `true`, spells cast via this permission may
+    /// be cast as though they had flash (Azula, Cunning Usurper).
+    grants_flash: bool,
 }
 
 /// CR 113.6b + CR 406.6: The set of exiled object ids this source's permission
@@ -2001,6 +2028,8 @@ fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePer
                     cost,
                     pool,
                     timing,
+                    mana_spend_permission,
+                    grants_flash,
                 } => definition
                     .affected
                     .as_ref()
@@ -2012,6 +2041,8 @@ fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePer
                         play_mode,
                         pool,
                         timing,
+                        mana_spend_permission,
+                        grants_flash,
                     }),
                 _ => None,
             })
@@ -2138,6 +2169,75 @@ pub(crate) fn exile_cast_permission_source(
         }
         Some((source.source_id, source.frequency, source.cost))
     })
+}
+
+/// CR 601.2a + CR 113.6b: Find the full `ExileCastPermission` source authorizing
+/// `player` to cast `exiled_id`, including its payment/timing concessions
+/// (`mana_spend_permission`, `grants_flash`). Shares the gating logic with
+/// `exile_cast_permission_source` (frequency slot, your-turn timing, pool
+/// membership, affected filter) but surfaces the concession fields so the
+/// any-type-mana and flash wiring can consult them. Returns `None` when no
+/// functioning static authorizes the cast.
+fn exile_cast_permission_source_full(
+    state: &GameState,
+    player: PlayerId,
+    exiled_id: ObjectId,
+) -> Option<ExilePermissionSource<'_>> {
+    let obj = state.objects.get(&exiled_id)?;
+    if !exile_object_can_enter_cast_path(obj) {
+        return None;
+    }
+    if state.cards_exiled_with_source_this_turn.is_empty() && state.exile_links.is_empty() {
+        return None;
+    }
+    let sources = exile_permission_sources(state, player);
+    sources.into_iter().find(|source| {
+        if !exile_cast_frequency_available(state, source.source_id, source.frequency) {
+            return false;
+        }
+        if !exile_permission_timing_active(state, source, player) {
+            return false;
+        }
+        let pool = exile_permission_pool(state, source);
+        if !pool.contains(&exiled_id) {
+            return false;
+        }
+        let ctx =
+            super::filter::FilterContext::from_source_with_controller(source.source_id, player);
+        super::filter::matches_target_filter(state, exiled_id, source.filter, &ctx)
+    })
+}
+
+/// CR 609.4b: True when an `ExileCastPermission` static granting "mana of any
+/// type can be spent to cast those spells" (Azula, Cunning Usurper) authorizes
+/// `player` to cast `exiled_id`. Consulted by
+/// `player_can_spend_as_any_color_for_spell` so the any-type-mana concession is
+/// scoped to spells offered by that static, mirroring the per-card
+/// `CastingPermission::PlayFromExile.mana_spend_permission` path.
+pub(crate) fn exile_static_permission_grants_any_color(
+    state: &GameState,
+    player: PlayerId,
+    exiled_id: ObjectId,
+) -> bool {
+    exile_cast_permission_source_full(state, player, exiled_id).is_some_and(|source| {
+        matches!(
+            source.mana_spend_permission,
+            Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor)
+        )
+    })
+}
+
+/// CR 601.3b + CR 702.8a: True when an `ExileCastPermission` static granting
+/// "you may cast them as though they had flash" (Azula, Cunning Usurper)
+/// authorizes `player` to cast `exiled_id`. Consulted by the cast-timing check
+/// in `prepare_spell_cast` so the spell may be cast at instant speed.
+pub(crate) fn exile_static_permission_grants_flash(
+    state: &GameState,
+    player: PlayerId,
+    exiled_id: ObjectId,
+) -> bool {
+    exile_cast_permission_source_full(state, player, exiled_id)
+        .is_some_and(|source| source.grants_flash)
 }
 
 fn graveyard_permission_sources(
@@ -3025,11 +3125,9 @@ fn casting_variant_candidates(
         if has_retrace_keyword(state, object_id) {
             candidates.push(CastingVariant::Retrace);
         }
-        if obj
-            .keywords
-            .iter()
-            .any(|k| matches!(k, crate::types::keywords::Keyword::Harmonize(_)))
-        {
+        // CR 702.180a: Harmonize may be printed or granted to a graveyard card
+        // (Songcrafter Mage), so query the effective off-zone keyword.
+        if has_harmonize_keyword(state, object_id) {
             candidates.push(CastingVariant::Harmonize);
         }
         // CR 702.187b: Mayhem is available only while the card was discarded this
@@ -3558,13 +3656,13 @@ fn prepare_spell_cast_with_variant_override_inner(
         None
     };
 
-    // Harmonize: use harmonize mana cost when casting from graveyard.
-    // Tap cost reduction is handled in casting_costs::pay_and_push_adventure.
+    // CR 702.180a: Harmonize — use the harmonize mana cost when casting from
+    // graveyard. Off-zone-aware and `SelfManaCost`-resolving so a granted
+    // harmonize whose cost equals the card's mana cost (Songcrafter Mage) is paid
+    // correctly. Tap cost reduction is handled in
+    // casting_costs::pay_and_push_adventure.
     let harmonize_cost = if obj.zone == Zone::Graveyard {
-        obj.keywords.iter().find_map(|k| match k {
-            crate::types::keywords::Keyword::Harmonize(cost) => Some(cost.clone()),
-            _ => None,
-        })
+        super::keywords::effective_harmonize_cost(state, object_id)
     } else {
         None
     };
@@ -4129,8 +4227,13 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(surge_cost)
             .unwrap_or_else(|| obj.mana_cost.clone())
     };
-    let has_granted_flash =
-        effective_spell_keyword_kinds(state, player, object_id).contains(&KeywordKind::Flash);
+    // CR 601.3b + CR 702.8a: A spell has effective flash from its own keywords
+    // OR from a battlefield `StaticMode::ExileCastPermission` static granting
+    // "you may cast them as though they had flash" (Azula, Cunning Usurper) for
+    // the cards in its exile pool.
+    let has_granted_flash = effective_spell_keyword_kinds(state, player, object_id)
+        .contains(&KeywordKind::Flash)
+        || exile_static_permission_grants_flash(state, player, object_id);
     let cast_outside_sorcery_timing = !restrictions::is_sorcery_speed_window(state, player);
     // CR 304.1: Instants can be cast any time a player has priority.
     // CR 301.1 / CR 306.1: Artifacts and planeswalkers are cast at sorcery speed.
@@ -10637,9 +10740,53 @@ pub(super) fn pay_effect_mana_cost(
     cost: &crate::types::mana::ManaCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    pay_non_cast_mana_cost(
+        state,
+        player,
+        source_id,
+        cost,
+        PaymentContext::Effect,
+        events,
+    )
+}
+
+/// CR 116.2m + CR 709.5e: Pay a special action's mana cost (e.g. a Room's unlock
+/// cost) through a `PaymentContext::SpecialAction`, so CR 106.6 special-action
+/// spend restrictions (Smoky Lounge's "spend this mana only to … unlock doors")
+/// gate which restricted mana is eligible. Routes through the same single
+/// authority as effect-time payments, differing only in the payment context.
+pub(super) fn pay_special_action_mana_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    action: crate::types::mana::SpecialAction,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    pay_non_cast_mana_cost(
+        state,
+        player,
+        source_id,
+        cost,
+        PaymentContext::SpecialAction(action),
+        events,
+    )
+}
+
+/// CR 106.6: Single-authority core for non-cast, non-activation mana payments
+/// (effect-resolution costs and special-action costs). Auto-taps sources,
+/// validates affordability, and executes the spend with the given payment
+/// context so restriction gating routes through the correct rules category.
+fn pay_non_cast_mana_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    ctx: PaymentContext<'_>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
     super::layers::flush_layers(state);
 
-    let effect_ctx = PaymentContext::Effect;
     let events_before = events.len();
     super::casting_costs::auto_tap_mana_sources_with_context(
         state,
@@ -10647,7 +10794,7 @@ pub(super) fn pay_effect_mana_cost(
         cost,
         events,
         Some(source_id),
-        Some(&effect_ctx),
+        Some(&ctx),
     );
     // CR 605.4a: Resolve coupled `TapsForMana` triggered mana abilities inline
     // so their bonus mana is in the pool before the affordability check.
@@ -10663,12 +10810,7 @@ pub(super) fn pay_effect_mana_cost(
             .iter()
             .find(|p| p.id == player)
             .expect("player exists");
-        if !mana_payment::can_pay_for_spell(
-            &player_data.mana_pool,
-            cost,
-            Some(&effect_ctx),
-            permissions,
-        ) {
+        if !mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, Some(&ctx), permissions) {
             return Err(EngineError::ActionNotAllowed(
                 "Cannot pay mana cost".to_string(),
             ));
@@ -10684,7 +10826,7 @@ pub(super) fn pay_effect_mana_cost(
         &mut player_data.mana_pool,
         cost,
         None,
-        Some(&effect_ctx),
+        Some(&ctx),
         permissions.any_color,
         None,
         permissions.life_colors,
@@ -23863,6 +24005,174 @@ mod tests {
             encore.1.activation_zone,
             Some(Zone::Graveyard),
             "synthesized Encore ability must function only from the graveyard"
+        );
+    }
+
+    /// CR 702.180a + CR 604.1: Harmonize granted to a graveyard sorcery with a
+    /// self-cost (Songcrafter Mage: "gains harmonize until end of turn. Its
+    /// harmonize cost is equal to its mana cost.") must make the card castable
+    /// from the graveyard, and the effective harmonize cost must resolve to the
+    /// card's OWN mana cost. Discriminating: reverting the off-zone-aware
+    /// `has_harmonize_keyword` flips `can_cast_object_now` to false (granted
+    /// keyword unseen); reverting the `effective_harmonize_cost` SelfManaCost
+    /// resolution makes the cost wrong (free instead of the card's mana cost).
+    #[test]
+    fn granted_self_cost_harmonize_is_castable_at_card_mana_cost() {
+        let mut state = setup_game_at_main_phase();
+
+        let grantor = create_object(
+            &mut state,
+            CardId(9300),
+            PlayerId(0),
+            "Songcrafter Mage".to_string(),
+            Zone::Battlefield,
+        );
+        let card_cost = ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Blue],
+        };
+        let spell = create_object(
+            &mut state,
+            CardId(9301),
+            PlayerId(0),
+            "Graveyard Sorcery".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = card_cost.clone();
+            let ability = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            );
+            Arc::make_mut(&mut obj.abilities).push(ability.clone());
+            Arc::make_mut(&mut obj.base_abilities).push(ability);
+        }
+
+        // Sanity: with no grant, the card is not castable from the graveyard.
+        assert!(
+            !can_cast_object_now(&state, PlayerId(0), spell),
+            "card must not be graveyard-castable before the harmonize grant"
+        );
+
+        // Grant harmonize with cost = its mana cost — exactly the parser output.
+        state.add_transient_continuous_effect(
+            grantor,
+            PlayerId(0),
+            crate::types::ability::Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: spell },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Harmonize(ManaCost::SelfManaCost),
+            }],
+            None,
+        );
+
+        // The effective harmonize cost resolves to the card's own mana cost.
+        assert_eq!(
+            super::super::keywords::effective_harmonize_cost(&state, spell),
+            Some(card_cost.clone()),
+            "granted harmonize cost must equal the card's mana cost"
+        );
+
+        // Enough mana for {2}{U}; the card must now be castable from graveyard.
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 3);
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), spell),
+            "granted self-cost harmonize must be castable from the graveyard"
+        );
+        assert!(
+            casting_variant_candidates(&state, PlayerId(0), spell)
+                .contains(&CastingVariant::Harmonize),
+            "granted harmonize must surface the Harmonize casting variant"
+        );
+    }
+
+    /// CR 702.128a + CR 604.1: Embalm granted to a graveyard creature with a
+    /// self-cost (Cursecloth Wrappings: "gains embalm until end of turn. The
+    /// embalm cost is equal to its mana cost.") must surface the embalm activated
+    /// ability from the graveyard, with the mana sub-cost concretized to the
+    /// card's OWN mana cost. Discriminating: before the grant no embalm ability
+    /// exists; reverting the embalm-synthesis wiring removes the granted ability;
+    /// reverting the SelfManaCost concretization leaves the ability free (the
+    /// activated-ability payment path treats SelfManaCost as no cost).
+    #[test]
+    fn granted_self_cost_embalm_surfaces_graveyard_ability_at_card_mana_cost() {
+        let mut state = setup_game_at_main_phase();
+
+        let grantor = create_object(
+            &mut state,
+            CardId(9400),
+            PlayerId(0),
+            "Cursecloth Wrappings".to_string(),
+            Zone::Battlefield,
+        );
+        let card_cost = ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::White],
+        };
+        let creature = create_object(
+            &mut state,
+            CardId(9401),
+            PlayerId(0),
+            "Graveyard Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = card_cost.clone();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+        }
+
+        // Sanity: no embalm ability before the grant.
+        assert!(
+            !activated_ability_definitions(&state, creature)
+                .iter()
+                .any(|(_, a)| matches!(&*a.effect, Effect::CopyTokenOf { .. })),
+            "no embalm ability should exist before the grant"
+        );
+
+        state.add_transient_continuous_effect(
+            grantor,
+            PlayerId(0),
+            crate::types::ability::Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: creature },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Embalm(crate::types::keywords::EmbalmCost::Mana(
+                    ManaCost::SelfManaCost,
+                )),
+            }],
+            None,
+        );
+
+        let abilities = activated_ability_definitions(&state, creature);
+        let (_, embalm) = abilities
+            .iter()
+            .find(|(_, a)| matches!(&*a.effect, Effect::CopyTokenOf { .. }))
+            .expect("granted embalm must surface a graveyard activated ability");
+        assert_eq!(
+            embalm.activation_zone,
+            Some(Zone::Graveyard),
+            "embalm ability must function only from the graveyard"
+        );
+        // The mana sub-cost must be the card's concrete mana cost, NOT a free
+        // SelfManaCost placeholder. The activation cost is a Composite of the mana
+        // cost + the self-exile; assert the card's mana cost appears in it.
+        let Some(AbilityCost::Composite { costs }) = &embalm.cost else {
+            panic!("embalm cost must be a Composite, got {:?}", embalm.cost);
+        };
+        assert!(
+            costs
+                .iter()
+                .any(|c| matches!(c, AbilityCost::Mana { cost } if *cost == card_cost)),
+            "embalm mana sub-cost must equal the card's mana cost, got {costs:?}"
         );
     }
 
@@ -43345,6 +43655,8 @@ mod tests {
             cost,
             pool,
             timing,
+            mana_spend_permission: None,
+            grants_flash: false,
         })
         .affected(affected);
         let obj = state.objects.get_mut(&source).unwrap();
@@ -43899,6 +44211,152 @@ mod tests {
         let obj = state.objects.get(&land).unwrap();
         assert_eq!(obj.zone, Zone::Battlefield);
         assert_eq!(obj.played_from_zone, Some(Zone::Exile));
+    }
+
+    /// Build a persistent, your-turn-only, Cast-mode `ExileCastPermission`
+    /// source carrying the Azula, Cunning Usurper concessions: any-type-mana
+    /// spend (CR 609.4b) and flash-grant (CR 702.8a).
+    fn add_azula_exile_cast_source(state: &mut GameState, player: PlayerId) -> ObjectId {
+        use crate::types::ability::StaticDefinition;
+        let card_id = crate::types::identifiers::CardId(state.next_object_id);
+        let source = create_object(
+            state,
+            card_id,
+            player,
+            "Azula, Cunning Usurper".to_string(),
+            Zone::Battlefield,
+        );
+        let def = StaticDefinition::new(StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Cast,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::YourTurnOnly,
+            mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+            grants_flash: true,
+        })
+        .affected(TargetFilter::Any);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+        source
+    }
+
+    /// Add a single-blue sorcery linked to `source_id` in the persistent
+    /// `exile_links` pool. Returns the exiled spell's object id.
+    fn add_linked_blue_sorcery(
+        state: &mut GameState,
+        player: PlayerId,
+        source_id: ObjectId,
+        name: &str,
+    ) -> ObjectId {
+        let card_id = crate::types::identifiers::CardId(state.next_object_id);
+        let object_id = create_object(state, card_id, player, name.to_string(), Zone::Exile);
+        {
+            let obj = state.objects.get_mut(&object_id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Sorcery];
+            // Single blue pip — provably uncastable from a red-only pool unless
+            // the any-type-mana concession is in force.
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 0,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+        link_exiled_to_source(state, object_id, source_id);
+        object_id
+    }
+
+    /// CR 609.4b: Azula's "Mana of any type can be spent to cast those spells"
+    /// concession lets the controller pay a blue sorcery's {U} from a red-only
+    /// pool. DISCRIMINATING: if `mana_spend_permission` is reverted to `None`,
+    /// `player_can_spend_as_any_color_for_spell` flips to false and
+    /// `can_pay_cost_after_auto_tap` fails — the spell becomes unpayable.
+    #[test]
+    fn azula_exile_static_grants_any_type_mana_spend() {
+        let mut state = setup_game_at_main_phase();
+        let player = PlayerId(0);
+        let source = add_azula_exile_cast_source(&mut state, player);
+        let spell = add_linked_blue_sorcery(&mut state, player, source, "Exiled Blue Bolt");
+        // Only RED mana available — a {U} cost is unpayable without the
+        // any-type-mana concession.
+        add_mana(&mut state, player, ManaType::Red, 1);
+
+        assert!(
+            spell_objects_available_to_cast(&state, player).contains(&spell),
+            "Azula's persistent Cast permission must surface the linked spell"
+        );
+        assert!(
+            player_can_spend_as_any_color_for_spell(&state, player, spell),
+            "the static must grant any-type-mana spend for spells in its pool"
+        );
+        assert!(
+            can_pay_cost_after_auto_tap(&state, player, spell, &state.objects[&spell].mana_cost),
+            "a {{U}} cost must be payable from a red-only pool under the concession"
+        );
+    }
+
+    /// CR 601.3b + CR 702.8a: Azula's "you may cast them as though they had
+    /// flash" concession lets a sorcery be cast at instant speed (here: P0's
+    /// main phase with a non-empty stack, so the window is NOT sorcery-speed).
+    /// DISCRIMINATING: if `grants_flash` is reverted to `false`,
+    /// `exile_static_permission_grants_flash` returns false, `has_granted_flash`
+    /// is false, and `handle_cast_spell` rejects the sorcery for sorcery-speed
+    /// timing.
+    #[test]
+    fn azula_exile_static_grants_flash_timing() {
+        let mut state = setup_game_at_main_phase();
+        let player = PlayerId(0);
+        let source = add_azula_exile_cast_source(&mut state, player);
+        let spell = add_linked_blue_sorcery(&mut state, player, source, "Exiled Blue Bolt");
+        // Mana that pays the {U} cost via the any-type concession, so the cast
+        // clears payment and the timing gate (the behavior under test) is what
+        // decides the outcome.
+        add_mana(&mut state, player, ManaType::Red, 1);
+
+        // Force a non-sorcery-speed window: P0 is active in PreCombatMain, so the
+        // only missing precondition is the empty stack.
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: ObjectId(9000),
+            source_id: ObjectId(9000),
+            controller: player,
+            kind: crate::types::game_state::StackEntryKind::Spell {
+                card_id: CardId(9000),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        assert!(
+            !restrictions::is_sorcery_speed_window(&state, player),
+            "test setup must be outside the sorcery-speed window"
+        );
+        assert!(
+            exile_static_permission_grants_flash(&state, player, spell),
+            "the static must report a flash grant for spells in its pool"
+        );
+
+        let card_id = state.objects.get(&spell).unwrap().card_id;
+        let mut events = Vec::new();
+        let result = handle_cast_spell(&mut state, player, spell, card_id, &mut events);
+        assert!(
+            result.is_ok(),
+            "flash-granted exiled sorcery must be castable outside the sorcery window: {result:?}"
+        );
+        assert_eq!(
+            state.objects.get(&spell).unwrap().zone,
+            Zone::Stack,
+            "the cast spell must move to the stack"
+        );
     }
 
     /// PR #1441: Teferi, Time Raveler's +1 ("you may cast sorcery spells as

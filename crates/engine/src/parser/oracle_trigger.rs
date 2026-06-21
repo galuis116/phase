@@ -766,9 +766,21 @@ fn is_damage_done_trigger_pattern(cond_lower: &str) -> bool {
         return false;
     };
 
+    // CR 120.3a + CR 603.2c: A damage-to-player trigger establishes the damaged
+    // player as the relative `TriggeringPlayer` for "that player" anaphors.
+    // Both the generic player recipient ("a player") and the opponent recipient
+    // ("an opponent" → `Typed(controller: Opponent)`) are player recipients;
+    // Fear of Burning Alive ("deals noncombat damage to an opponent ... target
+    // creature that player controls") relies on the opponent form binding.
     matches!(
         parse_damage_to_qualifier(after_damage),
-        Some(TargetFilter::Player)
+        Some(
+            TargetFilter::Player
+                | TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::Opponent),
+                    ..
+                })
+        )
     )
 }
 
@@ -10426,6 +10438,10 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             .unwrap_or(after)
             .trim();
         let (payload, spell_not_owned_by_you) = strip_spell_not_owned_qualifier(payload);
+        let (payload, turn_constraint) = peel_trailing_turn_constraint(payload);
+        if let Some(constraint) = turn_constraint {
+            def.constraint = Some(constraint);
+        }
 
         // CR 601.2a: pre-extract the "from <zone>" cast-origin tail BEFORE
         // running the type-phrase parser. `parse_type_phrase`'s
@@ -10524,6 +10540,10 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                 .trim_start();
             let (spell_clause, spell_not_owned_by_caster) =
                 strip_spell_they_dont_own_qualifier(after_article);
+            let (spell_clause, turn_constraint) = peel_trailing_turn_constraint(spell_clause);
+            if let Some(constraint) = turn_constraint {
+                def.constraint = Some(constraint);
+            }
             if spell_not_owned_by_caster {
                 def.valid_target = Some(TargetFilter::TriggeringPlayer);
             }
@@ -12590,6 +12610,7 @@ fn scan_for_generic_main_phase(text: &str) -> bool {
 fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
     // Prefix-based: try at the start of the text
     if alt((
+        tag::<_, _, OracleError<'_>>("an opponent's "),
         tag::<_, _, OracleError<'_>>("each opponent's "),
         tag("each opponents\u{2019} "),
         tag("each opponents' "),
@@ -12624,6 +12645,47 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
             .map_or("", |i| remaining[i + 1..].trim_start());
     }
     None
+}
+
+fn peel_trailing_turn_constraint(input: &str) -> (&str, Option<TriggerConstraint>) {
+    let mut remaining = input.trim();
+    loop {
+        if let Ok((_, constraint)) = preceded(
+            tag::<_, _, OracleError<'_>>("during "),
+            all_consuming(alt((
+                value(
+                    TriggerConstraint::OnlyDuringOpponentsTurn,
+                    alt((
+                        tag("an opponent's turn"),
+                        tag("each opponent's turn"),
+                        tag("each opponents\u{2019} turn"),
+                        tag("each opponents' turn"),
+                        tag("your opponent's turn"),
+                        tag("your opponents\u{2019} turn"),
+                        tag("your opponents' turn"),
+                        tag("each of your opponents\u{2019} turn"),
+                        tag("each of your opponents' turn"),
+                    )),
+                ),
+                value(
+                    TriggerConstraint::OnlyDuringYourTurn,
+                    alt((tag("your turn"), tag("each of your turns"))),
+                ),
+            ))),
+        )
+        .parse(remaining)
+        {
+            let split_at = input.len() - remaining.len();
+            return (input[..split_at].trim(), Some(constraint));
+        }
+
+        // allow-noncombinator: word-boundary scan to find a trailing "during <turn>" suffix;
+        // the candidate suffix itself is parsed by nom above.
+        let Some(idx) = remaining.find(' ') else {
+            return (input, None);
+        };
+        remaining = remaining[idx + 1..].trim_start();
+    }
 }
 
 /// CR 305.1 + CR 603.2: Parse the subject and land-play verb from
@@ -14867,7 +14929,9 @@ mod tests {
             .as_ref()
             .expect("trigger should have execute step");
         match execute.effect.as_ref() {
-            Effect::Discover { mana_value_limit } => {
+            Effect::Discover {
+                mana_value_limit, ..
+            } => {
                 assert!(
                     matches!(
                         mana_value_limit,
@@ -18295,6 +18359,29 @@ mod tests {
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
         // No origin clause → no zone restriction (CR 601.2a).
         assert_eq!(def.spell_cast_origin, OriginConstraint::Any);
+    }
+
+    #[test]
+    fn trigger_you_cast_spell_during_opponents_turn() {
+        let def = parse_trigger_line(
+            "Whenever you cast a spell during an opponent's turn, put a -1/-1 counter on up to one target creature.",
+            "Nightmare Sower",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert!(def.valid_card.is_none());
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringOpponentsTurn)
+        );
+    }
+
+    #[test]
+    fn spell_cast_turn_constraint_peel_rejects_phase_or_step_tails() {
+        let (payload, constraint) =
+            peel_trailing_turn_constraint("spell during an opponent's end step");
+        assert_eq!(payload, "spell during an opponent's end step");
+        assert!(constraint.is_none());
     }
 
     // CR 601.1a + CR 701.18b: "Whenever you play a card" fires on playing a land

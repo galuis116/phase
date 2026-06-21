@@ -24,15 +24,17 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AttackScope, AttackSubject,
-    CastFromZoneDriver, Comparator, ContinuousModification, ControllerRef, DamageSource,
-    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, LibraryPosition,
-    MultiTargetSpec, ObjectScope, PlayerFilter, PreventionAmount, PreventionScope, PtValue,
-    QuantityExpr, QuantityRef, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    CastFromZoneDriver, CastingPermission, Comparator, ContinuousModification, ControllerRef,
+    DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
+    LibraryPosition, ManaSpendPermission, MultiTargetSpec, ObjectScope, PlayerFilter,
+    PreventionAmount, PreventionScope, PtValue, QuantityExpr, QuantityRef, RoundingMode,
+    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
 use crate::types::phase::Phase;
+use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 // Parse-phase functions from the parent module (oracle_effect/mod.rs).
@@ -163,6 +165,60 @@ pub(super) fn normalize_linked_exile_cast_bottom_cleanup(effect: &mut Effect) {
             *count = QuantityExpr::Fixed { value: 0 };
         }
     }
+}
+
+fn is_spend_mana_as_any_color_rider(clause: &ClauseIr) -> bool {
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &clause.parsed.effect
+    else {
+        return false;
+    };
+    if static_abilities.len() != 1 || static_abilities[0].mode != StaticMode::SpendManaAsAnyColor {
+        return false;
+    }
+
+    let lower = clause.source_text.to_ascii_lowercase();
+    let parsed = all_consuming((
+        opt(alt((
+            tag::<_, _, OracleError<'_>>("if you cast a spell this way, "),
+            tag("if you cast it this way, "),
+        ))),
+        tag("you may spend mana as though it were mana of any "),
+        alt((tag("color"), tag("type"))),
+        tag(" to cast "),
+        alt((
+            tag("it"),
+            tag("that spell"),
+            tag("a spell this way"),
+            tag("spells this way"),
+            tag("those spells"),
+        )),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok();
+    parsed
+}
+
+fn attach_any_color_mana_rider_to_previous_play_from_exile(defs: &mut [AbilityDefinition]) -> bool {
+    let Some(previous) = defs.last_mut() else {
+        return false;
+    };
+    let Effect::GrantCastingPermission {
+        permission:
+            CastingPermission::PlayFromExile {
+                mana_spend_permission,
+                ..
+            },
+        ..
+    } = previous.effect.as_mut()
+    else {
+        return false;
+    };
+
+    *mana_spend_permission = Some(ManaSpendPermission::AnyTypeOrColor);
+    true
 }
 
 pub(super) fn is_linked_exile_cast_bottom_cleanup(
@@ -575,6 +631,18 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // normal clause stamps its `sub_link` from the boundary AFTER this
         // clause, not the stale boundary that preceded it.
         if handled_as_special {
+            prev_boundary = clause_ir.boundary;
+            continue;
+        }
+
+        // CR 609.4b + CR 608.2c: Brainstealer/Daxos-class any-color mana
+        // riders may be split into their own sentence or comma sibling after a
+        // `PlayFromExile` grant. They scope the existing exile-play
+        // permission, so fold the rider into the prior grant instead of
+        // emitting a broad standalone `SpendManaAsAnyColor` effect.
+        if is_spend_mana_as_any_color_rider(clause_ir)
+            && attach_any_color_mana_rider_to_previous_play_from_exile(&mut defs)
+        {
             prev_boundary = clause_ir.boundary;
             continue;
         }
@@ -1595,24 +1663,31 @@ fn rewire_cross_sentence_token_counter_attach(def: &mut AbilityDefinition) {
 /// it") — the bare-"it" host anaphor must target `LastCreated`, not
 /// `ParentTarget` (the token-creating effect has no parent target slot).
 fn rewire_token_attach_sibling(def: &mut AbilityDefinition) {
-    if !matches!(&*def.effect, Effect::Token { .. }) {
-        return;
-    }
-    let Some(attach_sub) = def.sub_ability.as_mut() else {
-        return;
-    };
-    // Token → PutCounter → Attach is owned by `rewire_cross_sentence_token_counter_attach`.
-    if matches!(&*attach_sub.effect, Effect::PutCounter { .. }) {
-        return;
-    }
-    let Effect::Attach { target, .. } = attach_sub.effect.as_mut() else {
-        return;
-    };
-    if matches!(
-        target,
-        TargetFilter::ParentTarget | TargetFilter::TriggeringSource
-    ) {
-        *target = TargetFilter::LastCreated;
+    // Walk the whole sub-ability chain: the token + bare-Attach pair is not
+    // always at the root. Field-Tested Frying Pan ("create a Food token, then
+    // create a 1/1 white Halfling creature token and attach this Equipment to
+    // it") nests the Attach under the *second* token, so a root-only check would
+    // miss it and leave "it" bound to ParentTarget/TriggeringSource (which has no
+    // referent here) instead of the just-created token.
+    let mut node: Option<&mut AbilityDefinition> = Some(def);
+    while let Some(current) = node {
+        if matches!(&*current.effect, Effect::Token { .. }) {
+            if let Some(sub) = current.sub_ability.as_mut() {
+                // Token → PutCounter → Attach is owned by
+                // `rewire_cross_sentence_token_counter_attach`.
+                if !matches!(&*sub.effect, Effect::PutCounter { .. }) {
+                    if let Effect::Attach { target, .. } = sub.effect.as_mut() {
+                        if matches!(
+                            target,
+                            TargetFilter::ParentTarget | TargetFilter::TriggeringSource
+                        ) {
+                            *target = TargetFilter::LastCreated;
+                        }
+                    }
+                }
+            }
+        }
+        node = current.sub_ability.as_deref_mut();
     }
 }
 
@@ -3340,6 +3415,17 @@ pub(super) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                 },
                 tag("at this turn's next end of combat, "),
             ),
+            // CR 511.2 + CR 603.7a: bare "at end of combat, …" prefix — the
+            // companion of the existing suffix arm in `strip_temporal_suffix`.
+            // An attack/combat trigger whose effect body is deferred to the
+            // end-of-combat step (Fortune, Loyal Steed: "Whenever Fortune
+            // attacks while saddled, at end of combat, exile it and …").
+            value(
+                DelayedTriggerCondition::AtNextPhase {
+                    phase: Phase::EndCombat,
+                },
+                tag("at end of combat, "),
+            ),
         ))
         .parse(i)
     }) {
@@ -4618,7 +4704,15 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
             },
             &after[consumed..],
         )
-    } else if let Ok((rem, _)) = tag::<_, _, OracleError<'_>>("that much damage").parse(after_lower)
+    } else if let Ok((rem, _)) = alt((
+        tag::<_, _, OracleError<'_>>("that much damage"),
+        // CR 120.1: "that amount of damage" is the synonym used when the
+        // antecedent reads "N damage" rather than "this much damage" (Fear of
+        // Burning Alive: "deals that amount of damage to target creature that
+        // player controls"). Both anaphors resolve to the just-dealt amount.
+        tag("that amount of damage"),
+    ))
+    .parse(after_lower)
     {
         let consumed = after_lower.len() - rem.len();
         (
@@ -5893,6 +5987,7 @@ pub(super) fn apply_where_x_effect_expression(
         | Effect::ExileTop { count: amount, .. }
         | Effect::Discover {
             mana_value_limit: amount,
+            ..
         }
         | Effect::Incubate { count: amount } => {
             *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);

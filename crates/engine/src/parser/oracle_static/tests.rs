@@ -2638,6 +2638,71 @@ fn self_cost_reduction_if_control_wizard_still_uses_presence_condition() {
 }
 
 #[test]
+fn self_cost_reduction_leading_if_keeps_condition() {
+    let def = parse_static_line(
+        "If an opponent has no cards in hand, this spell costs {6} less to cast.",
+    )
+    .unwrap();
+
+    assert!(matches!(
+        def.mode,
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::Cost { generic: 6, .. },
+            ..
+        }
+    ));
+    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    assert_eq!(
+        def.active_zones,
+        crate::types::zones::self_spell_cost_mod_active_zones()
+    );
+    assert!(matches!(
+        def.condition,
+        Some(StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Min
+                    }
+                }
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        })
+    ));
+}
+
+#[test]
+fn self_cost_reduction_leading_if_supports_avatar_cycle_conditions() {
+    for text in [
+        "If you have 3 or less life, this spell costs {6} less to cast.",
+        "If an opponent controls at least four more creatures than you, this spell costs {6} less to cast.",
+        "If there are ten or more creature cards total in all graveyards, this spell costs {6} less to cast.",
+        "If you weren't the starting player, this spell costs {1} less to cast.",
+    ] {
+        let def =
+            parse_static_line(text).unwrap_or_else(|| panic!("expected cost static for {text:?}"));
+        assert!(
+            matches!(
+                def.mode,
+                StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    ..
+                }
+            ),
+            "expected Reduce cost static for {text:?}, got {:?}",
+            def.mode
+        );
+        assert!(
+            def.condition.is_some(),
+            "leading condition must not be dropped for {text:?}"
+        );
+        assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    }
+}
+
+#[test]
 fn static_this_spell_cost_less_if_it_targets_creature_filter() {
     let def = parse_static_line("This spell costs {2} less to cast if it targets a red creature.")
         .unwrap();
@@ -8255,6 +8320,8 @@ fn exile_cast_permission_maralen_fae_ascendant() {
             cost: ExileCastCost::WithoutPayingManaCost,
             pool: ExileCardPool::ThisTurn,
             timing: ExileCastTiming::AnyTime,
+            mana_spend_permission: None,
+            grants_flash: false,
         },
         "expected ExileCastPermission, got {:?}",
         def.mode
@@ -8300,6 +8367,7 @@ fn exile_cast_permission_during_each_of_your_turns_synonym() {
                 cost: ExileCastCost::WithoutPayingManaCost,
                 pool: ExileCardPool::ThisTurn,
                 timing: ExileCastTiming::AnyTime,
+                ..
             }
         ),
         "expected ExileCastPermission(OncePerTurn, Cast, free), got {:?}",
@@ -8354,6 +8422,8 @@ fn persistent_exile_play_permission_matrix_form() {
             cost: ExileCastCost::PayNormalCost,
             pool: ExileCardPool::Persistent,
             timing: ExileCastTiming::YourTurnOnly,
+            mana_spend_permission: None,
+            grants_flash: false,
         },
         "expected persistent your-turn Play permission, got {:?}",
         def.mode
@@ -8382,6 +8452,8 @@ fn persistent_exile_play_permission_evendo_sacrificed_permanent_gate() {
             cost: ExileCastCost::PayNormalCost,
             pool: ExileCardPool::Persistent,
             timing: ExileCastTiming::YourTurnOnly,
+            mana_spend_permission: None,
+            grants_flash: false,
         },
         "expected persistent your-turn Play permission, got {:?}",
         def.mode
@@ -8456,9 +8528,62 @@ fn persistent_exile_play_permission_look_at_variant() {
             cost: ExileCastCost::PayNormalCost,
             pool: ExileCardPool::Persistent,
             timing: ExileCastTiming::AnyTime,
+            mana_spend_permission: None,
+            grants_flash: false,
         },
         "expected persistent any-time Play permission, got {:?}",
         def.mode
+    );
+}
+
+/// CR 601.2a + CR 609.4b + CR 702.8a: Azula, Cunning Usurper — "During your
+/// turn, you may cast cards exiled with ~ and you may cast them as though they
+/// had flash. Mana of any type can be spent to cast those spells." lowers to a
+/// persistent, your-turn-only, Cast-mode permission carrying both the any-type
+/// mana spend concession and the flash grant.
+#[test]
+fn persistent_exile_cast_permission_azula_flash_and_any_mana() {
+    let text = "During your turn, you may cast cards exiled with ~ and you may cast them as though they had flash. Mana of any type can be spent to cast those spells.";
+    let def = parse_static_line(text).expect("Azula static must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            // CR 601.2a: "you may cast cards exiled with ~" is spell-cast only.
+            play_mode: CardPlayMode::Cast,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::YourTurnOnly,
+            mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor),
+            grants_flash: true,
+        },
+        "expected persistent Cast permission with flash + any-mana, got {:?}",
+        def.mode
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Any),
+        "the persistent pool is the scope; affected must be Any"
+    );
+
+    // Full Oracle dispatch (with the real "~" normalization of "Azula, Cunning
+    // Usurper" → "Azula" → "~") must route the line to the same static, leaving
+    // no Unimplemented node behind.
+    let card_text = "During your turn, you may cast cards exiled with Azula and you may cast them as though they had flash. Mana of any type can be spent to cast those spells.";
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        card_text,
+        "Azula, Cunning Usurper",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string()],
+    );
+    assert!(
+        parsed
+            .statics
+            .iter()
+            .any(|parsed_def| parsed_def.mode == def.mode),
+        "full Oracle dispatch must route Azula's line to the flash+any-mana static, got {:?}",
+        parsed.statics
     );
 }
 
@@ -8488,6 +8613,8 @@ fn exile_cast_permission_soul_jar_persistent_creature_pool() {
             cost: ExileCastCost::PayNormalCost,
             pool: ExileCardPool::Persistent,
             timing: ExileCastTiming::AnyTime,
+            mana_spend_permission: None,
+            grants_flash: false,
         },
         "expected persistent ExileCastPermission, got {:?}",
         def.mode
@@ -19284,5 +19411,52 @@ fn top_of_library_frequency_display_roundtrip() {
     assert_eq!(
         StaticMode::from_str("TopOfLibraryCastPermission").unwrap(),
         unlimited
+    );
+}
+
+/// CR 613.4b + CR 208.1: Porcelain Gallery's "Creatures you control have base
+/// power and toughness each equal to the number of creatures you control" is a
+/// layer-7b dynamic base-P/T set on a controller-scoped group. The dynamic
+/// value routes through the shared CDA quantity grammar to an `ObjectCount`,
+/// proving the base-P/T set composes with arbitrary count quantities (not just
+/// "its mana value"). Each tick re-evaluates the count via the layer system.
+#[test]
+fn porcelain_gallery_base_pt_equal_to_creature_count() {
+    let def = parse_static_line(
+        "Creatures you control have base power and toughness each equal to the number of creatures you control.",
+    )
+    .expect("Porcelain Gallery static must parse");
+
+    // Group scope: creatures you control.
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        }
+        other => panic!("expected creatures-you-control scope, got {other:?}"),
+    }
+
+    let expected = QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Creature)
+                    .controller(ControllerRef::You),
+            ),
+        },
+    };
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::SetPowerDynamic {
+                value: expected.clone(),
+            }),
+        "missing SetPowerDynamic(creature count) in {:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::SetToughnessDynamic { value: expected }),
+        "missing SetToughnessDynamic(creature count) in {:?}",
+        def.modifications
     );
 }

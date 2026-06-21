@@ -1179,6 +1179,11 @@ fn starts_prefix_clause(current_lower: &str) -> bool {
         tag("if not"),
         tag("the next time "),
         tag("at the beginning "),
+        // CR 511.2 + CR 603.7a: bare "at end of combat, …" delayed-trigger prefix
+        // — companion of the suffix form. Keep the deferred body attached so it
+        // reaches `strip_temporal_prefix` instead of splitting at the comma
+        // (Fortune, Loyal Steed: "at end of combat, exile it and …").
+        tag("at end of combat"),
         tag("for as long as "),
         // CR 508.6: "During any turn [you attacked with X], [effect]" — temporal
         // attack-history gate (Neyali, Neriv, Boros Strike-Captain). Keep the
@@ -1662,6 +1667,15 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // exceeds the 2-word cap.
     .or(value((), tag("reveal ")))
     .or(value((), tag("returns ")))
+    // CR 701.26b + CR 701.26a + CR 608.2c: third-person "untaps"/"taps"
+    // conjugation. Control-handoff class: "the attacking player gains control
+    // of ~ and untaps it" (Contested Game Ball) — the followup tap-state clause
+    // must split as its own conjunct so it deconjugates ("untaps it" → "untap
+    // it") and reaches the tap dispatcher. Mirrors the imperative `untap `/`tap
+    // ` axis above, different conjugation; sits in the `.or()` chain because the
+    // first `alt()` tuple is at nom's 21-arm limit.
+    .or(value((), tag("untaps ")))
+    .or(value((), tag("taps ")))
     // CR 122.1 + CR 608.2c: third-person "puts" conjugation. Oversimplify
     // class: "Each player creates a … token and puts a number of +1/+1
     // counters on it equal to …" — the subject ("Each player") iterates and
@@ -1674,8 +1688,14 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // 21-arm limit; adding it inline would push the cluster over and trip
     // the `Choice<...>` trait-bound check at compile time.
     .or(value((), tag("puts ")))
-    // CR 608.2c: "put … and attach an Equipment that was attached …" (Zack Fair).
-    .or(value((), tag("attach an equipment that was attached ")))
+    // CR 301.5b + CR 608.2c: these attach forms are imperative game actions,
+    // not noun-phrase continuations. Keep the matcher narrow so name-based
+    // chains like "put counters on it and attach Fractal Harness to it" stay
+    // available to the token-counter attach rewriter.
+    .or(alt((
+        value((), tag("attach this equipment ")),
+        value((), tag("attach an equipment that was attached ")),
+    )))
     .or(alt((
         // CR 608.2c: Subject-prefixed verb patterns — "you [verb]" is always a clause start.
         value((), tag("you gain ")),
@@ -1727,6 +1747,19 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         // where "it" resolves to the anaphoric/self subject and
         // `build_become_clause` produces the additive color/type modifications.
         value((), tag("it becomes ")),
+        // CR 205.1a + CR 205.1b + CR 613.1d: the copula form "it's <descriptor>"
+        // ("it's" = "it is") is always a subject (anaphor) + animation/type
+        // predicate, never a noun-phrase continuation. Brilliance Unleashed:
+        // "Otherwise, return it to the battlefield and it's a 3/3 Robot artifact
+        // creature with flying" — without this split the conjunct is fed to the
+        // imperative-only path and fails closed to an Unimplemented effect named
+        // "it's". Splitting routes it through `parse_clause_ast` →
+        // `try_parse_subject_clause` → the contracted "it's a …" handler, which
+        // emits the animation (non-additive) or AddType/AddSubtype (additive)
+        // modifications on the referenced (ParentTarget) permanent. The
+        // straight-apostrophe and typographic-apostrophe forms are leaf variants
+        // of the same contraction (CLAUDE.md "don't nest leaf variants").
+        value((), alt((tag("it's "), tag("it’s ")))),
         value((), tag("this creature gets ")),
         value((), tag("~ gets ")),
         // CR 104.3 + CR 119.7 + CR 119.8: Bare-plural-player subject + restriction
@@ -2545,7 +2578,7 @@ pub(super) fn apply_clause_continuation(
                 },
             ));
         }
-        ContinuationAst::FlashbackCostEqualsManaCost => {}
+        ContinuationAst::SelfCostKeywordCostClarification => {}
         ContinuationAst::CantRegenerate => {
             let Some(previous) = defs.last_mut() else {
                 return;
@@ -3298,7 +3331,7 @@ pub(super) fn continuation_absorbs_current(
         // parse_followup_continuation_ast, so absorption is unconditional —
         // identical to the CounterSourceStatic precedent.
         ContinuationAst::CopyMayRetarget => true,
-        ContinuationAst::FlashbackCostEqualsManaCost => true,
+        ContinuationAst::SelfCostKeywordCostClarification => true,
         ContinuationAst::SearchDestination { .. } => false,
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
         ContinuationAst::GoadLastCreated { .. } => true,
@@ -4352,6 +4385,27 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
     }
 }
 
+/// CR 702.34a / CR 702.128a / CR 702.180a: Recognize the redundant cost
+/// clarification sentence that trails a self-cost graveyard keyword grant —
+/// "the/its [flashback|embalm|harmonize] cost is equal to its/that card's mana
+/// cost". The caller gates on the preceding GenericEffect carrying the matching
+/// granted keyword, so this combinator only needs to confirm the grammatical
+/// shape. Composed from chained `alt()` over the determiner, the self-cost
+/// keyword token, and the possessive reference — not an enumeration of
+/// whole-string permutations.
+fn parse_self_cost_keyword_clarification(lower: &str) -> bool {
+    let lower = lower.trim().trim_end_matches('.');
+    all_consuming((
+        opt(alt((tag::<_, _, OracleError<'_>>("the "), tag("its ")))),
+        alt((tag("flashback"), tag("embalm"), tag("harmonize"))),
+        tag(" cost is equal to "),
+        alt((tag("its"), tag("that card's"), tag("that card\u{2019}s"))),
+        tag(" mana cost"),
+    ))
+    .parse(lower)
+    .is_ok()
+}
+
 pub(super) fn parse_followup_continuation_ast(
     text: &str,
     previous_effect: &Effect,
@@ -4425,21 +4479,30 @@ pub(super) fn parse_followup_continuation_ast(
             }
             None
         }
+        // CR 702.34a / CR 702.128a / CR 702.180a: the redundant cost-clarification
+        // sentence ("The/Its [flashback|embalm|harmonize] cost is equal to
+        // its/that card's mana cost") that follows a self-cost graveyard keyword
+        // grant. The grant already carries `ManaCost::SelfManaCost`, so this
+        // sentence adds no semantics — absorb it so it never lowers to
+        // `Effect::Unimplemented`. Gated on the preceding GenericEffect actually
+        // carrying a self-cost graveyard keyword (Flashback/Embalm/Harmonize).
         Effect::GenericEffect {
             static_abilities, ..
-        } if lower == "the flashback cost is equal to its mana cost"
+        } if parse_self_cost_keyword_clarification(&lower)
             && static_abilities.iter().any(|def| {
                 def.modifications.iter().any(|modification| {
                     matches!(
                         modification,
                         crate::types::ability::ContinuousModification::AddKeyword {
                             keyword: crate::types::keywords::Keyword::Flashback(_)
+                                | crate::types::keywords::Keyword::Embalm(_)
+                                | crate::types::keywords::Keyword::Harmonize(_)
                         }
                     )
                 })
             }) =>
         {
-            Some(ContinuationAst::FlashbackCostEqualsManaCost)
+            Some(ContinuationAst::SelfCostKeywordCostClarification)
         }
         Effect::Counter { .. }
             if nom_primitives::scan_contains(&lower, "countered this way")
@@ -5572,6 +5635,25 @@ mod tests {
         // Lotho: "you lose 1 life and create a Treasure token"
         let chunks = clause_texts("you lose 1 life and create a Treasure token");
         assert_eq!(chunks, vec!["you lose 1 life", "create a Treasure token"]);
+    }
+
+    #[test]
+    fn bare_and_splits_create_token_and_attach() {
+        // Field-Tested Frying Pan (#835): "create a 1/1 white Halfling creature
+        // token and attach this Equipment to it" — "attach " is an imperative game
+        // action, so the conjunct must peel into its own clause and lower to a
+        // Token -> Attach sibling (rewire_token_attach_sibling rebinds onto
+        // LastCreated). Without the split the attach is silently dropped.
+        let chunks = clause_texts(
+            "create a 1/1 white Halfling creature token and attach this Equipment to it",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "create a 1/1 white Halfling creature token",
+                "attach this Equipment to it"
+            ]
+        );
     }
 
     #[test]

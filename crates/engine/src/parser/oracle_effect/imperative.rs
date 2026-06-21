@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{one_of, space1};
+use nom::character::complete::{one_of, space0, space1};
 use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value};
 use nom::error::ParseError;
 use nom::sequence::{preceded, terminated};
@@ -2442,7 +2442,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
 pub(super) fn parse_hand_reveal_ast(
     text: &str,
     lower: &str,
-    _ctx: &mut ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<HandRevealImperativeAst> {
     // CR 406.6: Private look at source-linked exile (Scroll Rack) — no "hand" in phrase.
     if let Some((_, after_look_at)) =
@@ -2556,7 +2556,8 @@ pub(super) fn parse_hand_reveal_ast(
     // This function only handles hand-related reveals.
 
     if nom_primitives::scan_contains(lower, "hand") {
-        let (target, card_filter) = parse_hand_reveal_target_and_card_filter(after_reveal_lower);
+        let (target, card_filter) =
+            parse_hand_reveal_target_and_card_filter(after_reveal_lower, ctx);
         return Some(HandRevealImperativeAst::RevealAll {
             target,
             card_filter,
@@ -2568,7 +2569,32 @@ pub(super) fn parse_hand_reveal_ast(
 
 fn parse_hand_reveal_target_and_card_filter(
     after_reveal_lower: &str,
+    ctx: &mut ParseContext,
 ) -> (TargetFilter, TargetFilter) {
+    // CR 701.20a + reflexive choose: "<possessive> hand and you choose a [filter]
+    // card from it" names the revealing player's hand directly, then the
+    // controller chooses a filtered card from it (Biting-Palm Ninja: "that player
+    // reveals their hand and you choose a nonland card from it."). The fused choose
+    // clause must populate `card_filter`; an empty `None` filter matches nothing, so
+    // without it the RevealHand chooses and exiles nothing (a silent no-op).
+    if let Ok((rest, target)) = parse_hand_possessive_target(after_reveal_lower) {
+        if let Ok((_, choose)) = preceded(
+            (space0, tag::<_, _, OracleError<'_>>("and "), space0),
+            nom::combinator::rest,
+        )
+        .parse(rest)
+        {
+            let chooses_card_from_it = nom_primitives::scan_contains(choose, "card from it")
+                && alt((tag::<_, _, OracleError<'_>>("you choose "), tag("choose ")))
+                    .parse(choose)
+                    .is_ok();
+
+            if chooses_card_from_it {
+                return (target, super::parse_choose_filter(choose, ctx));
+            }
+        }
+    }
+
     if let Ok((after_all, _)) = tag::<_, _, OracleError<'_>>("all ").parse(after_reveal_lower) {
         let Ok((hand_phrase, descriptor)) = terminated(
             take_until::<_, _, OracleError<'_>>(" cards"),
@@ -2699,6 +2725,17 @@ pub(super) fn parse_choose_ast(
         return Some(ast);
     }
 
+    // CR 608.2c + CR 603.7 / CR 610.3 + CR 406.6: "choose a card [at random]
+    // exiled this way / exiled with ~" — the impulse-exile choose anaphor. The
+    // "exiled this way" referent is the chain's tracked set (the cards exiled by
+    // a preceding clause in this resolution, e.g. End-Blaze Epiphany); the
+    // "exiled with ~/it" referent is the source's linked-exile set, scanned in
+    // Exile by `TargetFilter::ExiledBySource` (Omenpath Journey). Checked before
+    // the bare "choose " strip so it never misroutes to the targeting fallback.
+    if let Some(ast) = try_parse_choose_exiled_anaphor(lower) {
+        return Some(ast);
+    }
+
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |input| value((), tag("choose ")).parse(input))
     {
@@ -2826,6 +2863,97 @@ fn try_parse_choose_owned_by_voter(
         // CR 608.2d: per-ballot voter choice is controller-directed, never random.
         selection: crate::types::ability::CardSelectionMode::Chosen,
     })
+}
+
+/// CR 608.2c + CR 603.7 / CR 610.3 + CR 406.6: Parse "choose a card [at random]
+/// exiled this way / exiled with ~ / exiled with it" — the impulse-exile choose
+/// anaphor.
+///
+/// Two referents, distinguished by the anaphor tail:
+/// - "exiled this way" → the chain's tracked set (cards exiled by a preceding
+///   clause this resolution). Lowered via [`ChooseImperativeAst::FromTrackedSet`]
+///   → `Effect::ChooseFromZone` reading the chain tracked set (End-Blaze
+///   Epiphany).
+/// - "exiled with ~" / "exiled with it" → the source's linked-exile set,
+///   scanned in `Zone::Exile` by [`TargetFilter::ExiledBySource`]. Lowered via
+///   [`ChooseImperativeAst::FromZone`] so the runtime applies the linked-exile
+///   filter (Omenpath Journey).
+///
+/// The optional "at random" qualifier sets [`CardSelectionMode::Random`]
+/// (CR 608.2d override): the game selects, the controller does not.
+fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
+    type E<'a> = OracleError<'a>;
+
+    // CR 608.2c + CR 700.2: A standalone "Choose one." / "Choose one card."
+    // clause (empty tail) in a resolution chain is the impulse-exile reduction
+    // idiom — a preceding clause exiled one or more cards and a following clause
+    // grants permission to play one of them ("Exile the top three cards of your
+    // library. Choose one. You may play that card this turn." — Chandra,
+    // Flameshaper). The anaphor referent is the chain's tracked set, mirroring
+    // "choose one of them" but without the explicit anaphor suffix. The modal
+    // header "Choose one —" is consumed earlier by the modal-block dispatch, so
+    // any "choose one" reaching the effect parser is this reduction form.
+    if let Ok((tail, ())) = preceded(
+        alt((tag::<_, _, E>("choose "), tag("you choose "))),
+        value((), alt((tag::<_, _, E>("one card"), tag("one")))),
+    )
+    .parse(lower)
+    {
+        if tail.is_empty() {
+            return Some(ChooseImperativeAst::FromTrackedSet {
+                count: 1,
+                chooser: Chooser::Controller,
+                selection: CardSelectionMode::Chosen,
+            });
+        }
+    }
+
+    // "choose " / "you choose ", then the singular card anaphor "a card" / "one
+    // card" / "a [type] card". Only the bare card forms are handled here; typed
+    // restrictions on impulse-exile choices are not yet attested and would fall
+    // through to the honest fallback.
+    let (rest_after, ()) = preceded(
+        alt((tag::<_, _, E>("choose "), tag("you choose "))),
+        value((), alt((tag("a card"), tag("one card")))),
+    )
+    .parse(lower)
+    .ok()?;
+
+    // Optional " at random" qualifier (CR 608.2d override).
+    let (rest_after, selection) = match tag::<_, _, E>(" at random").parse(rest_after) {
+        Ok((rest, _)) => (rest, CardSelectionMode::Random),
+        Err(_) => (rest_after, CardSelectionMode::Chosen),
+    };
+
+    // "exiled this way" — the chain tracked set.
+    if let Ok((tail, _)) = tag::<_, _, E>(" exiled this way").parse(rest_after) {
+        if tail.is_empty() {
+            return Some(ChooseImperativeAst::FromTrackedSet {
+                count: 1,
+                chooser: Chooser::Controller,
+                selection,
+            });
+        }
+    }
+
+    // "exiled with ~" / "exiled with it" — the source's linked-exile set.
+    if let Ok((tail, _)) =
+        alt((tag::<_, _, E>(" exiled with ~"), tag(" exiled with it"))).parse(rest_after)
+    {
+        if tail.is_empty() {
+            return Some(ChooseImperativeAst::FromZone {
+                count: 1,
+                zones: vec![Zone::Exile],
+                zone_owner: ZoneOwner::Controller,
+                filter: TargetFilter::ExiledBySource,
+                chooser: Chooser::Controller,
+                up_to: false,
+                selection,
+            });
+        }
+    }
+
+    None
 }
 
 fn try_parse_choose_from_zone(lower: &str, ctx: &mut ParseContext) -> Option<ChooseImperativeAst> {
@@ -6510,6 +6638,18 @@ pub(super) fn parse_imperative_family_ast(
             count: parse_additional_phase_count(lower),
         }));
     }
+    // CR 500.8 + CR 513.1: "there is an additional end step after this step"
+    // (Y'shtola Rhul). The extra end step is anchored to `Phase::End` so the
+    // LIFO `advance_phase` scan inserts it as the current end step completes.
+    if nom_primitives::scan_contains(lower, "additional end step") {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::AdditionalPhase {
+            target: TargetFilter::Controller,
+            phase: Phase::End,
+            after: Phase::End,
+            followed_by: vec![],
+            count: parse_additional_phase_count(lower),
+        }));
+    }
 
     // CR 606.3: "activate each planeswalker's loyalty ability an additional
     // time this turn" — The Chain Veil class. The outer "you may" is
@@ -6954,6 +7094,8 @@ pub(super) fn parse_imperative_family_ast(
                 .unwrap_or(1);
             Some(ImperativeFamilyAst::GainKeyword(Effect::BlightEffect {
                 count,
+                // CR 701.68a: bare "blight N" is the controller blighting.
+                player: crate::types::ability::TargetFilter::Controller,
             }))
         }
         // Forage keyword action (CR 701.61a)

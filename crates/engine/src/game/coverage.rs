@@ -471,6 +471,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::CostPaidObject => "cost-paid object".into(),
         TargetFilter::TriggeringSpellController => "triggering spell's controller".into(),
         TargetFilter::TriggeringSpellOwner => "triggering spell's owner".into(),
+        TargetFilter::TriggeringSourceController => "triggering source's controller".into(),
         TargetFilter::TriggeringPlayer => "triggering player".into(),
         TargetFilter::TriggeringSource => "triggering source".into(),
         TargetFilter::DefendingPlayer => "defending player".into(),
@@ -2670,8 +2671,12 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("kept".into(), format!("{:?}", kept_destination)));
             d.push(("rest".into(), format!("{:?}", rest_destination)));
         }
-        Effect::Discover { mana_value_limit } => {
+        Effect::Discover {
+            mana_value_limit,
+            player,
+        } => {
             d.push(("mv limit".into(), format!("{:?}", mana_value_limit)));
+            d.push(("player".into(), format!("{player:?}")));
         }
         // Heist (Arena digital-only): look step records the look count.
         Effect::Heist { look_count, .. } => {
@@ -2804,8 +2809,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Endure { amount } => {
             d.push(("amount".into(), amount.to_string()));
         }
-        Effect::BlightEffect { count } => {
+        Effect::BlightEffect { count, player } => {
             d.push(("count".into(), count.to_string()));
+            d.push(("player".into(), format!("{player:?}")));
         }
         Effect::Seek {
             filter,
@@ -5712,6 +5718,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // CR 500.8 + CR 506.1 + CR 608.2c: combat-phase count check; handled by
         // `evaluate_condition` (effects/mod.rs).
         AbilityCondition::FirstCombatPhaseOfTurn => ("FirstCombatPhaseOfTurn", Handled),
+        AbilityCondition::FirstEndStepOfTurn => ("FirstEndStepOfTurn", Handled),
         // CR 614.1a: `ConditionInstead` wraps a general condition with swap-on-true semantics.
         AbilityCondition::ConditionInstead { .. } => ("ConditionInstead", Handled),
         // CR 608.2c + CR 614.1d: "you control a/no [filter]" — handled by

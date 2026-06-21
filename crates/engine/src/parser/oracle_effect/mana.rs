@@ -1350,13 +1350,35 @@ fn parse_activation_source_quality(input: &str) -> OracleResult<'_, String> {
     Ok((rest, normalize_restricted_source_phrase(phrase.trim())))
 }
 
-fn parse_activation_tail_after_or(input: &str) -> OracleResult<'_, Option<String>> {
+/// The qualifier parsed from an "activate …" tail. Distinguishes between
+/// a type-scoped qualifier ("abilities of X") and a keyword-tagged qualifier
+/// ("equip abilities").
+enum ActivationQualifier {
+    /// "abilities of [source quality]" — type-scoped.
+    OfType(String),
+    /// "equip abilities" / "an equip ability" — keyword-tagged.
+    Tagged(AbilityTag),
+}
+
+fn parse_activation_tail_after_or(input: &str) -> OracleResult<'_, Option<ActivationQualifier>> {
     let (input, _) = opt(tag("to ")).parse(input)?;
     let (input, _) = tag("activate ").parse(input)?;
+    // CR 702.6: "equip abilities" / "an equip ability" — keyword-qualified
+    // activation forms that refer to equip abilities on Equipment permanents.
+    // Recognize before the generic "an ability" / "abilities" alternatives so
+    // the keyword qualifier is not swallowed by the broader match.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("equip abilities"),
+        tag("an equip ability"),
+    ))
+    .parse(input)
+    {
+        return Ok((rest, Some(ActivationQualifier::Tagged(AbilityTag::Equip))));
+    }
     let (input, _) = alt((tag("an ability"), tag("abilities"))).parse(input)?;
     let (input, source_quality) =
         opt(preceded(tag(" of "), parse_activation_source_quality)).parse(input)?;
-    Ok((input, source_quality))
+    Ok((input, source_quality.map(ActivationQualifier::OfType)))
 }
 
 /// The ability-activation tail of a "cast [X] spell …" spend restriction.
@@ -1367,6 +1389,10 @@ enum ActivationTail {
     Any,
     /// "… or activate abilities of [source quality]" — abilities of that type.
     OfType(String),
+    /// "… or activate equip abilities" — only equip-tagged abilities.
+    /// CR 702.6a: Lowered to `ActivateTagged(AbilityTag::Equip)` so the
+    /// restriction is keyword-precise rather than source-type-permissive.
+    Tagged(AbilityTag),
 }
 
 fn split_restricted_spell_and_activation(rest: &str) -> (&str, ActivationTail) {
@@ -1386,11 +1412,13 @@ fn split_restricted_spell_and_activation(rest: &str) -> (&str, ActivationTail) {
     )))
     .parse(rest)
     .map(|(_, (spell_part, source_quality))| (spell_part.trim(), source_quality));
-    if let Ok((spell_part, source_quality)) = activation_tail {
-        return (
-            spell_part,
-            source_quality.map_or(ActivationTail::Any, ActivationTail::OfType),
-        );
+    if let Ok((spell_part, qualifier)) = activation_tail {
+        let tail = match qualifier {
+            None => ActivationTail::Any,
+            Some(ActivationQualifier::OfType(s)) => ActivationTail::OfType(s),
+            Some(ActivationQualifier::Tagged(t)) => ActivationTail::Tagged(t),
+        };
+        return (spell_part, tail);
     }
 
     (rest.trim(), ActivationTail::None)
@@ -1466,6 +1494,23 @@ pub(crate) fn parse_mana_spend_restriction(
     .is_some()
     {
         return Some((ManaSpendRestriction::XCostOnly, vec![]));
+    }
+
+    // CR 106.6: Activation-first disjunction — "to activate X or cast Y" (Automated
+    // Artificer). The "to cast " prefix check below would reject this ordering, so
+    // detect the activation-first pattern and route through the disjunction parser
+    // with the full base text (stripped of the leading "to ").
+    if nom_on_lower(base, &base_lower, |i| {
+        value((), (tag("to activate "), take_until(" or cast "))).parse(i)
+    })
+    .is_some()
+    {
+        // Strip leading "to " so each clause starts bare for parse_disjunctive_clause.
+        let without_to = nom_on_lower(base, &base_lower, |i| value((), tag("to ")).parse(i))
+            .map_or(base, |(_, rest)| rest);
+        if let Some(restriction) = parse_disjunctive_cast_clauses(without_to.trim()) {
+            return Some((restriction, vec![]));
+        }
     }
 
     let (_, rest) = nom_on_lower(base, &base_lower, |i| value((), tag("to cast ")).parse(i))?;
@@ -1587,6 +1632,13 @@ fn parse_single_cast_clause(rest: &str) -> Option<ManaSpendRestriction> {
             spell_type: type_phrase,
             ability: AbilityActivationScope::Any,
         }),
+        // CR 702.6a: "cast Equipment spells or activate equip abilities" —
+        // disjunction of a spell-type restriction and a keyword-tagged
+        // activation restriction. Precise: only equip-tagged abilities qualify.
+        ActivationTail::Tagged(ability_tag) => Some(ManaSpendRestriction::Any(vec![
+            ManaSpendRestriction::SpellType(type_phrase),
+            ManaSpendRestriction::ActivateTagged(ability_tag),
+        ])),
         ActivationTail::None => Some(ManaSpendRestriction::SpellType(type_phrase)),
     }
 }
@@ -1599,9 +1651,37 @@ fn parse_single_cast_clause(rest: &str) -> Option<ManaSpendRestriction> {
 ///
 /// Returns `None` for any clause that does not independently parse — the caller
 /// then drops the whole disjunction rather than guessing.
+/// CR 106.6 + CR 116.2m + CR 709.5e: Recognize the non-cast "unlock [a ]door[s]"
+/// special-action clause of a disjunctive spend restriction (Smoky Lounge: "cast
+/// Room spells and unlock doors"). Tolerates an optional leading "to " (the
+/// split may leave "to unlock ..." on a trailing clause) and the
+/// singular/plural article forms. Returns the `UnlockDoor` leaf, which lowers to
+/// the door-unlock special-action runtime gate. Pure combinator — no string
+/// dispatch.
+fn parse_unlock_door_clause(clause: &str, clause_lower: &str) -> Option<ManaSpendRestriction> {
+    nom_on_lower(clause, clause_lower, |i| {
+        let (i, _) = opt(tag("to ")).parse(i)?;
+        let (i, _) = tag("unlock ").parse(i)?;
+        let (i, _) = opt(alt((tag("a "), tag("an ")))).parse(i)?;
+        value(
+            ManaSpendRestriction::UnlockDoor,
+            all_consuming(alt((tag("doors"), tag("door")))),
+        )
+        .parse(i)
+    })
+    .map(|(restriction, _)| restriction)
+}
+
 fn parse_disjunctive_clause(clause: &str) -> Option<ManaSpendRestriction> {
     let clause = clause.trim();
     let clause_lower = clause.to_lowercase();
+
+    // CR 116.2m + CR 709.5e: Non-cast door-unlock special-action clause — tried
+    // before the cast/activate arms so "unlock doors" isn't mistaken for a cast
+    // clause (it has no " spell" terminator and would otherwise fail to parse).
+    if let Some(restriction) = parse_unlock_door_clause(clause, &clause_lower) {
+        return Some(restriction);
+    }
 
     // ACTIVATE clause: "to activate an ability of an X source" / "activate an
     // equip ability" / "to activate an ability". Reuse the existing activation
@@ -1611,10 +1691,10 @@ fn parse_disjunctive_clause(clause: &str) -> Option<ManaSpendRestriction> {
     })
     .is_some()
     {
-        let (_, source_quality) = all_consuming(parse_activation_tail_after_or)
+        let (_, qualifier) = all_consuming(parse_activation_tail_after_or)
             .parse(clause_lower.as_str())
             .ok()?;
-        return Some(match source_quality {
+        return Some(match qualifier {
             // CR 106.6: "activate an ability of an X source" — abilities of
             // permanents of type X. There is no pure "activate abilities of type
             // X" `ManaRestriction`; the closest self-evaluable reading is
@@ -1622,10 +1702,16 @@ fn parse_disjunctive_clause(clause: &str) -> Option<ManaSpendRestriction> {
             // half is exactly "abilities of type X" (and whose spell half also
             // allows X spells — harmless inside a disjunction that already lists
             // the matching X cast clause, e.g. Brotherhood Headquarters).
-            Some(quality) => ManaSpendRestriction::SpellTypeOrAbilityActivation {
-                spell_type: quality,
-                ability: AbilityActivationScope::OfSpellType,
-            },
+            Some(ActivationQualifier::OfType(quality)) => {
+                ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type: quality,
+                    ability: AbilityActivationScope::OfSpellType,
+                }
+            }
+            // CR 702.6a: "activate equip abilities" — keyword-tagged.
+            Some(ActivationQualifier::Tagged(ability_tag)) => {
+                ManaSpendRestriction::ActivateTagged(ability_tag)
+            }
             // CR 106.6: "to activate an ability" with no qualifier — any ability.
             None => ManaSpendRestriction::ActivateOnly,
         });
@@ -1658,7 +1744,19 @@ fn parse_disjunctive_clause(clause: &str) -> Option<ManaSpendRestriction> {
 /// parser-combinator mandate, rather than `str::split`.
 fn parse_one_disjunction_clause(input: &str) -> OracleResult<'_, &str> {
     recognize(many1(preceded(
-        not(alt((tag(", or "), tag(", "), tag(" or ")))),
+        // CR 106.6: " or ", " and ", and the Oxford-comma forms each separate
+        // distinct acceptable actions in a spend restriction. " and " joins
+        // heterogeneous spend clauses too (Smoky Lounge: "cast Room spells and
+        // unlock doors") — a same-clause type union ("instant and sorcery
+        // spells") never reaches this splitter because the caller tries the
+        // whole remainder as a single clause first.
+        not(alt((
+            tag(", or "),
+            tag(", and "),
+            tag(", "),
+            tag(" or "),
+            tag(" and "),
+        ))),
         anychar,
     )))
     .parse(input)
@@ -1666,13 +1764,20 @@ fn parse_one_disjunction_clause(input: &str) -> OracleResult<'_, &str> {
 
 fn parse_disjunctive_cast_clauses(rest: &str) -> Option<ManaSpendRestriction> {
     // CR 106.6: Split the remainder into top-level disjunction clauses with a nom
-    // separated list — delimiters are " or " and the Oxford-comma forms (", " /
-    // ", or "). Longest delimiter first so ", or " wins over its ", " prefix.
-    // Each clause is the run of input up to the next delimiter; a type union
-    // inside one clause ("instant or sorcery spells") never reaches here because
-    // the caller tries the whole remainder as a single clause first.
+    // separated list — delimiters are " or ", " and ", and the Oxford-comma forms
+    // (", " / ", or " / ", and "). Longest delimiter first so ", or "/", and "
+    // win over their ", " prefix. Each clause is the run of input up to the next
+    // delimiter; a type union inside one clause ("instant or sorcery spells",
+    // "instant and sorcery spells") never reaches here because the caller tries
+    // the whole remainder as a single clause first.
     let (_, fragments) = all_consuming(separated_list1(
-        alt((tag(", or "), tag(", "), tag(" or "))),
+        alt((
+            tag(", or "),
+            tag(", and "),
+            tag(", "),
+            tag(" or "),
+            tag(" and "),
+        )),
         parse_one_disjunction_clause,
     ))
     .parse(rest)
@@ -3434,5 +3539,125 @@ mod tests {
                 polarity: ZoneSpendPolarity::From,
             }))
         );
+    }
+
+    // CR 106.6 + CR 116.2m + CR 709.5e: Smoky Lounge — "cast Room spells and
+    // unlock doors" is a heterogeneous disjunction joined by " and ". It lowers
+    // to `Any([SpellType("Room"), UnlockDoor])`: the door-unlock leaf is a
+    // non-cast special-action restriction sitting alongside a cast clause.
+    #[test]
+    fn mana_spend_restriction_smoky_lounge_room_or_unlock_doors() {
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast room spells and unlock doors",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::Any(vec![
+                ManaSpendRestriction::SpellType("Room".to_string()),
+                ManaSpendRestriction::UnlockDoor,
+            ]))
+        );
+    }
+
+    // The door-unlock clause parses with the singular article form too, and on
+    // either side of the connective, so the leaf is order-independent.
+    #[test]
+    fn mana_spend_restriction_unlock_a_door_singular_clause() {
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast room spells or unlock a door",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::Any(vec![
+                ManaSpendRestriction::SpellType("Room".to_string()),
+                ManaSpendRestriction::UnlockDoor,
+            ]))
+        );
+    }
+
+    // GUARD: a same-clause type union ("instant and sorcery spells") must still
+    // read as a single `SpellType`, never split by the new " and " delimiter.
+    // The whole-remainder single-clause path consumes it before the splitter.
+    #[test]
+    fn mana_spend_restriction_instant_and_sorcery_stays_single_type() {
+        let result =
+            parse_mana_spend_restriction("spend this mana only to cast instant and sorcery spells");
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellType(
+                "Instant and Sorcery".to_string()
+            ))
+        );
+    }
+
+    // HONEST-DEFER GUARD: the four batch-7 members whose disjunction contains a
+    // non-cast leaf with no restriction-aware payment seam (turn-face-up,
+    // activate-equip) must NOT produce a partial `Any` that silently drops the
+    // unenforceable leaf — a partial disjunction would over-restrict the mana
+    // (it could no longer pay the legal non-cast action). They stay an honest
+    // gap (None) until the underlying special-action payment seams exist.
+    #[test]
+    fn mana_spend_restriction_unenforceable_noncast_leaves_stay_gap() {
+        // Creeping Peeper: enchantment-spell, unlock-door, turn-face-up. The
+        // turn-face-up leaf is unenforceable, so the whole thing is deferred.
+        assert_eq!(
+            parse_mana_spend_restriction(
+                "spend this mana only to cast an enchantment spell, unlock a door, or turn a permanent face up",
+            )
+            .map(|(r, _)| r),
+            None,
+        );
+        // Tin Street Gossip: face-down spells or turn creatures face up.
+        assert_eq!(
+            parse_mana_spend_restriction(
+                "spend this mana only to cast face-down spells or to turn creatures face up",
+            )
+            .map(|(r, _)| r),
+            None,
+        );
+        // Overgrown Zealot: pure turn-permanents-face-up (no cast clause at all).
+        assert_eq!(
+            parse_mana_spend_restriction("spend this mana only to turn permanents face up")
+                .map(|(r, _)| r),
+            None,
+        );
+    }
+
+    // CR 702.6a: Ronin, Shadow Stalker — plural "equip abilities" in the
+    // activation tail maps to `Any([SpellType("Equipment"), ActivateTagged(Equip)])`.
+    // Keyword-precise: only equip-tagged abilities qualify, not arbitrary
+    // activated abilities on Equipment permanents.
+    #[test]
+    fn mana_spend_restriction_equip_abilities_plural() {
+        let (restriction, grants) = parse_mana_spend_restriction(
+            "spend this mana only to cast equipment spells or activate equip abilities",
+        )
+        .expect("equip abilities plural must parse");
+        assert_eq!(
+            restriction,
+            ManaSpendRestriction::Any(vec![
+                ManaSpendRestriction::SpellType("Equipment".to_string()),
+                ManaSpendRestriction::ActivateTagged(AbilityTag::Equip),
+            ])
+        );
+        assert!(grants.is_empty());
+    }
+
+    // CR 702.6a: Freya Crescent — singular "an equip ability" in the activation
+    // tail maps to the same `Any([SpellType("Equipment"), ActivateTagged(Equip)])`.
+    #[test]
+    fn mana_spend_restriction_equip_ability_singular() {
+        let (restriction, grants) = parse_mana_spend_restriction(
+            "spend this mana only to cast an equipment spell or activate an equip ability",
+        )
+        .expect("equip ability singular must parse");
+        assert_eq!(
+            restriction,
+            ManaSpendRestriction::Any(vec![
+                ManaSpendRestriction::SpellType("Equipment".to_string()),
+                ManaSpendRestriction::ActivateTagged(AbilityTag::Equip),
+            ])
+        );
+        assert!(grants.is_empty());
     }
 }
