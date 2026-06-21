@@ -10844,6 +10844,11 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
                 def.mode = TriggerMode::CollectEvidence;
                 return Some((TriggerMode::CollectEvidence, def));
             }
+            // CR 701.16a: Investigate — create a Clue artifact token.
+            [PlayerActionKind::Investigate] => {
+                def.mode = TriggerMode::Investigated;
+                return Some((TriggerMode::Investigated, def));
+            }
             // CR 701.24a: Shuffle — player-action trigger, scoped by
             // valid_target so "you", "an opponent", and "a player" forms all
             // use the same matcher path.
@@ -10889,6 +10894,8 @@ fn parse_player_action_phrase(text: &str) -> Option<PlayerActionKind> {
         "surveil" | "surveils" => Some(PlayerActionKind::Surveil),
         // CR 701.59a: Collect evidence — exile cards from your graveyard with total mana value N or more.
         "collect evidence" | "collects evidence" => Some(PlayerActionKind::CollectEvidence),
+        // CR 701.16a: Investigate — create a Clue artifact token.
+        "investigate" | "investigates" => Some(PlayerActionKind::Investigate),
         "shuffle your library"
         | "shuffles their library"
         | "shuffle their library"
@@ -20480,6 +20487,31 @@ mod tests {
             "Mirko, Obsessive Theorist",
         );
         assert_eq!(def.mode, TriggerMode::Surveil);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_you_investigate() {
+        // Erdwal Illuminator (SOI): "Whenever you investigate for the first time
+        // each turn, investigate an additional time." The "for the first time
+        // each turn" qualifier becomes OncePerTurn; the trigger itself must be
+        // Investigated (not the inert Unknown that never fires).
+        let def = parse_trigger_line(
+            "Whenever you investigate for the first time each turn, investigate an additional time.",
+            "Erdwal Illuminator",
+        );
+        assert_eq!(def.mode, TriggerMode::Investigated);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    }
+
+    #[test]
+    fn trigger_you_investigate_bare() {
+        let def = parse_trigger_line(
+            "Whenever you investigate, draw a card.",
+            "Test Investigator",
+        );
+        assert_eq!(def.mode, TriggerMode::Investigated);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     }
 
