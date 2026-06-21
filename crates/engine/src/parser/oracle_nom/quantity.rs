@@ -1268,22 +1268,31 @@ fn parse_controlled_by_extremum_player(input: &str) -> OracleResult<'_, Quantity
 pub(crate) fn parse_player_with_extremum_cards_in_hand(
     input: &str,
 ) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("the player with the ").parse(input)?;
+    let (rest, _) = tag("the ").parse(input)?;
+    // CR 402: optional verbose wrapper — "the number of cards in the hand of the
+    // <player/opponent> with the <most/fewest> cards in hand" (Adamaro) names the
+    // same hand-size quantity as the short "the <player> with the ..." form.
+    let (rest, _) = opt(tag("number of cards in the hand of the ")).parse(rest)?;
+    // CR 102.2/102.3: "opponent" scopes the extremum to the controller's
+    // opponents (PlayerScope::Opponent); "player" spans all players.
+    let (rest, opponent) =
+        alt((value(true, tag("opponent")), value(false, tag("player")))).parse(rest)?;
+    let (rest, _) = tag(" with the ").parse(rest)?;
     let (rest, aggregate) = alt((
         value(AggregateFunction::Max, tag("most")),
         value(AggregateFunction::Min, tag("fewest")),
     ))
     .parse(rest)?;
     let (rest, _) = tag(" cards in hand").parse(rest)?;
-    Ok((
-        rest,
-        QuantityRef::HandSize {
-            player: PlayerScope::AllPlayers {
-                aggregate,
-                exclude: None,
-            },
-        },
-    ))
+    let player = if opponent {
+        PlayerScope::Opponent { aggregate }
+    } else {
+        PlayerScope::AllPlayers {
+            aggregate,
+            exclude: None,
+        }
+    };
+    Ok((rest, QuantityRef::HandSize { player }))
 }
 
 /// Parse "[type(s)] you control" / "[type(s)] the chosen player controls" after
@@ -5514,6 +5523,54 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_opponent_with_most_cards_in_hand_verbose() {
+        // CR 102.2/102.3 + CR 402: Adamaro — the verbose wrapper plus the
+        // opponent scope. Reuses PlayerScope::Opponent (no new variant).
+        let (rest, q) = parse_quantity_ref(
+            "the number of cards in the hand of the opponent with the most cards in hand",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Max,
+                },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_player_extremum_verbose_and_opponent_short() {
+        // The verbose wrapper over the all-players scope still yields AllPlayers.
+        let (_, verbose_player) = parse_quantity_ref(
+            "the number of cards in the hand of the player with the fewest cards in hand",
+        )
+        .unwrap();
+        assert_eq!(
+            verbose_player,
+            QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Min,
+                    exclude: None,
+                },
+            }
+        );
+        // The short opponent form maps to Opponent as well.
+        let (_, short_opp) =
+            parse_quantity_ref("the opponent with the fewest cards in hand").unwrap();
+        assert_eq!(
+            short_opp,
+            QuantityRef::HandSize {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Min,
+                },
+            }
+        );
     }
 
     #[test]
