@@ -7478,6 +7478,25 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
         tag("each player may cast the card they exiled this way"),
         tag("each player may play the cards they exiled this way"),
         tag("each player may cast the cards they exiled this way"),
+        // CR 611.2a + CR 108.3 + CR 400.7i: Subject-elided owner-binding grant
+        // — Lightstall Inquisitor's "each opponent exiles a card from their hand
+        // **and may play that card** for as long as it remains exiled". The
+        // chunk loop split the compound at the bare " and " (see
+        // `starts_bare_and_clause`) and peels only "you may " — never a bare
+        // "may " — so a leading bare "may play"/"may cast" here is the
+        // subject-elided continuation of a player-scoped exile. The elided
+        // subject is the exiling player (the card's owner), so the grant binds
+        // per-card via `PermissionGrantee::ObjectOwner`. The "you may " /
+        // impulse-draw form is stripped to a bare "play that card" before
+        // reaching this function, so it never collides with this arm.
+        tag("may play that card"),
+        tag("may cast that card"),
+        tag("may play that spell"),
+        tag("may cast that spell"),
+        tag("may play those cards"),
+        tag("may cast those cards"),
+        tag("may play it"),
+        tag("may cast it"),
     ))
     .parse(lower)
     .is_ok()
@@ -7501,9 +7520,19 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
         return None;
     };
 
-    // Duration: default to UntilEndOfTurn if unspecified (matches impulse-draw default).
-    let (_, dur) = strip_trailing_duration(tp.original);
-    let duration = dur.unwrap_or(Duration::UntilEndOfTurn);
+    // CR 400.7i + CR 611.2a: "for as long as it remains exiled" persists until
+    // the exile-scoped permission is cleared on zone exit
+    // (`zones::apply_zone_exit_cleanup`) — the same Permanent encoding the
+    // impulse `try_parse_play_from_exile` path uses (Lightstall Inquisitor).
+    // Otherwise default to UntilEndOfTurn (matches impulse-draw default).
+    let duration = if scan_contains_phrase(tp.lower, "remain exiled")
+        || scan_contains_phrase(tp.lower, "remains exiled")
+    {
+        Duration::Permanent
+    } else {
+        let (_, dur) = strip_trailing_duration(tp.original);
+        dur.unwrap_or(Duration::UntilEndOfTurn)
+    };
 
     Some(parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
@@ -7517,6 +7546,8 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
             card_filter: None,
             single_use_group: None,
             single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         },
         target: TargetFilter::TrackedSet {
             id: TrackedSetId(0),
@@ -7634,6 +7665,8 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
             card_filter,
             single_use_group: None,
             single_use,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         },
         // CR 603.7 + CR 608.2c: TrackedSet sentinel — the runtime resolver
         // normalizes `TrackedSetId(0)` to the most recently published set
@@ -7723,6 +7756,8 @@ fn try_parse_exile_play_grant_with_any_mana(tp: TextPair<'_>) -> Option<ParsedEf
             card_filter: None,
             single_use_group: None,
             single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         },
         target,
         grantee,
@@ -7923,6 +7958,8 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
             card_filter: None,
             single_use_group: None,
             single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         },
         // CR 603.7 + CR 611.2a: The grant must reach the tracked exile set
         // (the cards exiled by the prior clause) rather than fall back to the
@@ -7962,6 +7999,8 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
             card_filter: None,
             single_use_group: None,
             single_use: false,
+            cast_cost_raise: None,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         },
         target: tracked_set_filter(),
         grantee: Default::default(),
@@ -8068,6 +8107,8 @@ pub(crate) fn try_parse_exile_top_each_library_with_collection_counter(
                 card_filter: None,
                 single_use_group: None,
                 single_use: false,
+                cast_cost_raise: None,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             },
             target: TargetFilter::TrackedSet {
                 id: TrackedSetId(0),
@@ -31230,9 +31271,98 @@ mod tests {
             e,
             Effect::GenericEffect {
                 target: Some(TargetFilter::Typed(ref tf)),
+                duration: Some(Duration::UntilEndOfTurn),
                 ..
             } if tf.type_filters.contains(&TypeFilter::Creature)
         ));
+    }
+
+    /// CR 611.2a + CR 514.2: "gains <keyword> until end of turn and <non-pump
+    /// conjunct>" must keep the `until end of turn` duration on the keyword
+    /// grant. Homarid Warrior: "This creature gains shroud until end of turn
+    /// and doesn't untap during your next untap step." Previously the trailing
+    /// "and …" conjunct kept the clause unified, the suffix-only
+    /// `strip_trailing_duration` could not reach the mid-clause duration, and
+    /// shroud was granted permanently (duration: None).
+    #[test]
+    fn keyword_grant_with_non_pump_conjunct_keeps_until_end_of_turn() {
+        let def = parse_effect_chain(
+            "This creature gains shroud until end of turn and doesn't untap during your next untap step.",
+            AbilityKind::Activated,
+        );
+
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected keyword GenericEffect, got {:?}", def.effect);
+        };
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+        assert!(static_abilities.iter().any(|s| s.modifications.contains(
+            &ContinuousModification::AddKeyword {
+                keyword: Keyword::Shroud
+            }
+        )));
+
+        // The "doesn't untap" conjunct must survive as a chained sub_ability —
+        // it must not be silently dropped by the split.
+        let sub = def
+            .sub_ability
+            .as_deref()
+            .expect("non-pump conjunct must be chained as a sub_ability");
+        assert!(
+            matches!(&*sub.effect, Effect::GenericEffect { .. }),
+            "expected the doesn't-untap conjunct to lower to a restriction GenericEffect, got {:?}",
+            sub.effect
+        );
+    }
+
+    /// Over-split guard: a multi-keyword grant whose single duration trails
+    /// both keywords ("gains flying and haste until end of turn") must stay a
+    /// unified clause with the duration applied — the keyword-grant-compound
+    /// split must NOT fire.
+    #[test]
+    fn multi_keyword_grant_with_shared_duration_stays_unified() {
+        let def = parse_effect_chain(
+            "This creature gains flying and haste until end of turn.",
+            AbilityKind::Activated,
+        );
+        assert!(
+            def.sub_ability.is_none(),
+            "multi-keyword grant must not be split into a sub_ability"
+        );
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected keyword GenericEffect, got {:?}", def.effect);
+        };
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+        let keywords: Vec<&ContinuousModification> = static_abilities
+            .iter()
+            .flat_map(|s| s.modifications.iter())
+            .collect();
+        assert!(keywords.contains(&&ContinuousModification::AddKeyword {
+            keyword: Keyword::Flying
+        }));
+        assert!(keywords.contains(&&ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste
+        }));
+    }
+
+    /// Regression: a standalone keyword grant still carries its duration.
+    #[test]
+    fn standalone_keyword_grant_keeps_until_end_of_turn() {
+        let def = parse_effect_chain("It gains haste until end of turn.", AbilityKind::Spell);
+        assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+        let Effect::GenericEffect { duration, .. } = &*def.effect else {
+            panic!("expected keyword GenericEffect, got {:?}", def.effect);
+        };
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
     }
 
     #[test]
