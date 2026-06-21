@@ -43,11 +43,11 @@ const OKETRA: &str = "Your life total becomes equal to your starting life total.
 fn object_count_controller(amount: &QuantityExpr) -> Option<ControllerRef> {
     match amount {
         QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCount { filter },
-        } => match filter {
-            TargetFilter::Typed(tf) => tf.controller.clone(),
-            _ => None,
-        },
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                },
+        } => tf.controller.clone(),
         _ => None,
     }
 }
