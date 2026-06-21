@@ -5156,11 +5156,15 @@ fn parse_continuous_modifications_are_goaded_emits_goaded_static_mode() {
 /// Welder, Territory Forge). Issue #3101.
 #[test]
 fn parse_continuous_modifications_grants_all_activated_abilities_of_exiled() {
-    use crate::types::ability::TargetFilter;
+    use crate::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+    // Untyped exiled-with-it forms (Myr Welder, Territory Forge), including the
+    // leading copula that the subject-predicate static path passes through.
     for predicate in [
         "all activated abilities of all cards exiled with it",
         "all activated abilities of all cards exiled with ~",
         "all activated abilities of the exiled card",
+        "has all activated abilities of all cards exiled with it",
+        "has all activated abilities of the exiled card",
     ] {
         let mods = parse_continuous_modifications(predicate);
         assert_eq!(
@@ -5171,13 +5175,22 @@ fn parse_continuous_modifications_grants_all_activated_abilities_of_exiled() {
             "predicate: {predicate}"
         );
     }
-    // Typed/counter/battlefield forms stay a gap (no modification) for now.
-    assert!(
-        parse_continuous_modifications(
-            "all activated abilities of all creature cards exiled with it"
-        )
-        .is_empty(),
-        "typed 'creature cards exiled with it' must stay a gap (follow-up)"
+    // CR 205.2a: the typed "all creature cards exiled with it" restricts the
+    // granted set to creatures (Dark Impostor, Patchwork Crawler).
+    let typed = parse_continuous_modifications(
+        "has all activated abilities of all creature cards exiled with it",
+    );
+    assert_eq!(
+        typed,
+        vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+            source: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ExiledBySource,
+                    TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
+                ],
+            },
+        }],
+        "typed 'creature cards exiled with it' should restrict to creatures"
     );
 }
 

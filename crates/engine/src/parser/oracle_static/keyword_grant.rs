@@ -614,14 +614,59 @@ pub(crate) fn parse_chosen_qualifier_subject(tp: &TextPair<'_>) -> Option<Target
 fn parse_grant_all_activated_abilities_source(
     lower: &str,
 ) -> Option<crate::types::ability::TargetFilter> {
+    use crate::types::ability::{TypeFilter, TypedFilter};
     let p = lower.trim().trim_end_matches('.').trim();
-    all_consuming(preceded(
-        tag::<_, _, OracleError<'_>>("all activated abilities of "),
+
+    // CR 205.2a: a card-type qualifier on "all <type> cards exiled with it"
+    // (Dark Impostor / Patchwork Crawler restrict the granted set to creatures).
+    fn core_type_filter(input: &str) -> OracleResult<'_, TargetFilter> {
         alt((
+            value(TypeFilter::Creature, tag("creature")),
+            value(TypeFilter::Artifact, tag("artifact")),
+            value(TypeFilter::Enchantment, tag("enchantment")),
+            value(TypeFilter::Planeswalker, tag("planeswalker")),
+            value(TypeFilter::Land, tag("land")),
+        ))
+        .map(|ty| TargetFilter::Typed(TypedFilter::default().with_type(ty)))
+        .parse(input)
+    }
+
+    // A leading copula ("has"/"have"/"gains"/"gain"/"are"/"is") is present when
+    // the predicate arrives from the subject-predicate static path (e.g. "This
+    // creature has all activated abilities of …"); strip it as the sibling
+    // modification parsers do, then require the "all activated abilities of "
+    // spine.
+    all_consuming(preceded(
+        (
+            opt(alt((
+                tag::<_, _, OracleError<'_>>("has "),
+                tag("have "),
+                tag("gains "),
+                tag("gain "),
+                tag("are "),
+                tag("is "),
+            ))),
+            tag("all activated abilities of "),
+        ),
+        alt((
+            // Territory Forge: "the exiled card".
             value(TargetFilter::ExiledBySource, tag("the exiled card")),
-            value(
-                TargetFilter::ExiledBySource,
-                (tag("all cards exiled with "), alt((tag("it"), tag("~")))),
+            // CR 613.1f: "all [<type>] cards exiled with it/~" — the cards exiled
+            // with the source, optionally restricted to a card type (Myr Welder
+            // untyped; Dark Impostor / Patchwork Crawler creature-typed).
+            map(
+                (
+                    tag("all "),
+                    opt(terminated(core_type_filter, tag(" "))),
+                    tag("cards exiled with "),
+                    alt((tag("it"), tag("~"))),
+                ),
+                |(_, type_filter, _, _)| match type_filter {
+                    Some(tf) => TargetFilter::And {
+                        filters: vec![TargetFilter::ExiledBySource, tf],
+                    },
+                    None => TargetFilter::ExiledBySource,
+                },
             ),
         )),
     ))
