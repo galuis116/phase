@@ -2524,6 +2524,12 @@ fn detect_duration_this_turn(
         // to the one-shot effect (it expires at cleanup, CR 514.2), not a
         // separate `duration` slot.
         "CreateDamageReplacement",
+        // CR 614.11 + CR 514.2: `CreateDrawReplacement` is the one-shot draw
+        // replacement for "the next time you would draw a card this turn,
+        // [effect] instead" (Words of Worship/Wilding). Its "this turn" lifetime
+        // is inherent to the one-shot effect (expires at cleanup), not a
+        // separate `duration` slot — same as `CreateDamageReplacement` above.
+        "CreateDrawReplacement",
         "AddTargetReplacement",
         // CR 603.7c: A `CreateDelayedTrigger` with `WhenNextEvent` condition
         // IS the "next [event] this turn" delayed-trigger scope (Chandra,

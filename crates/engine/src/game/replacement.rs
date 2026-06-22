@@ -5088,14 +5088,28 @@ fn apply_single_replacement(
             // the accept-side AST. The `draw_replacement_count` guard preserves
             // the count-modifier path (Alhammarret's Archive: count -> 2*count).
             if matches!(proposed, ProposedEvent::Draw { .. }) {
-                if let Some(def) = ability {
-                    let is_non_draw_substitute = !matches!(*def.effect, Effect::Draw { .. })
-                        && !EventModifiers::has_only_event_modifier(Some(def))
-                        && draw_replacement_count(state, rid, &proposed).is_none();
-                    if is_non_draw_substitute {
-                        if let ProposedEvent::Draw { count, .. } = &mut proposed {
-                            *count = 0;
-                        }
+                // CR 614.6 + CR 614.11: A one-shot draw replacement
+                // (Words of Worship/Wilding) carries its substitute in
+                // `runtime_execute` (`execute` is `None`), so the `ability`
+                // binding above is `None`. Inspect that slot too — a non-Draw,
+                // non-event-modifier substitute (GainLife / Token) must still
+                // pre-zero the draw, or the card is drawn AND the substitute
+                // runs (double). Damage/Jace/Abundance use `execute`, so
+                // `ability` is `Some` and this `runtime` branch never engages.
+                let is_non_draw_substitute = match ability {
+                    Some(def) => {
+                        !matches!(*def.effect, Effect::Draw { .. })
+                            && !EventModifiers::has_only_event_modifier(Some(def))
+                            && draw_replacement_count(state, rid, &proposed).is_none()
+                    }
+                    None => repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
+                        !matches!(runtime.effect, Effect::Draw { .. })
+                            && !EventModifiers::is_event_modifier_effect(&runtime.effect)
+                    }),
+                };
+                if is_non_draw_substitute {
+                    if let ProposedEvent::Draw { count, .. } = &mut proposed {
+                        *count = 0;
                     }
                 }
             }
