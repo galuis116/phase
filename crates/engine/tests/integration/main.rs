@@ -401,6 +401,7 @@ mod multi_upkeep_triggers_suspend;
 mod mycoloth_upkeep_trigger;
 mod mystic_forge_regression;
 mod narset_jeskai_waymaster_draw_spells_cast;
+mod necrodominance_pay_any_life_draw;
 mod ninjutsu_cluster;
 mod nix_counter_no_mana_spent;
 mod ob_nixilis_captive_kingpin_life_loss;
