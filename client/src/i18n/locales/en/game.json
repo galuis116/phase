@@ -454,6 +454,16 @@
     "resourceCounters": "counters",
     "resourceSpeed": "speed"
   },
+  "auctionBid": {
+    "title": "Bid life",
+    "openingPrompt": "Start the bidding with a bid of any number.",
+    "highBid": "Current high bid: {{bid}} life",
+    "bidEquals": "Bid {{value}}",
+    "bidAria": "Choose a life amount to bid",
+    "lifeMax": "max {{max}}",
+    "submitBid": "Bid {{value}} life",
+    "pass": "Pass"
+  },
   "hand": {
     "viewFullHand_one": "View full hand ({{count}} card)",
     "viewFullHand_other": "View full hand ({{count}} cards)",

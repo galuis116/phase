@@ -425,6 +425,16 @@
     "resourceCounters": "marcadores",
     "resourceSpeed": "velocidade"
   },
+  "auctionBid": {
+    "title": "Apostar vidas",
+    "openingPrompt": "Inicie a licitação com uma aposta de qualquer valor.",
+    "highBid": "Maior aposta atual: {{bid}} vidas",
+    "bidEquals": "Apostar {{value}}",
+    "bidAria": "Escolha uma quantidade de vidas para apostar",
+    "lifeMax": "máx. {{max}}",
+    "submitBid": "Apostar {{value}} vidas",
+    "pass": "Passar"
+  },
   "hand": {
     "viewFullHand_one": "Ver mão completa ({{count}} carta)",
     "viewFullHand_other": "Ver mão completa ({{count}} cartas)",

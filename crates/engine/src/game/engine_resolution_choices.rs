@@ -103,6 +103,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ClashChooseOpponent { .. }
             | WaitingFor::ClashCardPlacement { .. }
             | WaitingFor::VoteChoice { .. }
+            | WaitingFor::AuctionBid { .. }
             | WaitingFor::SeparatePilesPartition { .. }
             | WaitingFor::SeparatePilesChoice { .. }
             | WaitingFor::DigChoice { .. }
@@ -1307,6 +1308,187 @@ pub(super) fn handle_resolution_choice(
                     state, controller, events,
                 ))
             }
+        }
+        // CR 119.3 + CR 101.4: Open-bid life auction step. Each `SubmitBid`
+        // either tops the high bid or passes; when every OTHER eligible player
+        // passes consecutively the high bid stands and the auction settles via
+        // `auction::settle` (life loss + winner payoff bound to the high
+        // bidder). See effects/auction.rs.
+        (
+            WaitingFor::AuctionBid {
+                player,
+                current_high_bid,
+                high_bidder,
+                eligible,
+                remaining_in_round,
+                passes_in_a_row,
+                winner_effect,
+                target,
+                controller,
+                source_id,
+            },
+            GameAction::SubmitBid { amount },
+        ) => {
+            // CR 119.3: a player can't bid more life than they have. A bid is
+            // a real NEW bid only when it opens the auction (`high_bidder` is
+            // None) OR strictly tops the current high bid; a pass
+            // (`amount <= current_high_bid` with a standing bidder) pays no
+            // life and is always legal. Validate BEFORE mutating any auction
+            // state so an illegal bid leaves the prompt unchanged.
+            let is_new_bid = high_bidder.is_none() || amount > current_high_bid;
+            if is_new_bid {
+                let player_life = state
+                    .players
+                    .iter()
+                    .find(|p| p.id == player)
+                    .map(|p| p.life)
+                    .unwrap_or(0);
+                if player_life < 0 || amount > player_life as u32 {
+                    return Err(EngineError::InvalidAction(format!(
+                        "cannot bid {amount} life: player only has {player_life} life (CR 119.3)"
+                    )));
+                }
+            }
+
+            // CR 119.3: Player-chosen opening bid (Pain's Reward). The starter's
+            // amount sets the opening high bid; round-robin topping begins next.
+            // The opening phase is exactly `high_bidder.is_none()`.
+            if high_bidder.is_none() {
+                let round: Vec<crate::types::player::PlayerId> =
+                    eligible.iter().copied().filter(|p| *p != player).collect();
+                if let Some((next, rest)) = round.split_first() {
+                    state.waiting_for = WaitingFor::AuctionBid {
+                        player: *next,
+                        current_high_bid: amount,
+                        high_bidder: Some(player),
+                        eligible,
+                        remaining_in_round: rest.to_vec(),
+                        passes_in_a_row: 0,
+                        winner_effect,
+                        target,
+                        controller,
+                        source_id,
+                    };
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                        state.waiting_for.clone(),
+                    ));
+                }
+                // Only the starter is eligible — the opening bid stands.
+                let _ = effects::auction::settle(
+                    state,
+                    player,
+                    amount,
+                    &winner_effect,
+                    target,
+                    controller,
+                    source_id,
+                    events,
+                );
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    finish_with_continuation(state, controller, events),
+                ));
+            }
+
+            // CR 119.3 + CR 101.4: A bid tops the high bid only if it strictly
+            // exceeds it; otherwise it is a pass ("each player MAY top the high
+            // bid"). A pass by the player who already HOLDS the high bid does
+            // not advance termination — they merely decline to raise their own
+            // standing bid; the round must still cycle the other eligible
+            // players before the high bid can "stand".
+            let (new_high_bid, new_high_bidder, new_passes) = if amount > current_high_bid {
+                (amount, Some(player), 0)
+            } else if high_bidder == Some(player) {
+                (current_high_bid, high_bidder, passes_in_a_row)
+            } else {
+                (current_high_bid, high_bidder, passes_in_a_row + 1)
+            };
+
+            // CR 119.3: "The bidding ends if the high bid stands." Settlement
+            // fires when every OTHER eligible player has passed consecutively.
+            let settle_threshold = eligible.len().saturating_sub(1) as u32;
+            if new_passes >= settle_threshold {
+                if let Some(winner) = new_high_bidder {
+                    let _ = effects::auction::settle(
+                        state,
+                        winner,
+                        new_high_bid,
+                        &winner_effect,
+                        target,
+                        controller,
+                        source_id,
+                        events,
+                    );
+                } else {
+                    // No bidder ever topped (only possible for a fixed opening,
+                    // where `high_bidder` is always Some). Defensive: resolve
+                    // the effect with no winner via EffectResolved.
+                    events.push(crate::types::events::GameEvent::EffectResolved {
+                        kind: crate::types::ability::EffectKind::AuctionBid,
+                        source_id,
+                    });
+                }
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    finish_with_continuation(state, controller, events),
+                ));
+            }
+
+            // CR 101.4 + CR 800.4: Advance to the next bidder. When the current
+            // round empties, rebuild it in turn order from `eligible`, excluding
+            // the standing high bidder (they cannot top their own bid). In every
+            // case, defensively drop any player eliminated mid-auction
+            // (CR 800.4a — a player who has left the game can no longer act) so
+            // the queue can never park on a player who can't respond.
+            let still_in_game = |p: &crate::types::player::PlayerId| {
+                state
+                    .players
+                    .iter()
+                    .find(|pl| pl.id == *p)
+                    .is_some_and(|pl| !pl.is_eliminated)
+            };
+            let mut queue: Vec<crate::types::player::PlayerId> = remaining_in_round
+                .into_iter()
+                .filter(|p| still_in_game(p))
+                .collect();
+            if queue.is_empty() {
+                queue = eligible
+                    .iter()
+                    .copied()
+                    .filter(|p| Some(*p) != new_high_bidder && still_in_game(p))
+                    .collect();
+            }
+            let Some((next, rest)) = queue.split_first() else {
+                // No eligible player left to act and the pass threshold was not
+                // reached — e.g. an elimination emptied the round. Settle on the
+                // standing high bid so the auction can never hang.
+                if let Some(winner) = new_high_bidder {
+                    let _ = effects::auction::settle(
+                        state,
+                        winner,
+                        new_high_bid,
+                        &winner_effect,
+                        target,
+                        controller,
+                        source_id,
+                        events,
+                    );
+                }
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    finish_with_continuation(state, controller, events),
+                ));
+            };
+            state.waiting_for = WaitingFor::AuctionBid {
+                player: *next,
+                current_high_bid: new_high_bid,
+                high_bidder: new_high_bidder,
+                eligible,
+                remaining_in_round: rest.to_vec(),
+                passes_in_a_row: new_passes,
+                winner_effect,
+                target,
+                controller,
+                source_id,
+            };
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         // CR 700.3 + CR 700.3a + CR 101.4: Subject submits their partition;
         // pile B is derived as `eligible \ pile_a`. Advance the subject queue

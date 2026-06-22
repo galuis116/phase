@@ -425,6 +425,16 @@
     "resourceCounters": "segnalini",
     "resourceSpeed": "velocità"
   },
+  "auctionBid": {
+    "title": "Offri punti vita",
+    "openingPrompt": "Apri le offerte con una puntata di qualsiasi importo.",
+    "highBid": "Offerta più alta attuale: {{bid}} punti vita",
+    "bidEquals": "Offri {{value}}",
+    "bidAria": "Scegli una quantità di punti vita da offrire",
+    "lifeMax": "max {{max}}",
+    "submitBid": "Offri {{value}} punti vita",
+    "pass": "Passa"
+  },
   "hand": {
     "viewFullHand_one": "Vedi la mano completa ({{count}} carta)",
     "viewFullHand_other": "Vedi la mano completa ({{count}} carte)",

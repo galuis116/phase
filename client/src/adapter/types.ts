@@ -1325,6 +1325,24 @@ export type WaitingFor =
         | { type: "SubjectActs" }
         | { type: "Delegated"; data: PlayerId };
     } }
+  // CR 119.3: Open-bid life auction (Illicit Auction, Pain's Reward, Mages'
+  // Contest). `player` is the current bidder; answer with
+  // `GameAction::SubmitBid`. A bid `amount > current_high_bid` tops; any
+  // `amount <= current_high_bid` is a pass. The opening phase (Pain's Reward,
+  // first bid sets the opening high bid) is exactly `high_bidder === null`.
+  // `winner_effect` is the opaque engine payoff (gain control / draw / counter).
+  | { type: "AuctionBid"; data: {
+      player: PlayerId;
+      current_high_bid: number;
+      high_bidder: PlayerId | null;
+      eligible: PlayerId[];
+      remaining_in_round: PlayerId[];
+      passes_in_a_row: number;
+      winner_effect: unknown;
+      target: ObjectId | null;
+      controller: PlayerId;
+      source_id: ObjectId;
+    } }
   | { type: "ChooseDungeon"; data: { player: PlayerId; options: DungeonId[] } }
   | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; options: number[]; option_names: string[] } }
   | { type: "SpecializeColor"; data: { player: PlayerId; object_id: ObjectId; options: ManaColor[] } }
@@ -1646,6 +1664,10 @@ export type GameAction =
   | { type: "TapForConvoke"; data: { object_id: ObjectId; mana_type: ManaType } }
   | { type: "SelectCategoryPermanents"; data: { choices: (ObjectId | null)[] } }
   | { type: "ChooseX"; data: { value: number } }
+  // CR 119.3: Submit a bid in an open-bid life auction. `amount` tops the high
+  // bid (or, during the opening phase, sets it); `amount <= current_high_bid`
+  // is a pass.
+  | { type: "SubmitBid"; data: { amount: number } }
   | { type: "SubmitPayAmount"; data: { amount: number } }
   | { type: "SubmitPhyrexianChoices"; data: { choices: ShardChoice[] } }
   | { type: "ChooseManaColor"; data: { choice: ManaChoice; count?: number } }

@@ -425,6 +425,16 @@
     "resourceCounters": "contadores",
     "resourceSpeed": "velocidad"
   },
+  "auctionBid": {
+    "title": "Pujar vidas",
+    "openingPrompt": "Inicia la puja con una apuesta de cualquier cantidad.",
+    "highBid": "Puja más alta actual: {{bid}} vidas",
+    "bidEquals": "Pujar {{value}}",
+    "bidAria": "Elige una cantidad de vidas para pujar",
+    "lifeMax": "máx. {{max}}",
+    "submitBid": "Pujar {{value}} vidas",
+    "pass": "Pasar"
+  },
   "hand": {
     "viewFullHand_one": "Ver la mano completa ({{count}} carta)",
     "viewFullHand_other": "Ver la mano completa ({{count}} cartas)",

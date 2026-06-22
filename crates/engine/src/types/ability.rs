@@ -8229,6 +8229,46 @@ pub enum Effect {
         #[serde(default)]
         tally_mode: VoteTally,
     },
+    /// CR 119.3 + CR 101.4 + CR 608.2: Open-bid life auction — the
+    /// "bid life" family (Illicit Auction, Pain's Reward, Mages' Contest).
+    /// Each eligible player, in turn order starting with the controller, may
+    /// top the current high bid; bidding ends when the high bid stands (every
+    /// other eligible player passes consecutively). The high bidder loses life
+    /// equal to the high bid (CR 119.3), then `winner_effect` resolves once
+    /// with the high bidder bound as its controller (the gains-control /
+    /// draws-four / counter payoff).
+    ///
+    /// Distinct from `Effect::Vote` (a single categorical APNAP round) and the
+    /// numeric `ChooseX` (a single value): this is an escalating, multi-round
+    /// bid loop whose control flow is not parameterizable into either. See
+    /// `effects/auction.rs`.
+    AuctionBid {
+        /// CR 119.3: The starting high bid. `Fixed(0)` (Illicit Auction) /
+        /// `Fixed(1)` (Mages' Contest) is a fixed opening the controller
+        /// announces automatically; `PlayerChosen` (Pain's Reward — "a bid of
+        /// any number") means the controller's first action is a player-chosen
+        /// opening bid.
+        opening_bid: AuctionOpening,
+        /// CR 101.4 + CR 800.4g: Which players may bid. `AllPlayers`
+        /// (Illicit Auction, Pain's Reward) queues every non-eliminated player
+        /// in APNAP order from the controller. The Mages' Contest two-bidder
+        /// case (`you and target spell's controller`) is built at resolve from
+        /// the target spell's controller; it is also expressed as `AllPlayers`
+        /// with the eligible set narrowed by the resolver — see
+        /// `effects/auction.rs`.
+        #[serde(default = "default_voter_scope_all")]
+        voter_scope: VoterScope,
+        /// CR 608.2c: The single payoff that resolves once for the high bidder,
+        /// bound as controller (GainControl / Draw / Counter). For Mages'
+        /// Contest the Counter is gated on `you` being the high bidder.
+        winner_effect: Box<AbilityDefinition>,
+        /// CR 115.1: The auction's target. `TargetFilter::None` (Pain's Reward)
+        /// is non-targeting; a creature filter (Illicit Auction) or
+        /// `TargetFilter::StackSpell` (Mages' Contest) is a declared target
+        /// surfaced via `target_filter()`.
+        #[serde(default = "default_target_filter_none")]
+        target: TargetFilter,
+    },
     /// CR 700.3 + CR 608: Separate objects into two piles, have another player
     /// choose one of them, and apply a sub-effect to the chosen pile. The
     /// canonical "two piles" primitive — covers Make an Example (each opponent
@@ -10733,6 +10773,23 @@ pub enum VoteTally {
     Threshold { tie_breaker_index: u8 },
 }
 
+/// CR 119.3: The opening high bid of an `Effect::AuctionBid`. Either a fixed
+/// value the controller announces automatically (Illicit Auction's 0, Mages'
+/// Contest's 1) or player-chosen ("a bid of any number" — Pain's Reward), in
+/// which case the controller's first `SubmitBid` sets the opening high bid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value")]
+pub enum AuctionOpening {
+    /// CR 119.3: A fixed opening bid (0 for Illicit Auction, 1 for Mages'
+    /// Contest). The controller is automatically the opening high bidder at
+    /// this amount; other players may then top it in turn order.
+    Fixed(u32),
+    /// CR 119.3: "You start the bidding with a bid of any number" (Pain's
+    /// Reward). The controller's first action is a player-chosen opening bid
+    /// (≥ 0); only then does the round-robin topping begin.
+    PlayerChosen,
+}
+
 impl TargetFilter {
     pub fn normalized(self) -> Self {
         match self {
@@ -11058,7 +11115,14 @@ impl Effect {
             // CR 702.55a: Haunt — "exile it haunting target creature". The
             // haunted creature is a real target chosen as the haunt trigger goes
             // on the stack, so it must be surfaced for the target-slot path.
-            | Effect::ExileHaunting { target } => Some(target),
+            | Effect::ExileHaunting { target }
+            // CR 115.1: AuctionBid's target — `TargetFilter::None` (Pain's
+            // Reward) is dropped by `extract_target_filter_from_effect`'s
+            // `is_context_ref`/None filter so no slot is built; a creature
+            // filter (Illicit Auction) or `StackSpell` (Mages' Contest) is a
+            // real declared target surfaced for the cast-time slot and CR
+            // 608.2b re-validation.
+            | Effect::AuctionBid { target, .. } => Some(target),
 
             Effect::CombineHost { host, .. }
             | Effect::ChooseAugmentAndCombineWithHost { host, .. } => Some(host.as_ref()),
@@ -11478,6 +11542,7 @@ impl Effect {
             | Effect::Populate
             | Effect::Clash
             | Effect::Vote { .. }
+            | Effect::AuctionBid { .. }
             | Effect::SeparateIntoPiles { .. }
             | Effect::SwitchPT { .. }
             | Effect::CopySpell { .. }
@@ -11698,6 +11763,7 @@ impl Effect {
             | Effect::Populate
             | Effect::Clash
             | Effect::Vote { .. }
+            | Effect::AuctionBid { .. }
             | Effect::SeparateIntoPiles { .. }
             | Effect::SwitchPT { .. }
             | Effect::CopySpell { .. }
@@ -11881,6 +11947,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Populate => "Populate",
         Effect::Clash => "Clash",
         Effect::Vote { .. } => "Vote",
+        Effect::AuctionBid { .. } => "AuctionBid",
         Effect::SeparateIntoPiles { .. } => "SeparateIntoPiles",
         Effect::SwitchPT { .. } => "SwitchPT",
         Effect::CopySpell { .. } => "CopySpell",
@@ -12100,6 +12167,8 @@ pub enum EffectKind {
     EndCombatPhase,
     /// CR 701.38: Vote — interactive APNAP-ordered choice with per-choice tally effects.
     Vote,
+    /// CR 119.3: AuctionBid — interactive open-bid life auction (bid-life family).
+    AuctionBid,
     /// CR 700.3: SeparateIntoPiles — partition objects into two piles, another player chooses one, sub-effect applies.
     SeparateIntoPiles,
     SwitchPT,
@@ -12324,6 +12393,7 @@ impl From<&Effect> for EffectKind {
             Effect::Populate => EffectKind::Populate,
             Effect::Clash => EffectKind::Clash,
             Effect::Vote { .. } => EffectKind::Vote,
+            Effect::AuctionBid { .. } => EffectKind::AuctionBid,
             Effect::SeparateIntoPiles { .. } => EffectKind::SeparateIntoPiles,
             Effect::SwitchPT { .. } => EffectKind::SwitchPT,
             Effect::CopySpell { .. } => EffectKind::CopySpell,

@@ -856,6 +856,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         Effect::SeparateIntoPiles {
             chosen_pile_effect, ..
         } => walk_ability_def(chosen_pile_effect, out),
+        Effect::AuctionBid { winner_effect, .. } => walk_ability_def(winner_effect, out),
         Effect::RevealFromHand { on_decline, .. } => {
             if let Some(sub) = on_decline {
                 walk_ability_def(sub, out);

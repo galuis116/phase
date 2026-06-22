@@ -407,6 +407,7 @@ fn redundancy_delta(
         | Effect::Populate
         | Effect::Clash
         | Effect::Vote { .. }
+        | Effect::AuctionBid { .. }
         | Effect::SeparateIntoPiles { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }

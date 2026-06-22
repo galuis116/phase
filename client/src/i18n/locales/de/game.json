@@ -425,6 +425,16 @@
     "resourceCounters": "Marken",
     "resourceSpeed": "Tempo"
   },
+  "auctionBid": {
+    "title": "Leben bieten",
+    "openingPrompt": "Eröffne die Auktion mit einem Gebot in beliebiger Höhe.",
+    "highBid": "Aktuelles Höchstgebot: {{bid}} Leben",
+    "bidEquals": "{{value}} bieten",
+    "bidAria": "Wähle einen Lebensbetrag zum Bieten",
+    "lifeMax": "max. {{max}}",
+    "submitBid": "{{value}} Leben bieten",
+    "pass": "Passen"
+  },
   "hand": {
     "viewFullHand_one": "Volle Hand ansehen ({{count}} Karte)",
     "viewFullHand_other": "Volle Hand ansehen ({{count}} Karten)",

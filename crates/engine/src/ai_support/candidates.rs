@@ -1284,6 +1284,22 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 })
                 .collect()
         }
+        // CR 119.3: Open-bid life auction. The safe default is to PASS — never
+        // bid life. A pass is any `amount <= current_high_bid`; submitting the
+        // current high bid is the canonical pass. (Search-driven tactical AI
+        // may override with a real top via other candidate paths; this is the
+        // safety net so the AI never hangs on a bid prompt or burns life.)
+        WaitingFor::AuctionBid {
+            player,
+            current_high_bid,
+            ..
+        } => vec![candidate(
+            GameAction::SubmitBid {
+                amount: *current_high_bid,
+            },
+            TacticalClass::Selection,
+            Some(*player),
+        )],
         WaitingFor::ModeChoice {
             player,
             modal,

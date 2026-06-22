@@ -748,6 +748,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::Populate
         | EffectKind::Clash
         | EffectKind::Vote
+        | EffectKind::AuctionBid
         | EffectKind::SeparateIntoPiles
         | EffectKind::SwitchPT
         | EffectKind::CopySpell

@@ -139,6 +139,8 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "RevealUntilKeptChoice",
     "RepeatDecision",
     "VoteChoice",
+    // CR 119.3: open-bid life auction (AuctionBidUI numeric overlay).
+    "AuctionBid",
     "SeparatePilesPartition",
     "SeparatePilesChoice",
     "ChooseRingBearer",

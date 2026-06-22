@@ -632,6 +632,14 @@ pub enum GameAction {
     ChooseX {
         value: u32,
     },
+    /// CR 119.3 + CR 101.4: Submit a bid in an open-bid life auction
+    /// (`WaitingFor::AuctionBid`). During the opening phase of a player-chosen
+    /// auction (Pain's Reward), `amount` sets the opening high bid. Otherwise
+    /// `amount` tops the current high bid; an `amount <= current_high_bid`
+    /// is a pass (the bidder declines to top).
+    SubmitBid {
+        amount: u32,
+    },
     /// CR 107.4f + CR 601.2f: Caster submits their per-shard payment choice
     /// (mana or 2 life) for each Phyrexian shard in the spell's cost. The length
     /// of `choices` MUST equal `WaitingFor::PhyrexianPayment.shards.len()`.
@@ -1322,6 +1330,7 @@ impl GameAction {
             | GameAction::LearnDecision { .. }
             | GameAction::SelectCategoryPermanents { .. }
             | GameAction::ChooseX { .. }
+            | GameAction::SubmitBid { .. }
             | GameAction::SubmitPhyrexianChoices { .. }
             | GameAction::ChooseManaColor { .. }
             | GameAction::PayManaAbilityMana { .. }

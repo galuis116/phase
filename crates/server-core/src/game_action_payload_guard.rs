@@ -431,6 +431,9 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::SubmitPayAmount { .. }
         | GameAction::LearnDecision { .. }
         | GameAction::ChooseX { .. }
+        // CR 119.3: SubmitBid carries a single bounded u32 — nothing
+        // list-shaped or client-controlled to validate here.
+        | GameAction::SubmitBid { .. }
         | GameAction::CastPreparedCopy { .. }
         | GameAction::ChooseSpecializeColor { .. }
         | GameAction::CastParadigmCopy { .. }

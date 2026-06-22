@@ -3902,6 +3902,55 @@ pub enum WaitingFor {
         #[serde(default)]
         tally_mode: super::ability::VoteTally,
     },
+    /// CR 119.3 + CR 101.4 + CR 608.2: An open-bid life auction is in progress
+    /// (`Effect::AuctionBid` — Illicit Auction, Pain's Reward, Mages' Contest).
+    /// The current actor (`player`) submits a `GameAction::SubmitBid`. Each bid
+    /// either tops the current high bid (`amount > current_high_bid`) or passes
+    /// (`amount <= current_high_bid`). Bidding ends when every other eligible
+    /// player has passed consecutively (CR 119.3: "the bidding ends if the high bid
+    /// stands"); the high bidder then loses life equal to the high bid (CR
+    /// 119.3) and `winner_effect` resolves once, bound to the high bidder.
+    /// Lives in the engine — the frontend renders a numeric bid/pass overlay.
+    AuctionBid {
+        /// The player currently deciding whether to top the high bid.
+        player: PlayerId,
+        /// CR 119.3: The current high bid. During the player-chosen opening
+        /// phase (`high_bidder.is_none()`, Pain's Reward), this is 0 and
+        /// unused until the starter sets the opening.
+        current_high_bid: u32,
+        /// The current high bidder, if any. `None` only during the opening
+        /// phase (Pain's Reward) before the starter has submitted their
+        /// opening bid — `high_bidder.is_none()` IS the opening-phase flag.
+        high_bidder: Option<PlayerId>,
+        /// CR 101.4 + CR 800.4g: Every eligible bidder, in turn order from the
+        /// controller. For Mages' Contest this is `[caster, target spell's
+        /// controller]`. Used to compute the pass-count termination threshold
+        /// (`eligible.len() - 1`).
+        eligible: Vec<PlayerId>,
+        /// The bidders still to act in the current round, in turn order. When
+        /// it empties, a fresh round is built from `eligible` (excluding the
+        /// current high bidder — they cannot top their own standing bid).
+        remaining_in_round: Vec<PlayerId>,
+        /// CR 119.3: "The bidding ends if the high bid stands." Consecutive passes
+        /// since the last successful top. Settlement fires when this reaches
+        /// `eligible.len() - 1` (every other eligible player passed in a row).
+        passes_in_a_row: u32,
+        /// CR 608.2c: The payoff resolved once for the high bidder, bound as
+        /// controller (GainControl / Draw / Counter). For Mages' Contest the
+        /// Counter is gated on the caster being the high bidder.
+        winner_effect: Box<super::ability::AbilityDefinition>,
+        /// CR 115.1: The resolved auction target — the creature (Illicit
+        /// Auction) whose control is gained, or the stack spell (Mages'
+        /// Contest) to counter. `None` for the non-targeting Pain's Reward.
+        #[serde(default)]
+        target: Option<ObjectId>,
+        /// The ability controller / caster — the auction starter and, for
+        /// Mages' Contest, the player whose win gates the counter ("if you
+        /// win the bidding").
+        controller: PlayerId,
+        /// Source ability's object ID — for logging and state-filter echoes.
+        source_id: ObjectId,
+    },
     /// CR 700.3 + CR 700.3a + CR 101.4: A subject is partitioning their own
     /// objects into two piles for an `Effect::SeparateIntoPiles`. `pile_a`
     /// is submitted by `player` via `GameAction::SubmitPilePartition`; pile B
@@ -4383,6 +4432,7 @@ impl WaitingFor {
             WaitingFor::ClashChooseOpponent { .. } => "ClashChooseOpponent",
             WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
             WaitingFor::VoteChoice { .. } => "VoteChoice",
+            WaitingFor::AuctionBid { .. } => "AuctionBid",
             WaitingFor::SeparatePilesPartition { .. } => "SeparatePilesPartition",
             WaitingFor::SeparatePilesChoice { .. } => "SeparatePilesChoice",
             WaitingFor::CompanionReveal { .. } => "CompanionReveal",
@@ -4538,7 +4588,8 @@ impl WaitingFor {
             | WaitingFor::MiracleReveal { player, .. }
             | WaitingFor::CommanderZoneChoice { player, .. }
             | WaitingFor::SeparatePilesPartition { player, .. }
-            | WaitingFor::SeparatePilesChoice { player, .. } => Some(*player),
+            | WaitingFor::SeparatePilesChoice { player, .. }
+            | WaitingFor::AuctionBid { player, .. } => Some(*player),
             // CR 608.2c: For `ControllerLabels` votes (Battlebond friend-or-foe
             // cards), the ACTOR is the spell controller, not `player` (the
             // subject being labeled). `VoteActor::resolve` returns the

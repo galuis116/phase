@@ -1467,6 +1467,7 @@ impl GameRunner {
     pub fn waiting_for_kind(&self) -> &'static str {
         match &self.state.waiting_for {
             WaitingFor::Priority { .. } => "Priority",
+            WaitingFor::AuctionBid { .. } => "AuctionBid",
             WaitingFor::MulliganDecision { .. } => "MulliganDecision",
             WaitingFor::MulliganBottomCards { .. } => "MulliganBottomCards",
             WaitingFor::OpeningHandBottomCards { .. } => "OpeningHandBottomCards",

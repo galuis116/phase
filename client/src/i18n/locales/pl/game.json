@@ -425,6 +425,16 @@
     "resourceCounters": "znaczników",
     "resourceSpeed": "prędkości"
   },
+  "auctionBid": {
+    "title": "Licytuj życie",
+    "openingPrompt": "Rozpocznij licytację ofertą o dowolnej wysokości.",
+    "highBid": "Aktualna najwyższa oferta: {{bid}} życia",
+    "bidEquals": "Licytuj {{value}}",
+    "bidAria": "Wybierz ilość życia do zalicytowania",
+    "lifeMax": "maks. {{max}}",
+    "submitBid": "Licytuj {{value}} życia",
+    "pass": "Pas"
+  },
   "hand": {
     "viewFullHand_one": "Zobacz całą rękę ({{count}} karta)",
     "viewFullHand_other": "Zobacz całą rękę ({{count}} kart)",

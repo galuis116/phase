@@ -142,6 +142,10 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::ClashChooseOpponent { .. }
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::VoteChoice { .. }
+        // CR 119.3: Open-bid life auction — a forced mid-resolution bid
+        // prompt; route to the ability catch-all (the AI's safe default is a
+        // pass, supplied by `search::default_action`).
+        | WaitingFor::AuctionBid { .. }
         | WaitingFor::SeparatePilesPartition { .. }
         | WaitingFor::SeparatePilesChoice { .. }
         | WaitingFor::CompanionReveal { .. }

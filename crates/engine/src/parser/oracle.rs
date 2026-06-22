@@ -3620,6 +3620,14 @@ pub(crate) fn parse_oracle_ir(
                 crate::parser::oracle_vote::parse_vote_block(parse_line, AbilityKind::Spell)
             {
                 vote_def
+            } else if let Some(auction_def) =
+                crate::parser::oracle_auction::parse_auction_block(parse_line, AbilityKind::Spell)
+            {
+                // CR 119.3: Open-bid life auction (Illicit Auction, Pain's
+                // Reward, Mages' Contest). The dispatcher consumes the entire
+                // multi-sentence bid block as a single effect — chain parsing
+                // would mis-parse the spine sentences as Unimplemented chunks.
+                auction_def
             } else {
                 parse_effect_chain_with_context(parse_line, AbilityKind::Spell, &mut ctx)
             };

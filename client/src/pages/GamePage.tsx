@@ -48,6 +48,7 @@ import { FlowHelpNudge } from "../components/help/FlowHelpNudge.tsx";
 import { SandboxToolsNudge } from "../components/help/SandboxToolsNudge.tsx";
 import { HelpSheet } from "../components/help/HelpSheet.tsx";
 import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
+import { AuctionBidUI } from "../components/game/AuctionBidUI.tsx";
 import { ChooseXValueUI } from "../components/mana/ChooseXValueUI.tsx";
 import { AssistPaymentUI } from "../components/mana/AssistPaymentUI.tsx";
 import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
@@ -1520,6 +1521,8 @@ function GamePageContent({
           canActForWaitingState && <ChooseXValueUI />}
         {waitingFor?.type === "PayAmountChoice" &&
           canActForWaitingState && <PayAmountChoiceUI />}
+        {waitingFor?.type === "AuctionBid" &&
+          canActForWaitingState && <AuctionBidUI />}
         {waitingFor?.type === "AssistPayment" &&
           canActForWaitingState && <AssistPaymentUI />}
         {waitingFor?.type === "ReplacementChoice" &&

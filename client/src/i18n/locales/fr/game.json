@@ -425,6 +425,16 @@
     "resourceCounters": "marqueurs",
     "resourceSpeed": "vitesse"
   },
+  "auctionBid": {
+    "title": "Miser des points de vie",
+    "openingPrompt": "Ouvrez les enchères avec une mise de n'importe quel montant.",
+    "highBid": "Mise la plus haute actuelle : {{bid}} points de vie",
+    "bidEquals": "Miser {{value}}",
+    "bidAria": "Choisissez un montant de points de vie à miser",
+    "lifeMax": "max {{max}}",
+    "submitBid": "Miser {{value}} points de vie",
+    "pass": "Passer"
+  },
   "hand": {
     "viewFullHand_one": "Voir la main complète ({{count}} carte)",
     "viewFullHand_other": "Voir la main complète ({{count}} cartes)",

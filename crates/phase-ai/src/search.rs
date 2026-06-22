@@ -1039,6 +1039,13 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::SeparatePilesChoice { .. } => Some(GameAction::ChoosePile {
             pile: engine::types::game_state::PileSide::A,
         }),
+        // CR 119.3: Open-bid life auction safe default — PASS (never bid life).
+        // Submitting the current high bid is the canonical pass.
+        WaitingFor::AuctionBid {
+            current_high_bid, ..
+        } => Some(GameAction::SubmitBid {
+            amount: *current_high_bid,
+        }),
         WaitingFor::MoveCountersDistribution { .. } => engine::ai_support::legal_actions(state)
             .into_iter()
             .find(|action| matches!(action, GameAction::ChooseCounterMoveDistribution { .. })),

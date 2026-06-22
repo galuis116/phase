@@ -37,6 +37,7 @@ pub mod amass;
 pub mod animate;
 pub mod attach;
 pub mod attractions;
+pub mod auction;
 pub mod awaken;
 pub mod become_copy;
 pub mod become_monarch;
@@ -2663,6 +2664,8 @@ pub fn resolve_effect(
         Effect::Clash => clash::resolve(state, ability, events),
         // CR 701.38: Council's-dilemma voting — see effects/vote.rs.
         Effect::Vote { .. } => vote::resolve(state, ability, events),
+        // CR 119.3: Open-bid life auction (bid-life family) — see effects/auction.rs.
+        Effect::AuctionBid { .. } => auction::resolve(state, ability, events),
         // CR 700.3 + CR 608: Pile-separation primitive — see effects/separate_piles.rs.
         Effect::SeparateIntoPiles { .. } => separate_piles::resolve(state, ability, events),
         Effect::SwitchPT { .. } => switch_pt::resolve(state, ability, events),
