@@ -7432,6 +7432,19 @@ pub enum PerpetualModification {
     /// the card's persistent base power and toughness (High Fae Prankster,
     /// Three Tree Battalion, Blood Age Muster).
     SetBasePowerToughness { power: i32, toughness: i32 },
+    /// CR 613.4 + CR 205.1b: "[object] perpetually becomes a \<subtypes\>
+    /// creature with base power and toughness P/T and gains \<keywords\>" — a
+    /// permanent type-change: the card becomes a creature whose creature
+    /// subtypes are replaced with `creature_subtypes`, with the given base P/T,
+    /// and gains `keywords` (Second Little Pig: "becomes a Boar Spirit with base
+    /// power and toughness 4/4 and gains flying").
+    Become {
+        creature_subtypes: Vec<String>,
+        power: i32,
+        toughness: i32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keywords: Vec<Keyword>,
+    },
 }
 
 #[allow(clippy::large_enum_variant)]

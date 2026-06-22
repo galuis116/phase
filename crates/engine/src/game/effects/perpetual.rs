@@ -41,10 +41,13 @@ pub fn resolve(
         ids.push(ability.source_id);
     }
 
+    // Cloned before the mutable object loop: a `Become` modification needs the
+    // game's creature-type set to know which existing subtypes to replace.
+    let all_creature_types = state.all_creature_types.clone();
     let mut changed = false;
     for id in ids {
         if let Some(obj) = state.objects.get_mut(&id) {
-            obj.apply_perpetual_modification(&modification);
+            obj.apply_perpetual_modification(&modification, &all_creature_types);
             changed = true;
         }
     }
@@ -152,5 +155,60 @@ mod tests {
         let obj = state.objects.get(&id).unwrap();
         assert_eq!(obj.power, Some(4));
         assert_eq!(obj.toughness, Some(1));
+    }
+
+    /// CR 613.4: a perpetual `Become` replaces creature subtypes, sets base P/T,
+    /// and grants keywords — and must dirty layers so the live, public
+    /// characteristics reflect the change after the boundary flush (Second Little
+    /// Pig: "becomes a Boar Spirit with base power and toughness 4/4 and gains
+    /// flying").
+    #[test]
+    fn perpetual_become_updates_live_types_pt_keywords_after_flush() {
+        use crate::types::card_type::CoreType;
+        use crate::types::keywords::Keyword;
+        let mut state = GameState::new_two_player(7);
+        state.all_creature_types = vec!["Boar".into(), "Spirit".into(), "Pig".into()];
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Second Little Pig".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.base_card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types.subtypes = vec!["Pig".into()];
+        }
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+
+        let ability = ResolvedAbility::new(
+            Effect::ApplyPerpetual {
+                target: crate::types::ability::TargetFilter::Any,
+                modification: PerpetualModification::Become {
+                    creature_subtypes: vec!["Boar".into(), "Spirit".into()],
+                    power: 4,
+                    toughness: 4,
+                    keywords: vec![Keyword::Flying],
+                },
+            },
+            vec![TargetRef::Object(id)],
+            id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        super::resolve(&mut state, &ability, &mut events).unwrap();
+        crate::game::layers::flush_layers(&mut state);
+
+        let obj = state.objects.get(&id).unwrap();
+        assert_eq!(obj.power, Some(4));
+        assert_eq!(obj.toughness, Some(4));
+        assert!(obj.card_types.subtypes.contains(&"Boar".to_string()));
+        assert!(obj.card_types.subtypes.contains(&"Spirit".to_string()));
+        assert!(!obj.card_types.subtypes.contains(&"Pig".to_string()));
+        assert!(obj.keywords.contains(&Keyword::Flying));
     }
 }

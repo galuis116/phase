@@ -5869,6 +5869,13 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    // Digital-only Alchemy: "[~] perpetually becomes a <subtypes> with base power
+    // and toughness N/N [and gains <kw>]" — ApplyPerpetual type-change. Tried
+    // before the bare base-P/T form (more specific: requires "a <subtypes> with").
+    if let Some(effect) = try_parse_perpetual_become(tp) {
+        return parsed_clause(effect);
+    }
+
     // Digital-only Alchemy: "[~/it/this creature] perpetually become(s)/has base
     // power and toughness N/N" — the ApplyPerpetual keyword action (base P/T).
     if let Some(effect) = try_parse_perpetual_base_pt(tp) {
@@ -6067,6 +6074,91 @@ fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<Effect> {
         modification: crate::types::ability::PerpetualModification::SetBasePowerToughness {
             power: power as i32,
             toughness: toughness as i32,
+        },
+    })
+}
+
+/// Digital-only Alchemy: parse the self-subject type-change "perpetually" form —
+/// "[~] perpetually becomes a \<subtypes\> [creature] with base power and
+/// toughness N/N [and gains \<keyword\>]" → [`Effect::ApplyPerpetual`] with
+/// [`PerpetualModification::Become`] (Second Little Pig).
+///
+/// Self-subjects only (no anaphoric "it"/"the duplicate"). The clause tail must
+/// be fully consumed, so compound riders that aren't modeled (e.g. Heir to
+/// Dragonfire's "gets +3/+3") fall through to `Unimplemented` instead of being
+/// silently dropped — Heir lacks the "with base power and toughness" segment and
+/// is rejected by the `take_until` below.
+fn try_parse_perpetual_become(tp: TextPair) -> Option<Effect> {
+    let lower = tp.lower;
+    let after_subject = [
+        "~ ",
+        "this creature ",
+        "this artifact ",
+        "this enchantment ",
+        "this permanent ",
+        "this token ",
+        "this card ",
+    ]
+    .iter()
+    .find_map(|subject| {
+        tag::<_, _, OracleError<'_>>(*subject)
+            .parse(lower)
+            .ok()
+            .map(|(rest, _)| rest)
+    })?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually becomes a ")
+        .parse(after_subject)
+        .ok()?;
+    let (rest, subtypes_phrase) =
+        take_until::<_, _, OracleError<'_>>(" with base power and toughness ")
+            .parse(rest)
+            .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" with base power and toughness ")
+        .parse(rest)
+        .ok()?;
+    let (rest, power) = nom_primitives::parse_number(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("/").parse(rest).ok()?;
+    let (rest, toughness) = nom_primitives::parse_number(rest).ok()?;
+
+    let mut keywords = Vec::new();
+    let rest = if let Ok((after, _)) = tag::<_, _, OracleError<'_>>(" and gains ").parse(rest) {
+        // allow-noncombinator: strip a trailing sentence period from the captured
+        // keyword text (punctuation cleanup, not parsing dispatch).
+        let kw_text = after.strip_suffix('.').unwrap_or(after);
+        let kw = crate::parser::oracle_keyword::parse_keyword_from_oracle(kw_text)?;
+        keywords.push(kw);
+        ""
+    } else {
+        rest
+    };
+    if !(rest.is_empty() || rest == ".") {
+        return None;
+    }
+
+    // The captured phrase ("boar spirit", optionally trailing " creature") names
+    // the creature subtypes; canonicalize each word to its capitalized subtype.
+    let phrase = subtypes_phrase
+        // allow-noncombinator: drop an optional trailing " creature" word from the
+        // captured subtype phrase (structural cleanup, not parsing dispatch).
+        .strip_suffix(" creature")
+        .unwrap_or(subtypes_phrase);
+    let creature_subtypes: Vec<String> = phrase
+        // allow-noncombinator: tokenize the captured creature-subtype phrase into
+        // its individual subtypes — structural, not parsing dispatch.
+        .split_whitespace()
+        .map(crate::parser::oracle_quantity::capitalize_first)
+        .collect();
+    if creature_subtypes.is_empty() {
+        return None;
+    }
+
+    Some(Effect::ApplyPerpetual {
+        target: TargetFilter::Any,
+        modification: crate::types::ability::PerpetualModification::Become {
+            creature_subtypes,
+            power: power as i32,
+            toughness: toughness as i32,
+            keywords,
         },
     })
 }
@@ -48609,6 +48701,46 @@ mod tests {
                 ..
             } if type_filters == vec![TypeFilter::Creature]
                 && properties == vec![FilterProp::Blocking, FilterProp::Another]
+        ));
+    }
+
+    #[test]
+    fn perpetual_become_parser_maps_type_pt_keyword() {
+        use crate::types::ability::PerpetualModification;
+        use crate::types::keywords::Keyword;
+        // Second Little Pig: type-change + base P/T + gained keyword.
+        let e = parse_effect(
+            "~ perpetually becomes a Boar Spirit with base power and toughness 4/4 and gains flying.",
+        );
+        let Effect::ApplyPerpetual {
+            modification:
+                PerpetualModification::Become {
+                    creature_subtypes,
+                    power,
+                    toughness,
+                    keywords,
+                },
+            ..
+        } = e
+        else {
+            panic!("expected Become, got {e:?}");
+        };
+        assert_eq!(
+            creature_subtypes,
+            vec!["Boar".to_string(), "Spirit".to_string()]
+        );
+        assert_eq!((power, toughness), (4, 4));
+        assert_eq!(keywords, vec![Keyword::Flying]);
+
+        // Heir to Dragonfire ("becomes a Dragon, gets +3/+3, …") lacks the "with
+        // base power and toughness" segment, so it must NOT parse as Become.
+        let heir = parse_effect("~ perpetually becomes a Dragon, gets +3/+3, and gains flying.");
+        assert!(!matches!(
+            heir,
+            Effect::ApplyPerpetual {
+                modification: PerpetualModification::Become { .. },
+                ..
+            }
         ));
     }
 

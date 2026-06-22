@@ -1001,10 +1001,13 @@ impl GameObject {
     /// Apply an Alchemy "perpetually" modification to this card: record it on the
     /// object (so it persists across zones/serialization and can be re-applied
     /// after a copy rebuilds base characteristics) and edit the corresponding
-    /// persistent characteristic. Increment 1: base power/toughness.
+    /// persistent characteristic(s). `all_creature_types` is the game's known
+    /// creature-type set, used to identify which existing subtypes are creature
+    /// subtypes when a `Become` replaces them (CR 613.4).
     pub fn apply_perpetual_modification(
         &mut self,
         modification: &crate::types::ability::PerpetualModification,
+        all_creature_types: &[String],
     ) {
         use crate::types::ability::PerpetualModification;
         match modification {
@@ -1014,6 +1017,38 @@ impl GameObject {
                 // change permanent and zone-independent.
                 self.base_power = Some(*power);
                 self.base_toughness = Some(*toughness);
+            }
+            PerpetualModification::Become {
+                creature_subtypes,
+                power,
+                toughness,
+                keywords,
+            } => {
+                // CR 613.4 + CR 205.1b: "becomes a <subtypes> creature" replaces
+                // the card's creature subtypes (keeping any non-creature subtypes)
+                // and makes it a creature; the listed base P/T and keywords apply.
+                self.base_card_types
+                    .subtypes
+                    .retain(|s| !all_creature_types.iter().any(|c| c == s));
+                self.base_card_types
+                    .subtypes
+                    .extend(creature_subtypes.iter().cloned());
+                if !self
+                    .base_card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Creature)
+                {
+                    self.base_card_types
+                        .core_types
+                        .push(crate::types::card_type::CoreType::Creature);
+                }
+                self.base_power = Some(*power);
+                self.base_toughness = Some(*toughness);
+                for kw in keywords {
+                    if !self.base_keywords.contains(kw) {
+                        self.base_keywords.push(kw.clone());
+                    }
+                }
             }
         }
         self.perpetual_mods.push(modification.clone());
