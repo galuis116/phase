@@ -5855,9 +5855,13 @@ fn try_parse_intensify(tp: TextPair) -> Option<Effect> {
 /// through instead of being silently dropped.
 fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<Effect> {
     let lower = tp.lower;
+    // Only unambiguous self-subjects. The anaphoric "it " is intentionally
+    // excluded: after a prior object choice it refers to that object, not the
+    // source, so accepting it here would let a referenced-object perpetual clause
+    // parse as supported while mutating the wrong object. Referenced-object forms
+    // ("the duplicate"/"its …") are deferred until real referent binding lands.
     let after_subject = [
         "~ ",
-        "it ",
         "this creature ",
         "this artifact ",
         "this enchantment ",
@@ -48293,8 +48297,9 @@ mod tests {
             }
         ));
 
-        // "become(s)" verb variant.
-        let e = parse_effect("It perpetually becomes base power and toughness 2/2.");
+        // "become(s)" verb variant. (Uses an unambiguous self-subject; the
+        // anaphoric "it" form is intentionally not accepted.)
+        let e = parse_effect("This creature perpetually becomes base power and toughness 2/2.");
         assert!(matches!(
             e,
             Effect::ApplyPerpetual {
