@@ -10159,8 +10159,15 @@ pub enum Effect {
     /// CR 701.63a: Endure N — the enduring permanent's controller chooses: create an
     /// N/N white Spirit creature token, or put N +1/+1 counters on that permanent.
     /// CR 701.63b: Endure 0 does nothing.
+    ///
+    /// `subject` is the permanent that endures. Defaults to the ability source
+    /// ("~ endures N"). Triggered "it endures X" on another creature entering
+    /// uses `TargetFilter::TriggeringSource` (resolved from the trigger event
+    /// source at runtime; issue #1120 — Warden of the Grove).
     Endure {
-        amount: u32,
+        amount: QuantityExpr,
+        #[serde(default = "default_target_filter_self_ref")]
+        subject: TargetFilter,
     },
     /// CR 701.68a: Blight N as an effect — the blighting player puts N -1/-1
     /// counters on a creature *they* control. Non-targeted: the player choosing

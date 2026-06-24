@@ -29586,7 +29586,13 @@ mod tests {
             .sub_ability
             .expect("endure conjunct must survive as a sub_ability");
         assert!(
-            matches!(*sub.effect, Effect::Endure { amount: 1 }),
+            matches!(
+                *sub.effect,
+                Effect::Endure {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    ..
+                }
+            ),
             "expected chained Endure{{1}}, got {:?}",
             sub.effect
         );
@@ -29602,7 +29608,13 @@ mod tests {
     fn effect_it_endures_strips_subject_to_endure() {
         let e = parse_effect("it endures 1");
         assert!(
-            matches!(e, Effect::Endure { amount: 1 }),
+            matches!(
+                e,
+                Effect::Endure {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    ..
+                }
+            ),
             "expected Endure{{amount:1}}, got {e:?}"
         );
     }
@@ -29611,7 +29623,13 @@ mod tests {
     fn effect_this_creature_endures_strips_subject_to_endure() {
         let e = parse_effect("this creature endures 2");
         assert!(
-            matches!(e, Effect::Endure { amount: 2 }),
+            matches!(
+                e,
+                Effect::Endure {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    ..
+                }
+            ),
             "expected Endure{{amount:2}}, got {e:?}"
         );
     }
@@ -29622,24 +29640,51 @@ mod tests {
         // ("Fortress Kin-Guard endures N" → "~ endures N" upstream).
         let e = parse_effect("~ endures 3");
         assert!(
-            matches!(e, Effect::Endure { amount: 3 }),
+            matches!(
+                e,
+                Effect::Endure {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    ..
+                }
+            ),
             "expected Endure{{amount:3}}, got {e:?}"
         );
     }
 
     #[test]
-    fn effect_endure_dynamic_x_degrades_gracefully() {
-        // CR 701.63b: "it endures X, where X is ..." cannot fit the `amount: u32`
-        // field. It must degrade to a benign value (endure 0 = nothing happens),
-        // never panic. Documented follow-up: dynamic endure amount.
+    fn effect_endure_dynamic_x_degrades_gracefully_without_binding() {
+        // CR 701.63b: bare "it endures X" without a defining clause still
+        // degrades to endure 0 (nothing happens).
         let e = parse_effect("it endures X");
         assert!(
             matches!(
                 e,
-                Effect::Endure { amount: 0 } | Effect::Unimplemented { .. }
+                Effect::Endure {
+                    amount: QuantityExpr::Fixed { value: 0 },
+                    ..
+                } | Effect::Unimplemented { .. }
             ),
-            "dynamic endure X must degrade to Endure{{0}} or Unimplemented, got {e:?}"
+            "bare dynamic endure X must degrade to Endure{{0}} or Unimplemented, got {e:?}"
         );
+    }
+
+    #[test]
+    fn effect_endure_dynamic_x_binds_counters_on_this_creature() {
+        use crate::types::ability::{ObjectScope, QuantityRef};
+        let e = parse_effect("it endures X, where X is the number of counters on this creature");
+        match e {
+            Effect::Endure { amount, .. } => match amount {
+                QuantityExpr::Ref { qty } => match qty {
+                    QuantityRef::CountersOn {
+                        scope: ObjectScope::Source,
+                        counter_type: None,
+                    } => {}
+                    other => panic!("unexpected qty {other:?}"),
+                },
+                other => panic!("unexpected amount {other:?}"),
+            },
+            other => panic!("expected Endure, got {other:?}"),
+        }
     }
 
     #[test]

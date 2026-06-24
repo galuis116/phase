@@ -2913,8 +2913,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::CollectEvidence { amount } => {
             d.push(("amount".into(), amount.to_string()));
         }
-        Effect::Endure { amount } => {
-            d.push(("amount".into(), amount.to_string()));
+        Effect::Endure { amount, .. } => {
+            d.push(("amount".into(), fmt_quantity(amount)));
         }
         Effect::BlightEffect { count, player } => {
             d.push(("count".into(), count.to_string()));
