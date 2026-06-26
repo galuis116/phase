@@ -4103,6 +4103,33 @@ mod tests {
         }
     }
 
+    /// CR 702.5a + CR 702.9: Aura enchant lines with "without [keyword]" must not
+    /// fall through as unknown Enchant targets (Trapped in the Tower, Roots).
+    #[test]
+    fn enchant_creature_without_flying_do_not_swallow() {
+        for (oracle, name, types) in [
+            (
+                "Enchant creature without flying\nEnchanted creature can't attack or block, and its activated abilities can't be activated.",
+                "Trapped in the Tower",
+                &["Enchantment", "Aura"][..],
+            ),
+            (
+                "Enchant creature without flying\nEnchanted creature can't block.",
+                "Roots",
+                &["Enchantment", "Aura"][..],
+            ),
+        ] {
+            let parsed = parse_named(oracle, name, types);
+            assert!(
+                parsed.parse_warnings.iter().all(|warning| {
+                    !matches!(warning, OracleDiagnostic::SwallowedClause { .. })
+                }),
+                "{name} must not trigger any swallowed clause warnings: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
     /// CR 115.7d: Standalone retarget spells (Deflecting Swat, Redirect) lower
     /// to `ChangeTargets { scope: All }` with the full `you may choose new
     /// targets` surface preserved — not `def.optional`.

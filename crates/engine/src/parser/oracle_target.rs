@@ -4420,7 +4420,7 @@ fn parse_keyword_suffix(text: &str) -> Option<(KeywordSuffix, usize)> {
 /// Parse "without [keyword]" suffix — negated keyword filter.
 /// Handles "without flying", "without first strike", etc.
 /// Parallels `parse_keyword_suffix` but emits `WithoutKeyword`.
-fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
+pub(crate) fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
     let (after_without, _) = tag::<_, _, OracleError<'_>>("without ")
