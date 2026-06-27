@@ -1939,7 +1939,8 @@ pub fn creature_must_attack(state: &GameState, obj_id: ObjectId) -> bool {
     creature_must_attack_with_attackable_players(state, obj_id, &attackable_players)
 }
 
-fn attackable_player_targets(state: &GameState) -> Vec<PlayerId> {
+pub fn attackable_player_targets(state: &GameState) -> Vec<PlayerId> {
+    crate::game::perf_counters::record_attackable_player_sweep();
     get_valid_attack_targets(state)
         .into_iter()
         .filter_map(|target| match target {
@@ -1966,7 +1967,7 @@ pub(crate) fn must_attack_players_for_creature(
         .collect()
 }
 
-fn creature_must_attack_with_attackable_players(
+pub fn creature_must_attack_with_attackable_players(
     state: &GameState,
     obj_id: ObjectId,
     attackable_players: &[PlayerId],
