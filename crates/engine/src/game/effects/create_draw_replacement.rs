@@ -1,5 +1,6 @@
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ReplacementDefinition, ResolvedAbility, RestrictionExpiry,
+    Effect, EffectError, EffectKind, ReplacementDefinition, ReplacementPlayerScope,
+    ResolvedAbility, RestrictionExpiry,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -18,15 +19,16 @@ use crate::types::replacements::ReplacementEvent;
 /// (`consume_on_apply`, CR 614.6) and dropped at end-of-turn cleanup
 /// (`expiry: EndOfTurn`, CR 514.2).
 ///
-/// Player scope: `valid_player: None` (the default) scopes the replacement to
-/// the source player only — matching "you would draw" — handled by the Draw
-/// player-scope gate in `find_applicable_replacements`. NOTE: `valid_card` is
-/// deliberately NOT set: a `ProposedEvent::Draw` has no `affected_object_id`
-/// (the card being drawn is not yet a tracked event object), so a
-/// `valid_card: SelfRef` gate would never match and the shield would never
-/// fire. The shield instead lives on the source permanent (Words of Worship/
-/// Wilding are battlefield enchantments) so `find_applicable_replacements`
-/// scans it via the Battlefield/Command-zone scan.
+/// Player scope: anchored at resolution time via `source_controller` +
+/// `valid_player: You` so "you would draw" follows the activating player even
+/// if the Words permanent leaves or changes controller before the draw (CR
+/// 113.7a / CR 611.2a). NOTE: `valid_card` is deliberately NOT set: a
+/// `ProposedEvent::Draw` has no `affected_object_id`, so a `valid_card:
+/// SelfRef` gate would never match.
+///
+/// The shield lives in `pending_damage_replacements` under the sentinel
+/// `ObjectId(0)` (same game-state pending slot used for resolution-time damage
+/// shields) so it survives source zone changes.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -53,13 +55,12 @@ pub fn resolve(
     shield.runtime_execute = Some(Box::new(substitute));
     shield.consume_on_apply = true; // CR 614.6: one-shot ("the next time").
     shield.expiry = Some(RestrictionExpiry::EndOfTurn); // CR 514.2: "this turn".
+    // CR 614.1a + CR 113.7a: anchor the installing controller at resolution
+    // time so the shield outlives the source permanent's zone/controller.
+    shield.source_controller = Some(ability.controller);
+    shield.valid_player = Some(ReplacementPlayerScope::You);
 
-    // CR 614.1a: host the shield on the source permanent so the
-    // Battlefield/Command-zone scan in `find_applicable_replacements` reaches
-    // it. `valid_player: None` (default) keeps it source-player-scoped.
-    if let Some(obj) = state.objects.get_mut(&ability.source_id) {
-        obj.replacement_definitions.push(shield);
-    }
+    state.pending_damage_replacements.push(shield);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::CreateDrawReplacement,
@@ -123,9 +124,13 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &gain_five_replacement(source, P0), &mut events).unwrap();
         assert_eq!(
-            state.objects[&source].replacement_definitions.len(),
+            state.pending_damage_replacements.len(),
             1,
-            "the draw-replacement shield must be installed on the source"
+            "the draw-replacement shield must be installed in pending game state"
+        );
+        assert!(
+            state.objects[&source].replacement_definitions.is_empty(),
+            "shield must not depend on the source permanent staying on the battlefield"
         );
 
         let mut events = Vec::new();
@@ -143,11 +148,7 @@ mod tests {
             "the substitute (gain 5 life) must run in place of the draw"
         );
         assert!(
-            state.objects[&source]
-                .replacement_definitions
-                .as_slice()
-                .iter()
-                .all(|d| d.is_consumed),
+            state.pending_damage_replacements[0].is_consumed,
             "CR 614.6: the one-shot shield is consumed after firing"
         );
     }
@@ -192,12 +193,12 @@ mod tests {
 
         let mut events = Vec::new();
         resolve(&mut state, &gain_five_replacement(source, P0), &mut events).unwrap();
-        assert_eq!(state.objects[&source].replacement_definitions.len(), 1);
+        assert_eq!(state.pending_damage_replacements.len(), 1);
 
         let mut cleanup_events = Vec::new();
         crate::game::turns::execute_cleanup(&mut state, &mut cleanup_events);
         assert!(
-            state.objects[&source].replacement_definitions.is_empty(),
+            state.pending_damage_replacements.is_empty(),
             "CR 514.2: the 'this turn' shield is dropped at end-of-turn cleanup"
         );
 
@@ -303,5 +304,57 @@ mod tests {
             state.players[1].life, opp_start_life,
             "the opponent does not gain the controller's substitute life"
         );
+    }
+
+    /// CR 113.7a: the one-shot replacement survives the source leaving the
+    /// battlefield before the draw fires.
+    #[test]
+    fn survives_source_leaving_before_draw() {
+        let mut sc = GameScenario::new();
+        let source = sc.add_creature(P0, "Words of Worship", 0, 0).id();
+        let _top = sc.add_card_to_library_top(P0, "Mountain");
+        let mut state = sc.state;
+        let start_life = state.players[0].life;
+        let start_hand = state.players[0].hand.len();
+
+        let mut events = Vec::new();
+        resolve(&mut state, &gain_five_replacement(source, P0), &mut events).unwrap();
+        state.objects.get_mut(&source).unwrap().zone = Zone::Graveyard;
+
+        let mut events = Vec::new();
+        crate::game::effects::draw::resolve(&mut state, &draw_one_for(P0, source), &mut events)
+            .unwrap();
+
+        assert_eq!(state.players[0].hand.len(), start_hand);
+        assert_eq!(state.players[0].life, start_life + 5);
+    }
+
+    /// CR 611.2a: the replacement stays scoped to the activating player even if
+    /// the source permanent changes controller before the draw.
+    #[test]
+    fn stays_scoped_to_activating_player_after_control_change() {
+        let mut sc = GameScenario::new();
+        let source = sc.add_creature(P0, "Words of Worship", 0, 0).id();
+        let p0_top = sc.add_card_to_library_top(P0, "Mountain");
+        let p1_top = sc.add_card_to_library_top(P1, "Island");
+        let mut state = sc.state;
+        let p0_start_life = state.players[0].life;
+
+        let mut events = Vec::new();
+        resolve(&mut state, &gain_five_replacement(source, P0), &mut events).unwrap();
+        state.objects.get_mut(&source).unwrap().controller = P1;
+
+        // P0's draw is still replaced (P0 activated the ability).
+        let mut events = Vec::new();
+        crate::game::effects::draw::resolve(&mut state, &draw_one_for(P0, source), &mut events)
+            .unwrap();
+        assert!(!state.players[0].hand.contains(&p0_top));
+        assert_eq!(state.players[0].life, p0_start_life + 5);
+
+        // P1's draw is unaffected even though they now control the source.
+        let mut events = Vec::new();
+        crate::game::effects::draw::resolve(&mut state, &draw_one_for(P1, source), &mut events)
+            .unwrap();
+        assert!(state.players[1].hand.contains(&p1_top));
     }
 }

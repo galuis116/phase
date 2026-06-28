@@ -4865,6 +4865,25 @@ pub fn find_applicable_replacements(
                     // it).
                     let source_controller =
                         repl_def.source_controller.unwrap_or(state.active_player);
+                    // CR 614.1a: Draw replacements hosted in pending state
+                    // (Words of Worship/Wilding) scope by the installing player
+                    // captured at resolution, not the source permanent's live
+                    // controller.
+                    if let ProposedEvent::Draw { player_id, .. } = event {
+                        let player_ok = match &repl_def.valid_player {
+                            Some(crate::types::ability::ReplacementPlayerScope::Opponent) => {
+                                *player_id != source_controller
+                            }
+                            Some(crate::types::ability::ReplacementPlayerScope::You) => {
+                                *player_id == source_controller
+                            }
+                            Some(crate::types::ability::ReplacementPlayerScope::AnyPlayer) => true,
+                            None => *player_id == source_controller,
+                        };
+                        if !player_ok {
+                            continue;
+                        }
+                    }
                     if !apply_state_level_gates(
                         repl_def,
                         event,
