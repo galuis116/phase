@@ -47,6 +47,8 @@ export type GameFormat =
   | "HistoricBrawl"
   | "FreeForAll"
   | "TwoHeadedGiant"
+  | "Archenemy"
+  | "Planechase"
   | "Limited"
   | "Momir";
 
@@ -80,6 +82,8 @@ export interface FormatConfig {
    * fixed-deck formats client-side.
    */
   supplies_fixed_deck?: boolean;
+  /** Configured archenemy seat for default Archenemy. Absent outside Archenemy. */
+  archenemy_player?: PlayerId | null;
   /**
    * Sandbox capability flag: when true the server permits `GameAction.Debug(_)`
    * from any player in the `debug_permitted` set. Off by default. Orthogonal
@@ -421,6 +425,9 @@ export type ManaSpellGrant =
 export interface ManaUnit {
   color: ManaType;
   source_id: ObjectId;
+  // CR 118.3a: stable per-unit id used to pin which pool unit pays a cost.
+  // `0` is the unstamped sentinel (convoke markers / detached preview pools).
+  pip_id: number;
   snow: boolean;
   restrictions: ManaRestriction[];
   // `#[serde(default, skip_serializing_if = "Vec::is_empty")]` — absent when empty.
@@ -1017,6 +1024,9 @@ export interface PendingCast {
   activation_cost?: SerializedAbilityCost;
   activation_ability_index?: number;
   target_constraints?: Array<{ type: string }>;
+  // CR 118.3a: pip ids the caster pinned to direct payment. `#[serde(default,
+  // skip_serializing_if = "Vec::is_empty")]` — absent when no pin is recorded.
+  pinned_pool_units?: number[];
 }
 
 export interface TargetSelectionSlot {
@@ -1087,6 +1097,12 @@ export interface ModalChoice {
    */
   mode_pawprints?: number[];
   constraints?: Array<{ type: string }>;
+  /**
+   * CR 700.2 + CR 107.3m: Engine-internal dynamic "choose up to X —" cap
+   * descriptor (a serialized QuantityExpr). Resolved live by the engine into
+   * `max_choices` before the choice is offered; the UI never reads this field.
+   */
+  dynamic_max_choices?: unknown;
 }
 
 // CR 603.3b: Display payload for one collected-but-not-yet-stacked trigger
@@ -1559,6 +1575,7 @@ export type DebugAction =
 
 export type GameAction =
   | { type: "PassPriority" }
+  | { type: "RollPlanarDie" }
   | { type: "ChooseActivationCostBranch"; data: { index: number } }
   | { type: "PlayLand"; data: { object_id: ObjectId; card_id: CardId } }
   | { type: "CastSpell"; data: { object_id: ObjectId; card_id: CardId; targets: ObjectId[]; payment_mode?: CastPaymentMode } }
@@ -1570,6 +1587,9 @@ export type GameAction =
   | { type: "ReorderHand"; data: { order: ObjectId[] } }
   | { type: "TapLandForMana"; data: { object_id: ObjectId } }
   | { type: "UntapLandForMana"; data: { object_id: ObjectId } }
+  // CR 118.3a: pin / unpin a specific pool unit during manual mana payment.
+  | { type: "SpendPoolMana"; data: { pip_id: number } }
+  | { type: "UnspendPoolMana"; data: { pip_id: number } }
   | { type: "TapForConvoke"; data: { object_id: ObjectId; mana_type: ManaType } }
   | { type: "SelectCards"; data: { cards: ObjectId[] } }
   | { type: "SelectCoinFlips"; data: { keep_indices: number[] } }
@@ -1713,6 +1733,8 @@ export interface PhyrexianShard {
   options: ShardOptions;
 }
 
+export type PlanarDieFace = "Planeswalk" | "Chaos" | "Blank";
+
 // ── Game Events (discriminated union, tag="type", content="data") ────────
 
 export type GameEvent =
@@ -1781,6 +1803,9 @@ export type GameEvent =
   | { type: "DebugActionUsed"; data: { player_id: PlayerId; description: string } }
   | { type: "DebugPermissionGranted"; data: { host: PlayerId; player_id: PlayerId } }
   | { type: "DebugPermissionRevoked"; data: { host: PlayerId; player_id: PlayerId } }
+  | { type: "Planeswalked"; data: { player_id: PlayerId; from: ObjectId | null; to: ObjectId | null } }
+  | { type: "ChaosEnsued"; data: { plane_id: ObjectId } }
+  | { type: "PlanarDieRolled"; data: { player_id: PlayerId; face: PlanarDieFace } }
   // CR 706: a die was rolled. Animated by DiceRollOverlay. `sides`/`result` are
   // the engine's authoritative roll (1..=sides after modifiers). `result` is
   // `null` for the symbolic planar die (CR 901.9d / CR 706.7), which has no
@@ -1840,6 +1865,21 @@ export interface PlayerStatusView {
   source?: ObjectId | null;
 }
 
+export interface PlanechaseView {
+  active_plane?: ObjectId | null;
+  planar_controller?: PlayerId | null;
+  planar_deck_count: number;
+  current_roll_cost: ManaCost;
+  can_roll: boolean;
+}
+
+export interface ArchenemyView {
+  archenemy: PlayerId;
+  scheme_deck_count: number;
+  active_scheme_ids?: ObjectId[];
+  hero_player_ids?: PlayerId[];
+}
+
 /**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
@@ -1885,6 +1925,20 @@ export interface DerivedViews {
    * `engine::game::derived_views::DerivedViews::player_status`.
    */
   player_status?: PlayerStatusView[];
+  /**
+   * CR 118.3a + CR 601.2g: during the viewing player's own manual mana payment
+   * for a spell, the portion of the locked cost still UNPAID by the pool units
+   * they have pinned (selected). The payment UI renders this as the cost shrinks
+   * while the player picks mana; an empty/`NoCost` value means their selection
+   * alone covers the whole cost. Omitted outside a non-convoke spell payment the
+   * viewer controls. Mirrors
+   * `engine::game::derived_views::DerivedViews::pending_payment_remaining`.
+   */
+  pending_payment_remaining?: ManaCost;
+  /** Engine-authored Planechase state and planar-die legality. */
+  planechase?: PlanechaseView | null;
+  /** Engine-authored Archenemy state. */
+  archenemy?: ArchenemyView | null;
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */
@@ -2185,6 +2239,17 @@ export const AdapterErrorCode = {
    * offer a pre-filled bug report.
    */
   ENGINE_PANIC: "ENGINE_PANIC",
+  /**
+   * A gameplay round-trip to the engine Web Worker never returned within the
+   * timeout window (see `ENGINE_REQUEST_TIMEOUT_MS` in engine-worker-client).
+   * Without this, a wedged worker call hangs forever and leaves the dispatch
+   * mutex held, silently dropping every subsequent click. Classified as
+   * recoverable (mirrors STATE_LOST): the recovery layer surfaces the Layer 3
+   * reload prompt via `notifyEngineLost` rather than freezing the UI. A late
+   * worker reply that arrives after the timeout is a safe no-op (the pending
+   * entry has already been deleted by id).
+   */
+  ENGINE_UNRESPONSIVE: "ENGINE_UNRESPONSIVE",
   WASM_ERROR: "WASM_ERROR",
   INVALID_ACTION: "INVALID_ACTION",
   BRACKET_ESTIMATION_UNSUPPORTED: "bracket-estimation/unsupported",
@@ -2272,6 +2337,16 @@ export interface BatchResolveResult {
    *  chunk's value as the "resolving X of Y" denominator. */
   total: number;
 }
+
+/**
+ * Engine-built game-scoped AI card-DB subset descriptor (the `build_ai_card_subset`
+ * WASM export, serialized as a tagged union). `full` means the game's card
+ * universe is not statically bounded (today: Momir) and AI workers must load the
+ * full database; `subset` carries the minimal card-data JSON for this game.
+ */
+export type AiCardSubsetResult =
+  | { kind: "full" }
+  | { kind: "subset"; json: string; count: number };
 
 export interface EngineAdapter {
   initialize(): Promise<void>;

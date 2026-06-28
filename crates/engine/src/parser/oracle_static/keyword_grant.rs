@@ -27,6 +27,27 @@ pub(crate) enum RuleStaticPredicate {
     MayPlayAdditionalLand,
 }
 
+/// CR 702.34a / CR 702.138a / CR 702.187b / CR 702.97 / CR 702.141: maps the
+/// leading keyword token of a graveyard-cast-keyword grant ("flashback",
+/// "escape", "mayhem", "scavenge", "encore") to its `GraveyardGrantedKeywordKind`.
+/// Single authority for the keyword-word → kind dispatch, shared by the static
+/// "each ... has <kw>" clause below and the targeted/imperative grant front door
+/// in `oracle_effect` so both forms recognize the same keyword set.
+pub(crate) fn parse_graveyard_granted_keyword_kind(
+    input: &str,
+) -> OracleResult<'_, GraveyardGrantedKeywordKind> {
+    alt((
+        value(GraveyardGrantedKeywordKind::Flashback, tag("flashback")),
+        value(GraveyardGrantedKeywordKind::Escape, tag("escape")),
+        value(GraveyardGrantedKeywordKind::Mayhem, tag("mayhem")),
+        // CR 702.97 / CR 702.141: Varolz, Young Deathclaws (scavenge);
+        // Wire Surgeons (encore) grant activated graveyard keywords.
+        value(GraveyardGrantedKeywordKind::Scavenge, tag("scavenge")),
+        value(GraveyardGrantedKeywordKind::Encore, tag("encore")),
+    ))
+    .parse(input)
+}
+
 pub(crate) fn try_parse_graveyard_keyword_grant_clause(
     text: &str,
 ) -> Option<(TargetFilter, GraveyardGrantedKeywordKind, String)> {
@@ -41,18 +62,11 @@ pub(crate) fn try_parse_graveyard_keyword_grant_clause(
     let subject = subject.trim();
     let keyword_text = keyword_text.trim().trim_end_matches('.').to_string();
 
-    let kind = nom_on_lower(&keyword_text, &keyword_text.to_lowercase(), |i| {
-        alt((
-            value(GraveyardGrantedKeywordKind::Flashback, tag("flashback")),
-            value(GraveyardGrantedKeywordKind::Escape, tag("escape")),
-            value(GraveyardGrantedKeywordKind::Mayhem, tag("mayhem")),
-            // CR 702.97 / CR 702.141: Varolz, Young Deathclaws (scavenge);
-            // Wire Surgeons (encore) grant activated graveyard keywords.
-            value(GraveyardGrantedKeywordKind::Scavenge, tag("scavenge")),
-            value(GraveyardGrantedKeywordKind::Encore, tag("encore")),
-        ))
-        .parse(i)
-    })?
+    let kind = nom_on_lower(
+        &keyword_text,
+        &keyword_text.to_lowercase(),
+        parse_graveyard_granted_keyword_kind,
+    )?
     .0;
 
     let (filter, remainder) = parse_type_phrase(subject);
@@ -755,6 +769,7 @@ fn parse_grant_all_activated_abilities_source(
 /// ability-grant-by-reference static. Each arm is a leaf of the source-set axis;
 /// adding a new referenced set is one more `alt` arm here, never a new variant.
 fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::ability::TargetFilter> {
+    use crate::types::counter::CounterType;
     alt((
         // CR 607.2a: cards exiled with the host. Optional card-type qualifier
         // narrows the granted set (Agatha grants creature cards only).
@@ -774,6 +789,97 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
                 tag("creatures you control that don't have the same name as "),
                 alt((tag("it"), tag("~"))),
             ),
+        ),
+        // CR 613.1f: "each other creature with a +1/+1 counter on it"
+        // (Experiment Kraj) — all creatures except self with at least one
+        // +1/+1 counter.
+        value(
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::Counters {
+                            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                            comparator: Comparator::GE,
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ])),
+                    TargetFilter::Not {
+                        filter: Box::new(TargetFilter::SelfRef),
+                    },
+                ],
+            },
+            (
+                tag("each other creature with a +1/+1 counter on "),
+                alt((tag("it"), tag("them"))),
+            ),
+        ),
+        // CR 613.1f: "all creatures your opponents control" (Drana and Linvala)
+        // — battlefield permanents; scope to InZone { Battlefield } so dead
+        // or exiled creatures of theirs do not donate abilities.
+        value(
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::Opponent)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    }]),
+            ),
+            tag("all creatures your opponents control"),
+        ),
+        // CR 613.1f: "all creature cards in all graveyards" (Necrotic Ooze)
+        value(
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }])),
+            tag("all creature cards in all graveyards"),
+        ),
+        // CR 613.1f: "all land cards in all graveyards"
+        value(
+            TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }])),
+            tag("all land cards in all graveyards"),
+        ),
+        // CR 613.1f: "all lands on the battlefield" (Manascape Refractor)
+        // — zone is explicit in the phrase; encode it so graveyard/hand land
+        // cards are excluded from the runtime provider scan.
+        value(
+            TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }])),
+            tag("all lands on the battlefield"),
+        ),
+        // CR 613.1f: "all legendary creatures you control" (Robaran Mercenaries)
+        // — battlefield permanents; scope to InZone { Battlefield } so
+        // legendary creature cards in hand/graveyard do not donate abilities.
+        value(
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![
+                        FilterProp::HasSupertype {
+                            value: Supertype::Legendary,
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        },
+                    ]),
+            ),
+            tag("all legendary creatures you control"),
+        ),
+        // CR 613.1f: "all artifact cards in your graveyard"
+        // CR 108.3: Graveyard cards are "yours" by ownership, not control —
+        // use FilterProp::Owned rather than TypedFilter::controller here.
+        value(
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+                FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                },
+            ])),
+            tag("all artifact cards in your graveyard"),
         ),
     ))
     .parse(input)
@@ -1059,6 +1165,59 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     {
         let restriction_text = restriction_text.trim();
         if let Some(modes) = parse_restriction_modes(restriction_text) {
+            for mode in modes {
+                if static_mode_needs_grant_propagation(&mode)
+                    && !modifications.iter().any(|existing| {
+                        matches!(
+                            existing,
+                            ContinuousModification::AddStaticMode { mode: existing_mode }
+                                if *existing_mode == mode
+                        )
+                    })
+                {
+                    modifications.push(ContinuousModification::AddStaticMode { mode });
+                }
+            }
+        }
+    }
+
+    // CR 508.1d + CR 509.1a + CR 205.1b: A one-shot combat trick that leads with
+    // a movement restriction and then a type/stat change — "can't block this
+    // turn and becomes a Coward in addition to its other types" (Coward); the
+    // generalized class is "can't <restriction> [this turn] and <continuous
+    // mod>". The trailing change conjunct (becomes/gets/gains/has …) is already
+    // recovered by the dedicated scans above and below; recover the LEADING
+    // restriction conjunct here so it is not silently dropped. Anchored on
+    // " and <change-verb>" so a "can't attack, block, or crew" restriction list
+    // (separated by ", or "/", "/" or ") is never split mid-list.
+    // `parse_restriction_modes` itself gates on the "can't"/"cannot" prefix and
+    // is `all_consuming`, so a non-restriction prefix yields `None`. The
+    // grant-propagation dedup mirrors the base-PT restriction block above.
+    if let Some((restriction_prefix, _)) =
+        nom_primitives::scan_split_at_phrase(&unquoted_lower, |i| {
+            (
+                tag("and "),
+                alt((
+                    tag("becomes "),
+                    tag("become "),
+                    tag("gets "),
+                    tag("get "),
+                    tag("gains "),
+                    tag("gain "),
+                    tag("has "),
+                    tag("have "),
+                )),
+            )
+                .parse(i)
+        })
+    {
+        // Strip the embedded " this turn" duration off the restriction chunk
+        // ("can't block this turn" → "can't block") via the shared combinator
+        // duration grammar before delegating dispatch to
+        // `parse_restriction_modes`; the bare CantBlock/CantAttack atoms do not
+        // themselves consume a trailing " this turn" (unlike "be blocked").
+        let (restriction_prefix, _) = strip_trailing_duration(restriction_prefix.trim());
+        if let Some(modes) = parse_restriction_modes(restriction_prefix) {
             for mode in modes {
                 if static_mode_needs_grant_propagation(&mode)
                     && !modifications.iter().any(|existing| {

@@ -126,6 +126,8 @@
     "pastePlaceholder": "Cole a lista do deck (formato MTGA ou .dck)...",
     "fromFile": "De Arquivo",
     "parse": "Processar",
+    "parsing": "Processando…",
+    "parseError": "Nenhuma carta encontrada. Cole um deck no formato MTGA ou .dck.",
     "exportModalTitle": "Exportar Deck",
     "saveToFile": "Salvar em Arquivo",
     "copied": "Copiado!",
@@ -271,5 +273,11 @@
     "minimumCount": "O deck tem {{count}} cartas (mínimo de 60)",
     "maxCopies": "{{name}}: {{count}} cópias (máx. 4)",
     "companionInMain": "{{name}} é seu companheiro, mas também está no deck principal — isso viola sua condição de construção. Remova-o do deck principal para usá-lo como companheiro."
+  },
+  "switcher": {
+    "starred": "Destacados",
+    "unfiled": "Sem pasta",
+    "searchPlaceholder": "Buscar baralhos…",
+    "noMatches": "Nenhum baralho"
   }
 }

@@ -135,7 +135,7 @@ fn handle_unlock_room_door(
     casting::pay_special_action_mana_cost(
         state,
         player,
-        object_id,
+        Some(object_id),
         &cost,
         crate::types::mana::SpecialAction::UnlockDoor,
         events,
@@ -216,6 +216,42 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     Ok(result)
 }
 
+thread_local! {
+    /// PR-3 (Option C): set while inside a legality/search simulation probe
+    /// (`ai_support::SimulationFilter`'s clone-and-apply). Loop-shortcut detection
+    /// (`reconcile_terminal_result` §3) and ring accumulation
+    /// (`pass_priority_once_with_pipeline` §2) are TOP-LEVEL-ONLY — a hypothetical
+    /// single-action probe is NOT a real CR 732.2a play sequence, so it must neither
+    /// shortcut nor accumulate. Engine game logic is single-threaded (no rayon /
+    /// par_iter / std::thread::spawn in the apply or legal_actions path), `apply()` is
+    /// fully synchronous (no `.await` between set and restore), and the tokio server
+    /// runs each apply synchronously within one task on one thread, so the RAII
+    /// set/restore is balanced on a single thread within one call. Mirrors the in-engine
+    /// thread-local idiom (`perf_counters.rs`, `layers.rs`, `quantity.rs`).
+    static IN_SIMULATION_PROBE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// True while inside a `SimulationFilter` legality probe. Read by §2 and §3.
+pub(crate) fn in_simulation_probe() -> bool {
+    IN_SIMULATION_PROBE.with(|f| f.get())
+}
+
+/// RAII guard: sets the probe flag, restores the PREVIOUS value on drop (panic-safe,
+/// nesting-correct — a probe that itself enumerates legal actions keeps the flag set).
+#[must_use]
+pub(crate) struct SimulationProbeGuard(bool);
+impl SimulationProbeGuard {
+    pub(crate) fn enter() -> Self {
+        SimulationProbeGuard(IN_SIMULATION_PROBE.with(|f| f.replace(true)))
+    }
+}
+impl Drop for SimulationProbeGuard {
+    fn drop(&mut self) {
+        IN_SIMULATION_PROBE.with(|f| f.set(self.0));
+    }
+}
+
 fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
     // Safety net (fixes #962): If a player-loss SBA would eliminate a player,
     // run SBAs now. CR 704.3 normally checks SBAs when a player would receive
@@ -236,6 +272,56 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
     if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
         match_flow::handle_game_over_transition(state);
         result.waiting_for = state.waiting_for.clone();
+    }
+
+    // CR 732.2a + CR 704.5a: shortcut a NET-PROGRESS mandatory cascade to its
+    // determinate single-opponent loss. Runs AFTER the CR 704 state-based actions
+    // above (CR 704.3 ordering), so a player ALREADY at 0 life loses via the real
+    // 704.5a SBA first and this never preempts or double-fires a legitimate win — it
+    // only fires when the game would otherwise grind on (high victim life, or mid-drain
+    // before 0). The `!GameOver` guard makes it idempotent across the :196/:200 calls.
+    if !matches!(state.waiting_for, WaitingFor::GameOver { .. })
+        && matches!(state.waiting_for, WaitingFor::Priority { .. }) // a player would get priority (CR 704.3)
+        && !state.stack.is_empty()
+        && !state.loop_detect_ring.is_empty()
+        // PR-3 Defect-2: loop-shortcut detection is TOP-LEVEL-ONLY. Inside a
+        // `SimulationFilter` legality probe the flag is set, so §3 is skipped. This
+        // enforces the invariant that a hypothetical single-action probe never runs
+        // game-ending shortcut logic, and guards the
+        // reconcile→§3→§9→legal_actions→SimulationFilter→reconcile path against
+        // unbounded re-entry. (In the current architecture the §9 gate's pass-state
+        // reset already makes those nested probes handoffs that do not re-resolve, so
+        // the path is bounded even without this conjunct — see the impl report's
+        // Defect-2 measurement — but the guard keeps the top-level-only invariant
+        // explicit and robust to future §9/§2 changes.)
+        && !in_simulation_probe()
+    {
+        // Clone the Arc handles (cheap refcount bumps) to release the borrow on the
+        // ring before the GameOver mutation below.
+        let priors: Vec<std::sync::Arc<GameState>> =
+            state.loop_detect_ring.iter().cloned().collect();
+        let cur = crate::analysis::resource::ResourceVector::snapshot(state);
+        if let Some(winner) = priors.iter().find_map(|prior| {
+            let delta = crate::analysis::resource::ResourceVector::delta(
+                &crate::analysis::resource::ResourceVector::snapshot(prior),
+                &cur,
+            );
+            crate::analysis::loop_check::live_mandatory_loop_winner(prior, state, &delta)
+        }) {
+            // CR 732.5: shortcut ONLY a loop NO living player can break. The gate runs
+            // ONCE after find_map (not per prior). At the per-beat drive this is the
+            // entire soundness firewall.
+            if no_living_player_has_meaningful_priority_action(state) {
+                result.events.push(GameEvent::GameOver {
+                    winner: Some(winner),
+                });
+                state.waiting_for = WaitingFor::GameOver {
+                    winner: Some(winner),
+                };
+                result.waiting_for = state.waiting_for.clone();
+                match_flow::handle_game_over_transition(state);
+            }
+        }
     }
 }
 
@@ -306,6 +392,30 @@ pub fn apply_as_current(
     state: &mut GameState,
     action: GameAction,
 ) -> Result<ActionResult, EngineError> {
+    apply_as_current_with_mode(state, action, PublicFinalizeMode::Immediate)
+}
+
+/// Legality-probe variant of [`apply_as_current`] for throwaway simulation
+/// clones (the AI `SimulationFilter` oracle): the caller only reads `.is_ok()`
+/// and discards the mutated state. The Ok/Err verdict is fully decided inside
+/// `apply_action`; `finalize_display_state` only computes frontend-only hints
+/// (mana availability, devotion, summoning-sickness display) that no rules
+/// legality path consults. Applying in `DeferredDisplay` mode therefore yields
+/// the identical verdict while skipping the per-call `derive_display_state`
+/// board sweep — which on a go-wide mana board (Cryptolith Rite granting `{T}:
+/// Add` to hundreds of tokens) is an O(N^2) static scan paid once per candidate.
+pub(crate) fn apply_as_current_for_legality(
+    state: &mut GameState,
+    action: GameAction,
+) -> Result<ActionResult, EngineError> {
+    apply_as_current_with_mode(state, action, PublicFinalizeMode::DeferredDisplay)
+}
+
+fn apply_as_current_with_mode(
+    state: &mut GameState,
+    action: GameAction,
+    mode: PublicFinalizeMode,
+) -> Result<ActionResult, EngineError> {
     let actor = match &action {
         GameAction::Concede { player_id } => *player_id,
         // CR 103.5: For simultaneous-decision states, pick the first pending
@@ -320,7 +430,7 @@ pub fn apply_as_current(
             })?
         }
     };
-    apply(state, actor, action)
+    apply_action_boundary(state, actor, action, mode)
 }
 
 pub(super) fn resume_pending_continuation_if_priority(
@@ -408,6 +518,13 @@ fn pass_priority_once_with_pipeline(
     state.pending_activations.clear();
 
     let stack_was_empty = state.stack.is_empty();
+    // PR-3 (Option C) Defect-1: capture the pre-pipeline stack frame for the §2
+    // loop-shortcut window maintenance below. `stack_top_before` is the resolving
+    // entry's id; a real resolution this beat replaces the top with a different id
+    // (every refilled trigger gets a fresh monotonic ObjectId), whereas a bare
+    // priority handoff leaves it unchanged.
+    let stack_len_before = state.stack.len();
+    let stack_top_before = state.stack.last().map(|e| e.id);
     // CR 117.4 + CR 723.5/723.8: pass the *seat* that holds priority, not
     // `priority_player` — under turn-control the latter is the authorized
     // submitter (the controller), which would mis-count consecutive passes and
@@ -441,6 +558,45 @@ fn pass_priority_once_with_pipeline(
         skip_triggers,
     )?;
     sync_waiting_for(state, &wf);
+
+    // PR-3 (Option C) CR 732.2a loop-shortcut window accumulation — relocated here
+    // (PR3 Defect-1 fix). The refilling trigger is placed by
+    // `run_post_action_pipeline` (CR 603.3 / CR 704.3: triggered abilities waiting to
+    // go on the stack are put there the next time a player would receive priority),
+    // which runs above — AFTER the resolution seam in `handle_priority_pass_with_limit`.
+    // Sampling here is the only frame where a self-refilling cascade is already
+    // non-shrinking (the refilled trigger is on the stack).
+    //
+    // RESOLUTION-OCCURRED GATE. `resolved_this_beat` is true iff there WAS a top entry
+    // at function entry and it is no longer the top — i.e. a stack entry was actually
+    // resolved/consumed this beat. A bare priority handoff (the active player passes,
+    // priority moves on, stack untouched) leaves the top unchanged ⇒
+    // `resolved_this_beat == false` ⇒ the ring is LEFT INTACT so accumulation survives
+    // across the handoff beats that separate resolutions under the per-beat drive. A
+    // naive `len >= before` gate would false-positive on those handoffs; a strict
+    // clear-on-handoff would destroy the accumulation — both are wrong. This gate
+    // samples only on a real resolution and touches the ring only then.
+    let resolved_this_beat =
+        stack_top_before.is_some() && state.stack.last().map(|e| e.id) != stack_top_before;
+    if resolved_this_beat && !in_simulation_probe() {
+        // REFILL gate: a self-refilling MANDATORY cascade holds the stack non-empty and
+        // non-shrinking across the resolution, settling at a non-interactive priority
+        // window reset to the active player (the canonical modulo-comparison point —
+        // `project_out_resources` compares phase/priority exactly). A normal multi-spell
+        // stack SHRINKS; an interactive effect opens a non-Priority window; a finite
+        // chain drains to empty — all three fall to the clear arm.
+        if !state.stack.is_empty()
+            && state.stack.len() >= stack_len_before
+            && matches!(wf, WaitingFor::Priority { player } if player == state.active_player)
+        {
+            state.record_loop_detect_sample();
+        } else {
+            state.loop_detect_ring.clear();
+        }
+    }
+    // No else-branch: a bare handoff or an empty-stack pass-to-advance-phase does NOT
+    // touch the ring (leave-intact), so accumulation survives the inter-resolution beats.
+
     Ok(wf)
 }
 
@@ -453,8 +609,33 @@ fn active_until_stack_empty_requester(state: &GameState) -> Option<PlayerId> {
 fn priority_player_has_meaningful_action(state: &GameState) -> bool {
     let mut probe = state.clone();
     probe.auto_pass.clear();
-    let actions = crate::ai_support::legal_actions(&probe);
+    // The probe always has `waiting_for == Priority` at both call sites, so the
+    // flat priority-action path is byte-identical to what `legal_actions` yielded
+    // — it drops only the unused spell-cost object-walk and grouped-map build.
+    let actions = crate::ai_support::flat_priority_actions(&probe);
     crate::ai_support::has_meaningful_priority_action(&probe, &actions)
+}
+
+/// CR 732.5: no player can be forced to keep looping if ANY of them could take an
+/// action that ends the loop. The cap-path [`priority_player_has_meaningful_action`]
+/// checks only the CURRENT priority holder; the loop-shortcut WIN designates a
+/// LOSER, so its gate must be stronger — the would-be loop-breaker (a victim whose
+/// priority is auto-passed by a stale `UntilStackEmpty`/`UntilEndOfTurn` session,
+/// which `priority_auto_pass_decision` Passes WITHOUT a meaningful check) need NOT
+/// hold priority at the modulo-match iteration. Probe EVERY living player as the
+/// priority holder (`legal_actions`/`has_meaningful_priority_action` key off
+/// `waiting_for`). Conservative: if anyone has a meaningful action this returns
+/// `false` and the cascade falls through to the existing halt (priority preserved) —
+/// fail-safe toward the status quo, never a wrong win.
+fn no_living_player_has_meaningful_priority_action(state: &GameState) -> bool {
+    state.players.iter().filter(|p| !p.is_eliminated).all(|p| {
+        let mut probe = state.clone();
+        probe.auto_pass.clear();
+        probe.priority_player = p.id;
+        probe.waiting_for = WaitingFor::Priority { player: p.id };
+        let actions = crate::ai_support::legal_actions(&probe);
+        !crate::ai_support::has_meaningful_priority_action(&probe, &actions)
+    })
 }
 
 fn finish_completed_or_interrupted_until_stack_empty_sessions(state: &mut GameState) -> bool {
@@ -847,6 +1028,43 @@ mod auto_pass_decision_tests {
         );
     }
 
+    /// Item A (revert-failing perf): the auto-pass meaningful-action probe takes
+    /// the flat priority-action path, which skips the `legal_actions_full`
+    /// spell-cost object-walk entirely. Pre-fix the probe called
+    /// `legal_actions` → `legal_actions_full`, bumping the spell-cost sweep
+    /// counter once per probe; post-fix it does zero sweeps. The probe still
+    /// detects the meaningful activated ability (byte-identical verdict).
+    #[test]
+    fn priority_probe_skips_spell_cost_sweep() {
+        let mut state = priority_state();
+        push_simple_stack_entry(&mut state, 30_000, PlayerId(1));
+        add_non_mana_activated_artifact(&mut state, PlayerId(0));
+
+        crate::game::perf_counters::reset();
+        let meaningful = priority_player_has_meaningful_action(&state);
+        let snap = crate::game::perf_counters::snapshot();
+
+        assert!(
+            meaningful,
+            "probe detects the castable Draw activation (verdict preserved)"
+        );
+        assert_eq!(
+            snap.legal_actions_spell_cost_sweeps, 0,
+            "flat probe path takes no spell-cost sweep (revert-failing: pre-fix = 1)"
+        );
+    }
+
+    /// Item A behavior parity: with only `PassPriority` available the probe
+    /// reports no meaningful action, identical to pre-change.
+    #[test]
+    fn priority_probe_false_when_only_pass_available() {
+        let state = priority_state();
+        assert!(
+            !priority_player_has_meaningful_action(&state),
+            "an empty board with only PassPriority has no meaningful action"
+        );
+    }
+
     #[test]
     fn until_stack_empty_non_requester_own_stack_shortcut_does_not_hide_action() {
         let mut state = priority_state();
@@ -1088,6 +1306,34 @@ mod auto_pass_decision_tests {
             }
         ));
     }
+
+    /// U-gate (CR 732.5): the loop-shortcut gate must probe EVERY living player,
+    /// not just the current priority holder. Here the NON-priority player P1 holds a
+    /// meaningful (non-mana activated) ability while the current holder P0 has none.
+    ///
+    /// - `no_living_player_has_meaningful_priority_action` returns `false` (P1's
+    ///   action blocks the shortcut) — correct.
+    /// - `priority_player_has_meaningful_action` (current holder P0 only) returns
+    ///   `false`, so a gate built on its negation (`!current_only`) would wrongly be
+    ///   `true` and clear the loop. That contrast proves the all-players
+    ///   generalization is load-bearing (the session-masked victim need not hold
+    ///   priority at the modulo-match iteration).
+    #[test]
+    fn loop_gate_probes_all_living_players_not_just_current_holder() {
+        let mut state = priority_state();
+        // P1 (NOT the current priority holder) has a meaningful action.
+        add_non_mana_activated_artifact(&mut state, PlayerId(1));
+
+        assert!(
+            !no_living_player_has_meaningful_priority_action(&state),
+            "P1 has a loop-ending action, so the all-players gate must refuse to clear"
+        );
+        assert!(
+            !priority_player_has_meaningful_action(&state),
+            "the current-holder-only check sees nothing for P0 — its negation would \
+             wrongly clear, proving the all-players probe is load-bearing"
+        );
+    }
 }
 
 /// Auto-pass loop: when a player has an auto-pass flag and receives priority,
@@ -1207,6 +1453,22 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                                 match_flow::handle_game_over_transition(state);
                                 return;
                             }
+
+                            // PR-3 (Option C): the NET-PROGRESS mandatory-loop WIN
+                            // shortcut is NOT duplicated here. `run_auto_pass_loop`
+                            // resolves via `pass_priority_once_with_pipeline` (:1339),
+                            // whose §2 maintenance accumulates the persisted
+                            // `loop_detect_ring` across these internal iterations, but
+                            // `reconcile_terminal_result` (the §3 win site) is NOT called
+                            // inside this loop — only at :200 AFTER it returns. So the §3
+                            // shortcut does NOT accelerate this auto-pass grind: this loop
+                            // runs its own net-progress drive to the natural CR 704.5a
+                            // death (or the strict CR 104.4b DRAW block above) on its own.
+                            // The accelerated path is the per-beat repeated
+                            // `apply(PassPriority)` drive (the production frontend
+                            // default), where §3 runs after every beat. Keeping a second
+                            // win site here would create two divergent detectors.
+
                             // CR 104.4b: a sliding window of the most recent
                             // MAX_LOOP_WINDOW distinct states. A fill-once-and-stop
                             // buffer never records the cycle of a loop whose
@@ -1583,6 +1845,19 @@ fn apply_action(
         });
     }
 
+    // PR-3 (Option C): CR 732.2a loop-detection ring invalidation. Any deliberate
+    // non-pass action (cast / activate / play-land) breaks a self-refilling mandatory
+    // cascade, so the accumulated detection window is stale and must be dropped.
+    // Placed AFTER every preference early-return (CancelAutoPass / SetPhaseStops /
+    // ReorderHand / Debug / Grant- & RevokeDebugPermission) so a no-op preference
+    // toggle never reaches here; PassPriority is the only action that CONTINUES a
+    // cascade and so must NOT clear. `run_auto_pass_loop` and `resolve_all_fast_forward`
+    // call the resolution seam directly (not via `apply_action`), so this clear does
+    // not fire during their internal iterations — the ring accumulates correctly there.
+    if !matches!(action, GameAction::PassPriority) {
+        state.loop_detect_ring.clear();
+    }
+
     // Any deliberate player action (not auto-pass-related or a simple pass) cancels their auto-pass.
     // CR 103.5: Use the authenticated `actor` directly so the simultaneous mulligan
     // variants (where `authorized_submitter` is None when multiple players are pending)
@@ -1610,6 +1885,7 @@ fn apply_action(
         | GameAction::CastSpellAsMadness { .. }
         | GameAction::CancelCast
         | GameAction::UnlockRoomDoor { .. }
+        | GameAction::RollPlanarDie
         | GameAction::PayUnlessCost { .. }
         | GameAction::PayCombatTax { .. } => {
             state.lands_tapped_for_mana.remove(&actor);
@@ -1641,7 +1917,7 @@ fn apply_action(
             state.cancelled_casts.clear();
             // CR 116.2a: Playing a land is a special action — sorcery-speed, once per turn, stack must be empty.
             // CR 305.2: Playing a land is a special action, not a spell.
-            handle_play_land(state, object_id, card_id, &mut events)?
+            handle_play_land(state, *player, object_id, card_id, &mut events)?
         }
         (WaitingFor::Priority { player }, GameAction::TapLandForMana { object_id }) => {
             if state.priority_player
@@ -1649,7 +1925,7 @@ fn apply_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
-            handle_tap_land_for_mana(state, object_id, &mut events)?
+            handle_tap_land_for_mana(state, *player, object_id, &mut events)?
         }
         (WaitingFor::Priority { player }, GameAction::UntapLandForMana { object_id }) => {
             if state.priority_player
@@ -1778,6 +2054,18 @@ fn apply_action(
             }
             handle_unlock_room_door(state, *player, object_id, door, &mut events)?
         }
+        (WaitingFor::Priority { player }, GameAction::RollPlanarDie) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            // CR 901.9 / CR 116.2i: Rolling the planar die as a special action
+            // does not use the stack; the escalating cost is charged before the
+            // roll and effect-caused rolls do not increment the counter.
+            crate::game::planechase::take_paid_planar_die_action(state, *player, &mut events)?;
+            WaitingFor::Priority { player: *player }
+        }
         // CR 715.3a: Player chooses creature or Adventure face.
         (
             WaitingFor::CastOffer {
@@ -1853,7 +2141,7 @@ fn apply_action(
                     .contains(&crate::types::card_type::CoreType::Land)
             });
             if active_is_land {
-                handle_play_land(state, *object_id, *card_id, &mut events)?
+                handle_play_land(state, *player, *object_id, *card_id, &mut events)?
             } else {
                 casting::handle_cast_spell_with_payment_mode(
                     state,
@@ -2088,7 +2376,7 @@ fn apply_action(
             let is_land_play = slot == crate::types::card_type::CoreType::Land;
             if is_land_play {
                 state.pending_permanent_type_slot = Some((*source, slot));
-                handle_play_land(state, *object_id, *card_id, &mut events)?
+                handle_play_land(state, *player, *object_id, *card_id, &mut events)?
             } else {
                 casting::handle_permanent_type_slot_choice_with_payment_mode(
                     state,
@@ -3072,6 +3360,8 @@ fn apply_action(
         // CR 601.2h: Player has confirmed payment — delegate to the shared finalizer
         // that both this branch and the auto-pay path in `enter_payment_step` share.
         (WaitingFor::ManaPayment { player, .. }, GameAction::PassPriority) => {
+            // CR 118.3a: `finalize_mana_payment` clears `active_payment_pins`
+            // itself on every Ok/Err path, so no caller clear is needed.
             casting_costs::finalize_mana_payment(state, *player, &mut events)?
         }
         // CR 107.4f + CR 601.2f + CR 601.2h: Caster submitted per-shard Phyrexian
@@ -3124,7 +3414,7 @@ fn apply_action(
                     let any_color = casting::player_can_spend_as_any_color_for_payment(
                         state,
                         player,
-                        spell_object,
+                        Some(spell_object),
                         Some(&activation_ctx),
                     );
                     let permissions = super::static_abilities::build_cost_permission_context(
@@ -3144,7 +3434,7 @@ fn apply_action(
                     let any_color = casting::player_can_spend_as_any_color_for_payment(
                         state,
                         player,
-                        spell_object,
+                        Some(spell_object),
                         spell_ctx.as_ref(),
                     );
                     let permissions = super::static_abilities::build_cost_permission_context(
@@ -3184,6 +3474,8 @@ fn apply_action(
                     }
                 }
             }
+            // CR 118.3a: `finalize_mana_payment_with_phyrexian_choices` clears
+            // `active_payment_pins` itself on every Ok/Err path; no caller clear.
             casting_costs::finalize_mana_payment_with_phyrexian_choices(
                 state,
                 player,
@@ -3265,7 +3557,7 @@ fn apply_action(
             GameAction::TapLandForMana { object_id },
         ) => {
             let events_before = events.len();
-            handle_tap_land_for_mana(state, object_id, &mut events)?;
+            handle_tap_land_for_mana(state, *player, object_id, &mut events)?;
             state
                 .lands_tapped_for_mana
                 .entry(state.priority_player)
@@ -3306,6 +3598,37 @@ fn apply_action(
             WaitingFor::ManaPayment {
                 player: *player,
                 convoke_mode: *convoke_mode,
+            }
+        }
+        // CR 118.3a: Pin a specific pool unit so the finalize spend prefers it.
+        // Immediate-stage: records the hint on `pending_cast`, no stack push.
+        (
+            WaitingFor::ManaPayment {
+                player,
+                convoke_mode,
+            },
+            GameAction::SpendPoolMana { pip_id },
+        ) => {
+            let (player, convoke_mode) = (*player, *convoke_mode);
+            handle_spend_pool_mana(state, player, pip_id)?;
+            WaitingFor::ManaPayment {
+                player,
+                convoke_mode,
+            }
+        }
+        // CR 118.3a: Remove a previously-recorded pin (always legal).
+        (
+            WaitingFor::ManaPayment {
+                player,
+                convoke_mode,
+            },
+            GameAction::UnspendPoolMana { pip_id },
+        ) => {
+            let (player, convoke_mode) = (*player, *convoke_mode);
+            handle_unspend_pool_mana(state, pip_id);
+            WaitingFor::ManaPayment {
+                player,
+                convoke_mode,
             }
         }
         // CR 702.51a / Waterbend: Tap a creature or artifact to pay mana.
@@ -3398,9 +3721,10 @@ fn apply_action(
                 }
                 ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
             };
-            if let Some(p) = state.players.iter_mut().find(|p| p.id == *player) {
-                p.mana_pool.add(unit);
-            }
+            // CR 118.3a: stamp a pip id on pool entry. Convoke/improvise markers
+            // are consumed by the shared algorithm and never pinned (the frontend
+            // filters ConvokePayment units); Waterbend produces real pinnable mana.
+            state.add_mana_to_pool(*player, unit);
             if mode == ConvokeMode::Waterbend {
                 events.push(GameEvent::ManaAdded {
                     player_id: *player,
@@ -3460,12 +3784,15 @@ fn apply_action(
             if let Some(spell_id) = state.pending_cast.as_ref().map(|p| p.object_id) {
                 crate::game::exile_links::push_tracked_by_source(state, object_id, spell_id);
             }
-            if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
-                p.mana_pool.add(crate::types::mana::ManaUnit::convoke_payment(
+            // CR 118.3a: route through the stamping authority (delve marker is a
+            // generic-only convoke marker, never pinned).
+            state.add_mana_to_pool(
+                player,
+                crate::types::mana::ManaUnit::convoke_payment(
                     crate::types::mana::ManaType::Colorless,
                     object_id,
-                ));
-            }
+                ),
+            );
             WaitingFor::ManaPayment {
                 player,
                 convoke_mode: Some(ConvokeMode::Delve),
@@ -4363,7 +4690,7 @@ fn apply_action(
         (
             WaitingFor::BetweenGamesSideboard { player, .. },
             GameAction::SubmitSideboard { main, sideboard },
-        ) => match_flow::handle_submit_sideboard(state, *player, main, sideboard)
+        ) => match_flow::handle_submit_sideboard(state, *player, main, sideboard, &mut events)
             .map_err(EngineError::InvalidAction)?,
         (
             WaitingFor::BetweenGamesChoosePlayDraw { player, .. },
@@ -4874,8 +5201,7 @@ fn apply_action(
                 pending_trigger.ability.distribution =
                     Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
                 triggers::finalize_pending_trigger_entry(state, &pending_trigger.ability);
-                state.priority_passes.clear();
-                state.priority_pass_count = 0;
+                priority::clear_priority_passes(state);
                 // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred
                 // behind this distribute-among trigger so each independent
                 // instance reaches the stack (issue #416).
@@ -5262,25 +5588,36 @@ pub(super) fn begin_pending_trigger_target_selection(
         &trigger_events,
         subject_match_count,
     );
-    let selection_result = build_target_slots(state, &ability).and_then(|target_slots| {
-        if target_slots.is_empty() {
-            return Ok(None);
+    // CR 603.3d: "If a choice is required when the triggered ability goes on the
+    // stack but no legal choices can be made for it ... the ability is simply
+    // removed from the stack." `build_target_slots` returns `Err` ONLY to report
+    // exactly that — every error site in `collect_target_slots` is a
+    // `No legal targets available` `ActionNotAllowed`. A targeted trigger's
+    // targets can be legal at "push first" dispatch yet become illegal here at
+    // "choose second" when an effect earlier in the SAME simultaneous cascade
+    // removed the only legal target (e.g. the artifact a Schema Thief token would
+    // copy was destroyed by a damage trigger that resolved first). Map that to
+    // the no-prompt drop path below — never propagate it and abort the in-flight
+    // action, which would leave the game unable to pass priority (a soft-lock
+    // freeze). Errors from `begin_target_selection_for_ability` are genuine
+    // selection-invariant violations and MUST still propagate (via `?` below).
+    let selection_result = match build_target_slots(state, &ability) {
+        Ok(target_slots) if !target_slots.is_empty() => {
+            begin_target_selection_for_ability(state, &ability, &target_slots, &target_constraints)
+                .map(|selection| Some((target_slots, selection)))
         }
-        begin_target_selection_for_ability(state, &ability, &target_slots, &target_constraints)
-            .map(|selection| Some((target_slots, selection)))
-    });
+        // Empty target slots (no targeting), or CR 603.3d no-legal-target: no
+        // prompt is needed/possible — fall through to the removal branch.
+        Ok(_) | Err(_) => Ok(None),
+    };
     super::triggers::restore_trigger_event_context(state, context_snapshot);
     let Some((target_slots, selection)) = selection_result? else {
-        // CR 603.3d: No target prompt is required (empty target slots, or
-        // `build_target_slots`/`begin_target_selection_for_ability` reported
-        // no legal completion). Symmetric to the modal `all-modes-unavailable`
+        // CR 603.3d: No target prompt is required — empty target slots, or
+        // `build_target_slots` reported no legal target at choose-time (mapped to
+        // `Ok(None)` above). Symmetric to the modal `all-modes-unavailable`
         // branch above: if the "push first" dispatcher already pushed an
         // in-construction entry for this trigger, pop it before clearing the
-        // cursor. The new flow filters this case BEFORE pushing in the
-        // non-modal branches (Err(_) drops the trigger; Ok(Some(targets))
-        // auto-pushes a complete entry), so this is normally a dead branch —
-        // kept for symmetry with the modal cleanup and for any
-        // delayed-revalidation paths.
+        // cursor.
         if let Some(entry_id) = state.pending_trigger_entry.take() {
             if state.stack.back().map(|e| e.id) == Some(entry_id) {
                 state.stack.pop_back();
@@ -5392,6 +5729,7 @@ fn record_land_played_from_zone(
 
 fn handle_play_land(
     state: &mut GameState,
+    acting_player: PlayerId,
     object_id: ObjectId,
     card_id: CardId,
     events: &mut Vec<GameEvent>,
@@ -5409,7 +5747,25 @@ fn handle_play_land(
     // CR 305.2 + CR 505.6b: Validate land limit.
     // Base limit is max_lands_per_turn (normally 1), plus any additional drops
     // from static abilities like Exploration or Azusa.
-    let player = turn_control::turn_resource_owner(state);
+    //
+    // CR 805.4c: "Each player on a team may play a land during each of that
+    // team's turns" — under the shared team turns option, the nonactive
+    // teammate plays from their OWN hand against their OWN once-per-turn
+    // allowance, not the turn's nominal resource owner (`active_player`).
+    // `turn_resource_owner` stays correct for turn-control effects (CR 723,
+    // e.g. Mindslaver), which always act on the active player's own
+    // resources regardless of who submits the choice — that path is
+    // unaffected since it never uses shared team turns.
+    let player = if state.format_config.topology().has_shared_team_turns() {
+        if !super::topology::team_members(state, state.active_player).contains(&acting_player) {
+            return Err(EngineError::ActionNotAllowed(
+                "Only the active team may play lands during its turn".to_string(),
+            ));
+        }
+        acting_player
+    } else {
+        turn_control::turn_resource_owner(state)
+    };
     // CR 305.2: "Can't play lands" suppresses the play-land special action outright.
     if super::static_abilities::player_has_static_other(state, player, "CantPlayLand") {
         return Err(EngineError::ActionNotAllowed(
@@ -5418,7 +5774,21 @@ fn handle_play_land(
     }
     let additional = super::static_abilities::additional_land_drops(state, player);
     let effective_limit = state.max_lands_per_turn.saturating_add(additional);
-    if state.lands_played_this_turn >= effective_limit {
+    // CR 805.4c: per-player land count under team turns (each teammate has
+    // their own allowance); the legacy single-counter `lands_played_this_turn`
+    // is correct outside team-based formats, where only the active player
+    // ever plays lands during their own turn.
+    let lands_played = if state.format_config.topology().has_shared_team_turns() {
+        state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .map(|p| p.lands_played_this_turn)
+            .unwrap_or(0)
+    } else {
+        state.lands_played_this_turn
+    };
+    if lands_played >= effective_limit {
         return Err(EngineError::ActionNotAllowed(
             "Already played maximum lands this turn".to_string(),
         ));
@@ -5695,8 +6065,7 @@ fn handle_play_land(
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
                         p.lands_played_this_turn += 1;
                     }
-                    state.priority_passes.clear();
-                    state.priority_pass_count = 0;
+                    priority::clear_priority_passes(state);
                     events.push(GameEvent::LandPlayed {
                         object_id,
                         player_id: player,
@@ -5724,8 +6093,7 @@ fn handle_play_land(
             if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
                 p.lands_played_this_turn += 1;
             }
-            state.priority_passes.clear();
-            state.priority_pass_count = 0;
+            priority::clear_priority_passes(state);
 
             events.push(GameEvent::LandPlayed {
                 object_id,
@@ -5753,8 +6121,7 @@ fn handle_play_land(
     player_data.lands_played_this_turn += 1;
 
     // Reset priority passes (action was taken)
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
 
     events.push(GameEvent::LandPlayed {
         object_id,
@@ -5768,16 +6135,18 @@ fn handle_play_land(
 
 pub(super) fn handle_tap_land_for_mana(
     state: &mut GameState,
+    player: PlayerId,
     object_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let player = turn_control::turn_resource_owner(state);
     let obj = state
         .objects
         .get(&object_id)
         .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
 
-    // Validate: on battlefield, controlled by acting player, is a land, not tapped
+    // CR 117.1d + CR 605.3a: the player with priority, or the player making a
+    // mana payment, activates their own mana abilities even during another
+    // player's turn.
     if obj.zone != Zone::Battlefield {
         return Err(EngineError::InvalidAction(
             "Object is not on the battlefield".to_string(),
@@ -5922,6 +6291,23 @@ pub(super) fn handle_untap_land_for_mana(
         player_data.mana_pool.remove_from_source(*aura_id);
     }
 
+    // CR 118.3a: an UntapLandForMana during ManaPayment can drain a pinned unit
+    // out of the pool. Prune any dangling pins so the finalize spend never tries
+    // to honor a pip that no longer exists. Done AFTER the `player_data` borrow
+    // above ends so the immutable pool read and the `pending_cast` mutation don't
+    // overlap a live `&mut`.
+    if state.pending_cast.is_some() {
+        let surviving: std::collections::HashSet<crate::types::mana::ManaPipId> = state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .map(|p| p.mana_pool.mana.iter().map(|u| u.pip_id).collect())
+            .unwrap_or_default();
+        if let Some(pc) = state.pending_cast.as_mut() {
+            pc.pinned_pool_units.retain(|id| surviving.contains(id));
+        }
+    }
+
     // Untap the land
     let obj = state
         .objects
@@ -5939,6 +6325,145 @@ pub(super) fn handle_untap_land_for_mana(
     }
 
     Ok(())
+}
+
+/// CR 118.3a: Record a player-directed pin on a specific pool unit so the
+/// finalize spend prefers it. The unit stays in the pool — this is a priority
+/// hint, not a removal. A pin is accepted only when the unit is eligible to pay
+/// at least one shard (or a generic pip) of the full locked cost; otherwise the
+/// pin could never be honored, so it is rejected (`ActionNotAllowed`).
+pub(super) fn handle_spend_pool_mana(
+    state: &mut GameState,
+    player: PlayerId,
+    pip_id: crate::types::mana::ManaPipId,
+) -> Result<(), EngineError> {
+    // The unit must currently exist in the player's pool.
+    let unit = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .and_then(|p| p.mana_pool.mana.iter().find(|u| u.pip_id == pip_id))
+        .cloned()
+        .ok_or_else(|| {
+            EngineError::ActionNotAllowed("No such mana unit in pool to pin".to_string())
+        })?;
+
+    let pending = state.pending_cast.as_ref().ok_or_else(|| {
+        EngineError::ActionNotAllowed("No pending cast to pin mana for".to_string())
+    })?;
+    let object_id = pending.object_id;
+    let cost = pending.cost.clone();
+    let activation_ability_index = pending.activation_ability_index;
+
+    // CR 118.3a: eligibility against the full LOCKED cost. Nothing is paid at pin
+    // time, so there is no "currently-unpaid" subset — the unit qualifies if it
+    // could pay any shard (or generic pip) of the whole cost under the SAME
+    // spend-restriction context the finalize spend will use. A `pending_cast`
+    // can be an activated ability, not just a spell (CR 602): mirror
+    // `finalize_mana_payment` and build a `PaymentContext::Activation` so an
+    // activation-restricted unit (`OnlyForActivation`, `allows_spell == false`)
+    // is correctly eligible to pin when it can legally pay the activation.
+    // Owned holders so the context's borrowed slices outlive the eligibility check.
+    let spell_meta;
+    let source_types;
+    let source_subtypes;
+    let ability_tag;
+    let ctx = if let Some(ability_index) = activation_ability_index {
+        let (types, subtypes) = super::casting::activation_source_types(state, object_id);
+        source_types = types;
+        source_subtypes = subtypes;
+        ability_tag = super::casting::activation_ability_tag(state, object_id, ability_index);
+        Some(crate::types::mana::PaymentContext::Activation {
+            source_types: &source_types,
+            source_subtypes: &source_subtypes,
+            ability_tag,
+        })
+    } else {
+        spell_meta = super::casting::build_spell_meta(state, player, object_id);
+        spell_meta
+            .as_ref()
+            .map(crate::types::mana::PaymentContext::Spell)
+    };
+
+    if !mana_unit_eligible_for_cost(&unit, &cost, ctx.as_ref()) {
+        return Err(EngineError::ActionNotAllowed(
+            "Mana unit cannot pay any part of this cost".to_string(),
+        ));
+    }
+
+    if let Some(pc) = state.pending_cast.as_mut() {
+        if !pc.pinned_pool_units.contains(&pip_id) {
+            pc.pinned_pool_units.push(pip_id);
+        }
+    }
+    Ok(())
+}
+
+/// CR 118.3a: Remove a previously-recorded pin. Always legal — a no-op if the
+/// pin is absent or there is no pending cast.
+pub(super) fn handle_unspend_pool_mana(
+    state: &mut GameState,
+    pip_id: crate::types::mana::ManaPipId,
+) {
+    if let Some(pc) = state.pending_cast.as_mut() {
+        pc.pinned_pool_units.retain(|id| *id != pip_id);
+    }
+}
+
+/// CR 118.3a: True when `unit` could legally pay at least one shard or generic
+/// pip of `cost` under the spell's spend-restriction context. Combines
+/// restriction gating (`ManaRestriction::allows`) with shard color/attribute
+/// matching (`shard_to_mana_type`) — the same predicates the spend funnel uses.
+fn mana_unit_eligible_for_cost(
+    unit: &crate::types::mana::ManaUnit,
+    cost: &crate::types::mana::ManaCost,
+    ctx: Option<&crate::types::mana::PaymentContext<'_>>,
+) -> bool {
+    use crate::types::mana::{ManaCost, ManaType};
+    use mana_payment::ShardRequirement;
+
+    // CR 106.6: a unit whose restrictions reject this context can pay nothing here.
+    if let Some(ctx) = ctx {
+        if !unit.restrictions.iter().all(|r| r.allows(ctx)) {
+            return false;
+        }
+    }
+    // Convoke/improvise/delve markers are creature-tap stand-ins, never pinned.
+    if unit.is_convoke_payment() {
+        return false;
+    }
+
+    let (shards, generic) = match cost {
+        ManaCost::Cost { shards, generic } => (shards, *generic),
+        // No-cost / self-referential costs have no payable pip.
+        _ => return false,
+    };
+
+    // CR 107.4b: any unit can pay a generic pip ({N} or {X}).
+    if generic > 0 {
+        return true;
+    }
+
+    shards.iter().any(|&shard| {
+        // CR 107.4: a unit pays a shard if its color (or attribute, for {S}/{Z})
+        // is among those the shard accepts.
+        let accepts = |c: ManaType| unit.color == c;
+        match mana_payment::shard_to_mana_type(shard) {
+            ShardRequirement::Single(mt) => accepts(mt),
+            ShardRequirement::Hybrid(a, b) => accepts(a) || accepts(b),
+            ShardRequirement::Phyrexian(c) => accepts(c),
+            ShardRequirement::HybridPhyrexian(a, b) => accepts(a) || accepts(b),
+            // {2/C} and {C/color}: payable with the color, or (for {2/C}) generic.
+            ShardRequirement::TwoGenericHybrid(c) => accepts(c),
+            ShardRequirement::ColorlessHybrid(c) => accepts(ManaType::Colorless) || accepts(c),
+            ShardRequirement::Snow => unit.is_snow(),
+            ShardRequirement::TwoOrMoreColorSource => unit.source_could_produce_two_or_more_colors,
+            // {X} contributes nothing off the stack (CR 107.3); generic-payable
+            // when X > 0 is already covered by the `generic` check above.
+            ShardRequirement::X => false,
+            ShardRequirement::TwoGenericHybridPhyrexian(c) => accepts(c),
+        }
+    })
 }
 
 fn handle_equip_activation(
@@ -6030,8 +6555,7 @@ fn handle_equip_activation(
         ));
     }
 
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     Ok(WaitingFor::EquipTarget {
         player,
         equipment_id,
@@ -6101,7 +6625,7 @@ fn handle_crew_activation(
         ));
     }
 
-    // CR 702.122c: Exclude creatures with "can't crew Vehicles".
+    // CR 702.122d: Exclude creatures with "can't crew Vehicles".
     let eligible_creatures: Vec<ObjectId> = state
         .battlefield
         .iter()
@@ -6124,7 +6648,7 @@ fn handle_crew_activation(
         .collect();
 
     // Validate total power of all eligible creatures can meet the threshold.
-    // CR 702.122c: a creature's contribution may be modified ("as though its
+    // CR 702.122a: a creature's contribution may be modified ("as though its
     // power were N greater" / "using its toughness rather than its power").
     let total_power: i32 = eligible_creatures
         .iter()
@@ -6144,8 +6668,7 @@ fn handle_crew_activation(
     }
 
     let _ = events; // No events emitted during activation
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     Ok(WaitingFor::CrewVehicle {
         player,
         vehicle_id,
@@ -6177,8 +6700,7 @@ fn push_keyword_action(
         },
         events,
     );
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     WaitingFor::Priority { player }
 }
 
@@ -6238,7 +6760,7 @@ fn handle_crew_announcement(
                 "Creature can't crew Vehicles".to_string(),
             ));
         }
-        // CR 702.122c: apply any crew power-contribution modifier.
+        // CR 702.122a: apply any crew power-contribution modifier.
         total_power += super::static_abilities::object_crew_power_contribution(
             state,
             cid,
@@ -6355,8 +6877,7 @@ fn handle_station_activation(
     }
 
     let _ = events; // No events emitted during activation (cost payment happens at resolution).
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     Ok(WaitingFor::StationTarget {
         player,
         spacecraft_id,
@@ -6413,8 +6934,8 @@ fn handle_station_announcement(
 
     // CR 702.184a + CR 113.7a: Snapshot the creature's power BEFORE tapping —
     // the counter count is determined at cost-payment time and survives the
-    // creature leaving the battlefield before resolution. CR 702.184c +
-    // CR 702.122c: static abilities may modify the contributed value ("stations
+    // creature leaving the battlefield before resolution. CR 702.184c:
+    // static abilities may modify the contributed value ("stations
     // permanents as though its power were N greater"); the helper applies any
     // such modifier and otherwise reads `power`, the default per the rule.
     let snapshot_power = super::static_abilities::object_crew_power_contribution(
@@ -6514,7 +7035,7 @@ fn handle_saddle_activation(
         })
         .collect();
 
-    // CR 702.171a + CR 702.122c: a creature's saddle contribution may be modified.
+    // CR 702.171a: a creature's saddle contribution may be modified.
     let total_power: i32 = eligible_creatures
         .iter()
         .map(|&id| {
@@ -6533,8 +7054,7 @@ fn handle_saddle_activation(
     }
 
     let _ = events;
-    state.priority_passes.clear();
-    state.priority_pass_count = 0;
+    priority::clear_priority_passes(state);
     Ok(WaitingFor::SaddleMount {
         player,
         mount_id,
@@ -6590,7 +7110,7 @@ fn handle_saddle_announcement(
                 "Creature is no longer eligible for saddling".to_string(),
             ));
         }
-        // CR 702.122c: apply any saddle power-contribution modifier.
+        // CR 702.171a: apply any saddle power-contribution modifier.
         total_power += super::static_abilities::object_crew_power_contribution(
             state,
             cid,
@@ -6740,6 +7260,12 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
         return start_game_with_starting_player(state, PlayerId(0));
     }
 
+    if let Some(archenemy) = super::topology::archenemy(state) {
+        // CR 904.6: The archenemy takes the first turn. Default Archenemy does
+        // not run the CR 103.1 starting-player contest.
+        return start_game_with_starting_player(state, archenemy);
+    }
+
     // CR 103.1 / CR 706: roll one d20 per seat; the high roller becomes the
     // starting player. Draw order/count is identical to the prior
     // implementation — one `random_range(1..=20)` per contender, in seat order.
@@ -6770,8 +7296,12 @@ pub fn start_game_with_starting_player(
 ) -> ActionResult {
     let mut events = Vec::new();
     state.outside_game_cards_brought_in.clear();
+    let starting_player = super::topology::archenemy(state).unwrap_or(starting_player);
 
-    if state.match_config.match_type == MatchType::Bo3 && state.players.len() != 2 {
+    if state.match_config.match_type == MatchType::Bo3
+        && state.players.len() != 2
+        && super::topology::archenemy(state).is_none()
+    {
         state.match_config.match_type = MatchType::Bo1;
     }
 
@@ -6808,6 +7338,7 @@ pub fn start_game_with_starting_player(
         }
     } else {
         // No cards to mulligan with, skip straight to game
+        crate::game::planechase::reveal_starting_plane(state);
         turns::auto_advance(state, &mut events)
     };
 
@@ -6828,19 +7359,22 @@ pub fn start_game_with_starting_player(
 pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     let mut events = Vec::new();
     state.outside_game_cards_brought_in.clear();
+    let starting_player = super::topology::archenemy(state).unwrap_or(PlayerId(0));
 
     events.push(GameEvent::GameStarted);
 
     state.turn_number = 1;
-    state.active_player = PlayerId(0);
-    state.priority_player = PlayerId(0);
+    state.active_player = starting_player;
+    state.priority_player = starting_player;
+    state.current_starting_player = starting_player;
     state.phase = Phase::Untap;
 
     events.push(GameEvent::TurnStarted {
-        player_id: PlayerId(0),
+        player_id: starting_player,
         turn_number: 1,
     });
 
+    crate::game::planechase::reveal_starting_plane(state);
     let waiting_for = turns::auto_advance(state, &mut events);
     state.waiting_for = waiting_for.clone();
     bump_state_revision(state);
@@ -7012,6 +7546,19 @@ mod tests {
         )
     }
 
+    fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
+            },
+        }
+    }
+
     #[test]
     fn cards_revealed_events_are_remembered_publicly() {
         let mut state = GameState::new_two_player(42);
@@ -7025,6 +7572,107 @@ mod tests {
         remember_public_reveals(&mut state, &events);
 
         assert!(state.public_revealed_cards.contains(&card_id));
+    }
+
+    /// CR 603.3d regression — reported turn-34 Commander freeze (All Will Be
+    /// One + Red Hulk + Schema Thief board). A targeted trigger whose only legal
+    /// target vanished between "push first" dispatch and "choose second"
+    /// selection-setup (an effect earlier in the same simultaneous cascade
+    /// removed it) must be REMOVED FROM THE STACK here — not abort the in-flight
+    /// action with `Err`, which silently dropped `PassPriority` from the legal
+    /// action set and soft-locked the game. Schema Thief ("create a token that's
+    /// a copy of target artifact that player controls") triggered against a
+    /// player who controlled no artifact; this models that with a damage trigger
+    /// that has no opponent-creature target.
+    #[test]
+    fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
+        let mut state = GameState::new_two_player(7);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        // Source permanent (player 0). No opponent creatures exist, so a
+        // "deal 1 damage to target creature an opponent controls" trigger has
+        // no legal target when selection is set up.
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pinger".to_string(),
+            Zone::Battlefield,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::Opponent),
+                ),
+                damage_source: None,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        // Reconstruct the post-"push first" state: the trigger entry is on the
+        // stack (in construction) and recorded as the pending trigger awaiting
+        // manual target selection.
+        let pending = crate::game::triggers::PendingTrigger {
+            source_id,
+            controller: PlayerId(0),
+            condition: None,
+            ability: ability.clone(),
+            timestamp: 0,
+            target_constraints: vec![],
+            distribute: None,
+            trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+        };
+        let entry_id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id: entry_id,
+            source_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Pinger".to_string(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+        state.pending_trigger = Some(pending);
+        state.pending_trigger_entry = Some(entry_id);
+        let stack_len_before = state.stack.len();
+
+        let result = begin_pending_trigger_target_selection(&mut state);
+
+        assert!(
+            matches!(result, Ok(None)),
+            "CR 603.3d: a no-legal-target trigger must be dropped, not error: {result:?}",
+        );
+        assert_eq!(
+            state.stack.len(),
+            stack_len_before - 1,
+            "the in-construction trigger entry must be popped from the stack",
+        );
+        assert!(
+            state.pending_trigger.is_none(),
+            "the pending_trigger cursor must be cleared",
+        );
+        assert!(
+            state.pending_trigger_entry.is_none(),
+            "the pending_trigger_entry cursor must be cleared",
+        );
     }
 
     #[test]
@@ -7262,6 +7910,38 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    /// Perf guard for go-wide mana-board slowness (turn-40 Cryptolith-Rite
+    /// squirrel state). The AI `SimulationFilter` legality probe
+    /// (`apply_as_current_for_legality`) discards its mutated clone and only
+    /// reads `.is_ok()`, so it must NOT run `finalize_display_state`'s
+    /// board-global mana-availability sweep — that sweep is O(N^2) on a board of
+    /// hundreds of mana sources and the filter pays it once per candidate.
+    /// The Immediate `apply_as_current` still sweeps (display state is exposed).
+    #[test]
+    fn apply_for_legality_skips_display_mana_sweep() {
+        // Deferred-display legality probe: no sweep even with mana display dirty.
+        let mut sim = setup_game_at_main_phase();
+        sim.public_state_dirty.mana_display_dirty = true;
+        crate::game::perf_counters::reset();
+        apply_as_current_for_legality(&mut sim, GameAction::PassPriority).unwrap();
+        assert_eq!(
+            crate::game::perf_counters::snapshot().mana_display_sweeps,
+            0,
+            "legality probe must skip the display mana sweep"
+        );
+
+        // Discriminator: the Immediate path DOES sweep, so the assertion above
+        // is meaningful rather than vacuous.
+        let mut immediate = setup_game_at_main_phase();
+        immediate.public_state_dirty.mana_display_dirty = true;
+        crate::game::perf_counters::reset();
+        apply_as_current(&mut immediate, GameAction::PassPriority).unwrap();
+        assert!(
+            crate::game::perf_counters::snapshot().mana_display_sweeps >= 1,
+            "Immediate apply finalizes display state and runs the mana sweep"
+        );
     }
 
     #[test]
@@ -7652,18 +8332,9 @@ mod tests {
     /// "loaded from card-data.json" shows up as a test failure here.
     #[test]
     fn walking_ballista_db_load_path_enters_with_x_counters() {
-        use crate::database::CardDatabase;
         use crate::game::deck_loading::create_object_from_card_face;
-        use std::path::Path;
 
-        let path = Path::new("../../client/public/card-data.json");
-        if !path.exists() {
-            // Card-data export missing in this build context (e.g. fresh
-            // clone before `gen-card-data.sh` runs). Skip rather than fail.
-            eprintln!("skipping: {} missing", path.display());
-            return;
-        }
-        let db = CardDatabase::from_export(path).expect("load card-data export");
+        let db = crate::test_support::shared_card_db();
         let face = db
             .get_face_by_name("Walking Ballista")
             .expect("Walking Ballista must be in the export")
@@ -7954,16 +8625,9 @@ mod tests {
     /// triggering entry.
     #[test]
     fn cathars_crusade_db_load_path_puts_counter_on_each_creature_you_control() {
-        use crate::database::CardDatabase;
         use crate::game::deck_loading::create_object_from_card_face;
-        use std::path::Path;
 
-        let path = Path::new("../../client/public/card-data.json");
-        if !path.exists() {
-            eprintln!("skipping: {} missing", path.display());
-            return;
-        }
-        let db = CardDatabase::from_export(path).expect("load card-data export");
+        let db = crate::test_support::shared_card_db();
         let crusade_face = db
             .get_face_by_name("Cathars' Crusade")
             .expect("Cathars' Crusade must be in the export")
@@ -8638,6 +9302,191 @@ mod tests {
             result.waiting_for,
             state.stack
         );
+    }
+
+    #[test]
+    fn two_headed_giant_each_teammate_plays_own_land() {
+        // CR 805.4c: "Each player on a team may play a land during each of
+        // that team's turns" — both the active player and their nonactive
+        // teammate get their own one-land-per-turn allowance during the
+        // SAME team turn. Before this fix, `handle_play_land` resolved the
+        // resource owner as `turn_resource_owner` (always `active_player`)
+        // and gated against the single shared `lands_played_this_turn`
+        // counter, so the teammate's land play would have been attributed
+        // to the active player and blocked once that counter hit 1.
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let land0 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land0)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let land1 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Island".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        // Active player (P0) plays their land.
+        apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land0,
+                card_id: CardId(1),
+            },
+        )
+        .unwrap();
+        assert!(state.battlefield.contains(&land0));
+        assert_eq!(state.players[0].lands_played_this_turn, 1);
+
+        // Nonactive teammate (P1) now holds priority and plays their OWN land
+        // — must succeed against P1's own allowance, not P0's.
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land1,
+                card_id: CardId(2),
+            },
+        )
+        .unwrap();
+
+        assert!(state.battlefield.contains(&land1));
+        assert_eq!(state.players[1].lands_played_this_turn, 1);
+        assert_eq!(
+            state.players[0].lands_played_this_turn, 1,
+            "P0's allowance must be unaffected by P1's land play"
+        );
+    }
+
+    #[test]
+    fn archenemy_hero_team_each_hero_plays_own_land_only() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::archenemy(), 4, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+
+        let land1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Forest".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land1)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let land2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(2),
+            "Island".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land2)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let archenemy_land = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Swamp".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&archenemy_land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land1,
+                card_id: CardId(1),
+            },
+        )
+        .unwrap();
+        assert_eq!(state.players[1].lands_played_this_turn, 1);
+
+        state.priority_player = PlayerId(2);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(2),
+        };
+        apply_as_current(
+            &mut state,
+            GameAction::PlayLand {
+                object_id: land2,
+                card_id: CardId(2),
+            },
+        )
+        .unwrap();
+        assert_eq!(state.players[2].lands_played_this_turn, 1);
+        assert_eq!(state.players[1].lands_played_this_turn, 1);
+
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::PlayLand {
+                object_id: archenemy_land,
+                card_id: CardId(3),
+            },
+        );
+        assert!(
+            result.is_err(),
+            "archenemy must not play a land during the hero team's turn"
+        );
+        assert!(state.players[0].hand.contains(&archenemy_land));
     }
 
     /// CR 614.1c discriminating test (fail-first): a land played through the
@@ -9440,6 +10289,167 @@ mod tests {
         assert!(result.is_ok(), "P0 pass should succeed: {result:?}");
     }
 
+    #[test]
+    fn two_hg_empty_stack_two_team_passes_advance_and_return_priority() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_passes.clear();
+
+        let first = apply(&mut state, PlayerId(0), GameAction::PassPriority)
+            .expect("active team representative should pass priority");
+        assert_eq!(
+            first.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(2)
+            }
+        );
+        assert!(state.priority_passes.contains(&PlayerId(0)));
+        assert!(!state.priority_passes.contains(&PlayerId(1)));
+
+        let second = apply(&mut state, PlayerId(2), GameAction::PassPriority)
+            .expect("opposing team representative should pass priority");
+
+        assert_ne!(state.phase, Phase::PreCombatMain);
+        assert!(state.priority_passes.is_empty());
+        assert_eq!(
+            second.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        );
+    }
+
+    #[test]
+    fn two_hg_non_empty_stack_two_team_passes_resolve_top_object() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.stack.push_back(no_op_stack_entry(1, PlayerId(0)));
+        state.priority_passes.clear();
+
+        let first = apply(&mut state, PlayerId(0), GameAction::PassPriority)
+            .expect("active team representative should pass priority");
+        assert_eq!(
+            first.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(2)
+            }
+        );
+
+        let second = apply(&mut state, PlayerId(2), GameAction::PassPriority)
+            .expect("opposing team representative should pass priority");
+
+        assert!(state.stack.is_empty());
+        assert!(second
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::StackResolved { .. })));
+        assert_eq!(
+            second.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        );
+    }
+
+    #[test]
+    fn two_hg_controlled_team_turn_routes_teammate_priority_to_controller() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.turn_decision_controller = Some(PlayerId(2));
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = turn_control::authorized_submitter(&state).unwrap();
+        state.priority_passes.clear();
+
+        let result = apply(&mut state, PlayerId(2), GameAction::PassPriority)
+            .expect("turn controller should be authorized for active player");
+
+        assert_eq!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(2)
+            }
+        );
+        assert_eq!(
+            turn_control::authorized_submitter(&state),
+            Some(PlayerId(2)),
+            "CR 117.6 + CR 805.5b move priority from the active team to the opposing team representative"
+        );
+        assert_eq!(
+            state.priority_player,
+            PlayerId(2),
+            "public submitter should be the opposing team representative after the active team passes"
+        );
+
+        let teammate_result = apply(&mut state, PlayerId(1), GameAction::PassPriority);
+        assert!(
+            matches!(teammate_result, Err(EngineError::WrongPlayer)),
+            "active-team teammate must not submit after team-level priority has moved to P2: {teammate_result:?}"
+        );
+
+        let controller_result = apply(&mut state, PlayerId(2), GameAction::PassPriority);
+        assert!(
+            controller_result.is_ok(),
+            "opposing representative should submit for their team's priority: {controller_result:?}"
+        );
+    }
+
+    #[test]
+    fn non_team_controlled_turn_only_routes_active_player() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.turn_decision_controller = Some(PlayerId(2));
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.priority_player = turn_control::authorized_submitter(&state).unwrap();
+        state.priority_passes.clear();
+
+        let result = apply(&mut state, PlayerId(2), GameAction::PassPriority)
+            .expect("turn controller should be authorized for the active player");
+
+        assert_eq!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(1)
+            }
+        );
+        assert_eq!(
+            turn_control::authorized_submitter(&state),
+            Some(PlayerId(1)),
+            "non-team controlled turns must not route unrelated players through the controller"
+        );
+
+        let controller_result = apply(&mut state, PlayerId(2), GameAction::PassPriority);
+        assert!(
+            matches!(controller_result, Err(EngineError::WrongPlayer)),
+            "controller must not submit for the next non-team opponent: {controller_result:?}"
+        );
+
+        let next_player_result = apply(&mut state, PlayerId(1), GameAction::PassPriority);
+        assert!(
+            next_player_result.is_ok(),
+            "next non-team player should submit for themselves: {next_player_result:?}"
+        );
+    }
+
     /// Regression: Concede self-authenticates via its own `player_id`, but
     /// `actor` must still match that `player_id` so one player cannot
     /// concede another. CR 104.3a: *a player* may concede at any time.
@@ -9467,6 +10477,8 @@ mod tests {
     #[test]
     fn tap_land_for_mana_produces_correct_color() {
         let mut state = setup_game_at_main_phase();
+        state.priority_passes.insert(PlayerId(1));
+        state.priority_pass_count = 1;
 
         let land_id = create_object(
             &mut state,
@@ -9478,8 +10490,23 @@ mod tests {
         {
             let obj = state.objects.get_mut(&land_id).unwrap();
             obj.card_types.core_types.push(CoreType::Land);
-            obj.card_types.subtypes.push("Forest".to_string());
             obj.entered_battlefield_turn = Some(1);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![crate::types::mana::ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
         }
 
         let result = apply_as_current(
@@ -9501,6 +10528,121 @@ mod tests {
                 player: PlayerId(0)
             }
         ));
+    }
+
+    #[test]
+    fn tap_land_for_mana_uses_priority_player_during_opponents_turn() {
+        let mut state = setup_game_at_main_phase();
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let land_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.entered_battlefield_turn = Some(1);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![crate::types::mana::ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::TapLandForMana { object_id: land_id },
+        )
+        .unwrap();
+
+        assert!(state.objects[&land_id].tapped);
+        assert_eq!(
+            state.players[0]
+                .mana_pool
+                .count_color(crate::types::mana::ManaType::Green),
+            1
+        );
+        assert_eq!(
+            state.players[1]
+                .mana_pool
+                .count_color(crate::types::mana::ManaType::Green),
+            0
+        );
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+    }
+
+    /// CR 118.3a regression: each land tapped for mana must yield a pool unit
+    /// with a DISTINCT, nonzero `pip_id`. A shared/zero id makes every same-color
+    /// pip in the manual-payment UI select and deselect together (the reported
+    /// "tap one → all select, tap again → all deselect" bug), because pinning a
+    /// `pip_id` then matches every unit carrying that same id.
+    #[test]
+    fn tapped_lands_produce_distinct_pip_ids() {
+        let mut state = setup_game_at_main_phase();
+
+        let mut land_ids = Vec::new();
+        for _ in 0..3 {
+            let land_id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&land_id).unwrap();
+                obj.card_types.core_types.push(CoreType::Land);
+                obj.card_types.subtypes.push("Forest".to_string());
+                obj.entered_battlefield_turn = Some(1);
+            }
+            land_ids.push(land_id);
+        }
+
+        for land_id in land_ids {
+            apply_as_current(
+                &mut state,
+                GameAction::TapLandForMana { object_id: land_id },
+            )
+            .unwrap();
+        }
+
+        let ids: Vec<u64> = state.players[0]
+            .mana_pool
+            .mana
+            .iter()
+            .map(|u| u.pip_id.0)
+            .collect();
+        assert_eq!(ids.len(), 3, "three taps must float three pool units");
+        assert!(
+            ids.iter().all(|&id| id != 0),
+            "every pooled unit must be stamped (nonzero pip_id), got {ids:?}"
+        );
+        let unique: std::collections::HashSet<u64> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), 3, "pip ids must be distinct, got {ids:?}");
     }
 
     /// Build a Wild Growth–style aura attached to `land_id` for tests in this
@@ -9676,6 +10818,113 @@ mod tests {
         assert!(
             !casting::can_pay_cost_after_auto_tap(&state_no_aura, PlayerId(0), lone_spell, &cost),
             "lone Plains must NOT be reported able to pay {{1}}{{G}}"
+        );
+    }
+
+    /// Build a Fertile Ground–style AnyOneColor aura. Returns the aura's `ObjectId`.
+    fn attach_fertile_ground(
+        state: &mut GameState,
+        land_id: ObjectId,
+        owner: PlayerId,
+    ) -> ObjectId {
+        let aura = create_object(
+            state,
+            CardId(98),
+            owner,
+            "Fertile Ground".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&aura).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
+        obj.attached_to = Some(land_id.into());
+        obj.entered_battlefield_turn = Some(1);
+        obj.trigger_definitions.push(
+            TriggerDefinition::new(TriggerMode::TapsForMana)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor {
+                            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                            color_options: crate::types::mana::ManaColor::ALL.to_vec(),
+                            contribution: ManaContribution::Additional,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                ))
+                .valid_card(TargetFilter::AttachedTo),
+        );
+        aura
+    }
+
+    #[test]
+    fn fertile_ground_auto_tap_threads_non_first_color_to_resolver() {
+        // Issue #4265 / round-4 reviewer regression: the planner can advertise
+        // a {G}+{U} option for Forest + Fertile Ground, but the resolver used
+        // to default to the first AnyOneColor option (White) regardless of the
+        // planner's choice. This test proves that when a {U} cost is pending,
+        // auto-tap picks the Forest (for {G}) and tells Fertile Ground's inline
+        // TapsForMana trigger to produce {U} — not White.
+        use crate::types::mana::{ManaCost, ManaCostShard};
+        let mut state = setup_game_at_main_phase();
+
+        let forest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+        attach_fertile_ground(&mut state, forest, PlayerId(0));
+
+        // Simulate auto-tap for {G}{U}: the planner must choose Blue for the
+        // Fertile Ground bonus so both shards are covered.
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green, ManaCostShard::Blue],
+            generic: 0,
+        };
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Blue-Green Spell".to_string(),
+            Zone::Hand,
+        );
+
+        // Verify the planner considers the cost payable.
+        assert!(
+            casting::can_pay_cost_after_auto_tap(&state, PlayerId(0), spell, &cost),
+            "Forest + Fertile Ground must be able to pay {{G}}{{U}}"
+        );
+
+        // Run auto-tap and inline trigger resolution (always used as a pair).
+        let mut events = Vec::new();
+        let events_before = events.len();
+        casting_costs::auto_tap_mana_sources(&mut state, PlayerId(0), &cost, &mut events, None);
+        // CR 605.4a: `resolve_tap_mana_triggers_inline` fires TapsForMana
+        // triggers (including Fertile Ground's) with the planner's color choice
+        // threaded via `state.pending_taps_for_mana_overrides`.
+        super::triggers::resolve_tap_mana_triggers_inline(&mut state, &mut events, events_before);
+        let green = state.players[0]
+            .mana_pool
+            .count_color(crate::types::mana::ManaType::Green);
+        let blue = state.players[0]
+            .mana_pool
+            .count_color(crate::types::mana::ManaType::Blue);
+        assert_eq!(green, 1, "Forest must contribute {{G}} to the pool");
+        assert_eq!(
+            blue, 1,
+            "Fertile Ground's TapsForMana trigger must produce {{U}} — not the \
+             first listed color ({{W}}) — when the planner chose Blue"
         );
     }
 
@@ -10451,6 +11700,7 @@ mod tests {
             player.mana_pool.add(ManaUnit {
                 color: ManaType::Blue,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
@@ -10525,6 +11775,7 @@ mod tests {
             player.mana_pool.add(ManaUnit {
                 color: ManaType::Blue,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
@@ -10623,6 +11874,7 @@ mod tests {
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Blue,
             source_id: ObjectId(0),
+            pip_id: crate::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
@@ -11453,6 +12705,7 @@ mod tests {
         player.mana_pool.add(ManaUnit {
             color: ManaType::Red,
             source_id: ObjectId(0),
+            pip_id: crate::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
@@ -11511,6 +12764,7 @@ mod tests {
             player_data.mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
@@ -12032,10 +13286,11 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
-            x_residual_activation: false,
+            activation_residual: crate::types::game_state::ActivationResidual::None,
         }));
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),
@@ -12418,10 +13673,11 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
-            x_residual_activation: false,
+            activation_residual: crate::types::game_state::ActivationResidual::None,
         }));
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),
@@ -13470,6 +14726,7 @@ mod tests {
         player.mana_pool.add(ManaUnit {
             color: ManaType::Blue,
             source_id: ObjectId(0),
+            pip_id: crate::types::mana::ManaPipId(0),
             supertype: None,
             source_could_produce_two_or_more_colors: false,
             restrictions: Vec::new(),
@@ -16660,6 +17917,7 @@ mod phase_trigger_regression_tests {
                 .add(ManaUnit {
                     color: ManaType::Colorless,
                     source_id: ObjectId(0),
+                    pip_id: crate::types::mana::ManaPipId(0),
                     supertype: None,
                     source_could_produce_two_or_more_colors: false,
                     restrictions: Vec::new(),
@@ -21594,7 +22852,7 @@ mod crew_tests {
         assert!(result.is_err());
     }
 
-    /// CR 702.122c: a creature with "crews Vehicles as though its power were N
+    /// CR 702.122a: a creature with "crews Vehicles as though its power were N
     /// greater" (Reckoner Bankbuster) contributes its modified power, letting an
     /// otherwise-insufficient creature pay the crew cost alone.
     #[test]
@@ -21634,7 +22892,7 @@ mod crew_tests {
         );
     }
 
-    /// CR 702.122c: regression — the legal-action enumerator must measure crew
+    /// CR 702.122a: regression — the legal-action enumerator must measure crew
     /// contribution through `object_crew_power_contribution`, exactly like the
     /// activation gate and announcement validator. A Pilot-style creature whose
     /// raw power is below the crew cost but whose adjusted power meets it must
@@ -21678,7 +22936,7 @@ mod crew_tests {
         );
     }
 
-    /// CR 702.122c: "using its toughness rather than its power" (Giant Ox)
+    /// CR 702.122a: "using its toughness rather than its power" (Giant Ox)
     /// substitutes toughness for power, and the modifier applies only to the
     /// named keyword actions (crew-only here, not saddle).
     #[test]
@@ -22502,7 +23760,7 @@ mod keyword_action_stack_tests {
     //!     paid even if the ability is countered);
     //!   - a priority window opens between cost payment and resolution;
     //!   - triggers keyed off "becomes crewed/saddled/stationed/equipped"
-    //!     fire at resolution time, not at cost payment (CR 702.122d,
+    //!     fire at resolution time, not at cost payment (CR 702.122e,
     //!     CR 702.171b, CR 702.184a, CR 702.6a).
     //!
     //! Counterspells are simulated by popping the top stack entry directly
@@ -23011,7 +24269,7 @@ mod keyword_action_stack_tests {
 
     // --- Trigger timing -----------------------------------------------------
     //
-    // CR 702.122d / CR 702.171b / CR 702.184a: "Whenever [X] becomes crewed /
+    // CR 702.122e / CR 702.171b / CR 702.184a: "Whenever [X] becomes crewed /
     // saddled / stationed" resolves when the keyword ability resolves from the
     // stack — not when its cost is paid. The per-keyword matcher keys off the
     // resolution-time event (`VehicleCrewed` / `Saddled` / `Stationed`), so
@@ -23055,7 +24313,7 @@ mod keyword_action_stack_tests {
             .any(|e| match_vehicle_crewed(e, &trigger, vehicle_id, &state));
         assert!(
             !fires_at_announce,
-            "CR 702.122d: Crewed trigger must not fire at announcement"
+            "CR 702.122e: Crewed trigger must not fire at announcement"
         );
 
         apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
@@ -23066,7 +24324,7 @@ mod keyword_action_stack_tests {
             .any(|e| match_vehicle_crewed(e, &trigger, vehicle_id, &state));
         assert!(
             fires_at_resolve,
-            "CR 702.122d: Crewed trigger fires when the Crew ability resolves"
+            "CR 702.122e: Crewed trigger fires when the Crew ability resolves"
         );
     }
 
@@ -23900,6 +25158,7 @@ mod mdfc_land_tests {
             p.mana_pool.add(ManaUnit {
                 color,
                 source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
                 supertype: None,
                 source_could_produce_two_or_more_colors: false,
                 restrictions: Vec::new(),
@@ -24427,6 +25686,75 @@ mod mdfc_land_tests {
             "explicit starting player path must emit no contest event"
         );
         assert_eq!(state.current_starting_player, PlayerId(1));
+    }
+
+    #[test]
+    fn archenemy_starting_life_and_first_turn_use_configured_archenemy() {
+        let mut config = FormatConfig::archenemy();
+        config.archenemy_player = Some(PlayerId(2));
+        let mut state = GameState::new(config, 4, 7);
+
+        assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.players[1].life, 20);
+        assert_eq!(state.players[2].life, 40);
+        assert_eq!(state.players[3].life, 20);
+        assert_eq!(state.active_player, PlayerId(2));
+        assert_eq!(state.priority_player, PlayerId(2));
+        assert_eq!(state.current_starting_player, PlayerId(2));
+        assert_eq!(
+            state.waiting_for,
+            crate::types::game_state::WaitingFor::Priority {
+                player: PlayerId(2)
+            }
+        );
+
+        let result = start_game(&mut state);
+
+        assert!(
+            !result
+                .events
+                .iter()
+                .any(|e| matches!(e, GameEvent::StartingPlayerContest { .. })),
+            "Archenemy must not run the starting-player contest"
+        );
+        assert_eq!(state.current_starting_player, PlayerId(2));
+        assert_eq!(state.active_player, PlayerId(2));
+        assert_eq!(state.priority_player, PlayerId(2));
+    }
+
+    #[test]
+    fn two_hg_team_identity_survives_starting_player_rotation() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 7);
+
+        start_game_with_starting_player(&mut state, PlayerId(1));
+
+        assert_eq!(
+            state.seat_order,
+            vec![PlayerId(1), PlayerId(2), PlayerId(3), PlayerId(0)]
+        );
+        assert!(!crate::game::players::is_opponent(
+            &state,
+            PlayerId(0),
+            PlayerId(1)
+        ));
+        assert!(crate::game::players::is_opponent(
+            &state,
+            PlayerId(0),
+            PlayerId(2)
+        ));
+        assert!(crate::game::players::is_opponent(
+            &state,
+            PlayerId(0),
+            PlayerId(3)
+        ));
+        assert_eq!(
+            crate::game::players::team_life_total(&state, PlayerId(0)),
+            30
+        );
+        assert_eq!(
+            crate::game::players::team_life_total(&state, PlayerId(1)),
+            30
+        );
     }
 
     /// Empty seat order keeps the PlayerId(0) fast path and emits no contest.

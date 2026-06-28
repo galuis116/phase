@@ -192,7 +192,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
         },
         handle_rule_mod,
     );
-    // CR 702.122c: CantCrew — creature can't be tapped to pay a crew cost.
+    // CR 702.122d: CantCrew — creature can't be tapped to pay a crew cost.
     registry.insert(StaticMode::CantCrew, handle_rule_mod);
     registry.insert(StaticMode::MayLookAtTopOfLibrary, handle_rule_mod);
     // CR 104.3b: CantLoseTheGame — player can't lose the game (Platinum Angel).
@@ -662,6 +662,10 @@ pub fn check_static_ability(
     mode: StaticMode,
     context: &StaticCheckContext,
 ) -> bool {
+    // Perf: this is the O(N) whole-battlefield sweep that combat/untap legality
+    // loops hoist an existence gate in front of (see
+    // `functioning_abilities::any_functioning_static_mode`).
+    crate::game::perf_counters::record_static_full_scan();
     // CR 114.4: Abilities of emblems function in the command zone.
     // Check both battlefield objects and command zone emblems. The functioning
     // gate is applied before context-specific condition evaluation below.
@@ -963,40 +967,56 @@ pub fn player_has_cant_win(state: &GameState, player_id: PlayerId) -> bool {
     ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::CantWinTheGame)
 }
 
-/// CR 119.7: Check if a player has active `CantGainLife` protection.
+/// Single-player check shared by `player_has_cant_gain_life` and
+/// `player_has_cant_lose_life`: does `player_id` itself (battlefield permanent
+/// or spell-applied transient effect) have an active static of `mode`?
+fn life_lock_active_for(state: &GameState, player_id: PlayerId, mode: StaticMode) -> bool {
+    check_static_ability(
+        state,
+        mode.clone(),
+        &StaticCheckContext {
+            player_id: Some(player_id),
+            ..Default::default()
+        },
+    ) || transient_grants_static_mode_to_player(state, player_id, &mode)
+}
+
+/// CR 119.7 + CR 810.9g: Check if a player has active `CantGainLife`
+/// protection.
 ///
 /// When `true`, effects that would cause the player to gain life have no effect
 /// (CR 119.7: "a replacement effect that would replace a life gain event
 /// affecting that player won't do anything"). Callers must short-circuit BEFORE
 /// invoking the replacement pipeline.
 ///
-/// Checks both battlefield permanents and spell-applied transient effects.
+/// Checks both battlefield permanents and spell-applied transient effects. CR
+/// 810.9g: "If an effect says that a player can't gain life, no player on
+/// that player's team can gain life" — in team-based formats the lock also
+/// propagates from either teammate.
 pub fn player_has_cant_gain_life(state: &GameState, player_id: PlayerId) -> bool {
-    check_static_ability(
-        state,
-        StaticMode::CantGainLife,
-        &StaticCheckContext {
-            player_id: Some(player_id),
-            ..Default::default()
-        },
-    ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::CantGainLife)
+    life_lock_active_for(state, player_id, StaticMode::CantGainLife)
+        || (super::topology::has_two_headed_giant_shared_resources(state)
+            && super::players::teammates(state, player_id)
+                .into_iter()
+                .any(|teammate| life_lock_active_for(state, teammate, StaticMode::CantGainLife)))
 }
 
-/// CR 119.8: Check if a player has active `CantLoseLife` protection.
+/// CR 119.8 + CR 810.9h: Check if a player has active `CantLoseLife`
+/// protection.
 ///
 /// When `true`, effects that would cause the player to lose life (including
 /// damage-to-life-loss conversion per CR 120.3) have no effect.
 ///
-/// Checks both battlefield permanents and spell-applied transient effects.
+/// Checks both battlefield permanents and spell-applied transient effects. CR
+/// 810.9h: "If an effect says that a player can't lose life, no player on
+/// that player's team can lose life or pay any amount of life other than 0"
+/// — in team-based formats the lock also propagates from either teammate.
 pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool {
-    check_static_ability(
-        state,
-        StaticMode::CantLoseLife,
-        &StaticCheckContext {
-            player_id: Some(player_id),
-            ..Default::default()
-        },
-    ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::CantLoseLife)
+    life_lock_active_for(state, player_id, StaticMode::CantLoseLife)
+        || (super::topology::has_two_headed_giant_shared_resources(state)
+            && super::players::teammates(state, player_id)
+                .into_iter()
+                .any(|teammate| life_lock_active_for(state, teammate, StaticMode::CantLoseLife)))
 }
 
 /// CR 702.11e: Check if `player_id` may target creatures as though they didn't
@@ -1327,7 +1347,7 @@ fn static_condition_matches_context(
     })
 }
 
-/// CR 702.122c: Returns true when the creature has an active "can't crew Vehicles" static.
+/// CR 702.122d: Returns true when the creature has an active "can't crew Vehicles" static.
 pub fn object_has_cant_crew(state: &GameState, object_id: ObjectId) -> bool {
     state.objects.get(&object_id).is_some_and(|obj| {
         super::functioning_abilities::active_static_definitions(state, obj)
@@ -1335,7 +1355,7 @@ pub fn object_has_cant_crew(state: &GameState, object_id: ObjectId) -> bool {
     })
 }
 
-/// CR 702.122c / 702.171a / 702.184a: The power a creature contributes toward a
+/// CR 702.122a / 702.171a / 702.184c: The power a creature contributes toward a
 /// crew / saddle / station cost, after applying any active `CrewContribution`
 /// static whose action list contains `action`. "Using its toughness rather than
 /// its power" substitutes the creature's toughness for its base power; "as
@@ -1465,6 +1485,8 @@ pub(crate) fn static_filter_matches(
                         // CR 603.2 + CR 109.4: Triggering-player scope has no
                         // static context. Fail closed.
                         crate::types::ability::ControllerRef::TriggeringPlayer => false,
+                        // CR 303.4b: Enchanted-player scope has no static context. Fail closed.
+                        crate::types::ability::ControllerRef::EnchantedPlayer => false,
                     };
                 }
                 return true;

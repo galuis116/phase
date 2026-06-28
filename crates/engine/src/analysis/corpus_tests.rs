@@ -17,8 +17,12 @@
 //!    The set (see `DRIVEN_ROW_INDICES`): Heliod + Walking Ballista; Kilo,
 //!    Freed, Relic; Grim Monolith + Power Artifact; Devoted Druid + Vizier; Bloom
 //!    Tender + Freed; Priest of Titania + Umbral Mantle; Selvala + Staff of
-//!    Domination; Faeburrow + Pemmin's Aura; Marwyn + Sword of the Paruns; Spike
-//!    Feeder + Archangel. Two synthetic loops (`drive_damage_loop_certificate`
+//!    Domination; Faeburrow + Pemmin's Aura; Marwyn + Sword of the Paruns; Sanguine
+//!    Bond + Exquisite Blood; Marauding Blight-Priest + Bloodthirsty Conqueror; Spike
+//!    Feeder + Archangel. The two drain-feedback combos are driven LIVE through the
+//!    per-beat `apply(PassPriority)` reducer (PR-3 Option C — the persisted
+//!    `loop_detect_ring` + the §3 reconcile shortcut), not the offline `detect_loop`
+//!    harness. Two synthetic loops (`drive_damage_loop_certificate`
 //!    plus the negatives `drive_board_change_is_not_a_loop` /
 //!    `drive_idle_board_is_not_a_loop`) exercise the same pipeline without the
 //!    export. These are the discriminating regression tests — reverting either
@@ -59,8 +63,7 @@ use crate::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaType;
 use crate::types::phase::Phase;
-use std::path::PathBuf;
-use std::sync::OnceLock;
+use crate::types::player::PlayerId;
 
 /// One row of the acceptance corpus: a combo, its documented unbounded resource
 /// family, the expected [`WinKind`], and (for the 4 card-gated combos) the card
@@ -600,12 +603,7 @@ fn face_has_unimplemented(face: &crate::types::card::CardFace) -> bool {
 /// non-gated combos plus confirms the 4 gated ones are correctly classified.
 #[test]
 fn corpus_cards_present_and_implementation_status_matches_gating() {
-    let Some(db) = card_db() else {
-        eprintln!(
-            "skipping corpus_cards_present_*: card-data export not present (run gen-card-data.sh)"
-        );
-        return;
-    };
+    let db = card_db();
 
     let mut missing: Vec<String> = Vec::new();
     // Non-gated rows whose cards unexpectedly carry Unimplemented (a regression
@@ -707,22 +705,10 @@ fn drive_one_ping(probe: &mut LoopProbe, pinger: ObjectId) {
 // caller can skip gracefully rather than fail spuriously.
 // ---------------------------------------------------------------------------
 
-/// Load (once) the real card-data export. `None` if the export has not been
-/// generated (`./scripts/gen-card-data.sh`) — callers skip in that case.
-fn card_db() -> Option<&'static CardDatabase> {
-    static DB: OnceLock<Option<CardDatabase>> = OnceLock::new();
-    DB.get_or_init(|| {
-        // CARGO_MANIFEST_DIR is crates/engine; the export lives at the repo root.
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("client/public/card-data.json");
-        if !path.exists() {
-            return None;
-        }
-        CardDatabase::from_export(&path).ok()
-    })
-    .as_ref()
+/// The shared card database, loaded from the committed integration fixture
+/// (or the full export via `FORGE_TEST_FULL_DB=1`).
+fn card_db() -> &'static CardDatabase {
+    crate::test_support::shared_card_db()
 }
 
 /// Instantiate a real card by name directly onto `player`'s battlefield, with its
@@ -782,8 +768,8 @@ struct ComboBoard {
 /// axis is still measurable — not `debug_infinite_mana`), and layers settled.
 /// `None` if the export is absent or any name is missing. Auras are installed but
 /// NOT auto-attached (each driver attaches them to the correct host).
-fn build_board(cards: &[&str]) -> Option<ComboBoard> {
-    let db = card_db()?;
+fn build_board(cards: &[&str]) -> ComboBoard {
+    let db = card_db();
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_life(P0, 40);
@@ -798,12 +784,15 @@ fn build_board(cards: &[&str]) -> Option<ComboBoard> {
     {
         let state = runner.state_mut();
         for &name in cards {
-            ids.push(install_on_battlefield(state, db, name, P0)?);
+            ids.push(
+                install_on_battlefield(state, db, name, P0)
+                    .expect("corpus card must be present in the committed fixture"),
+            );
         }
         float_mana(state, 500);
         settle_layers(state);
     }
-    Some(ComboBoard { runner, ids })
+    ComboBoard { runner, ids }
 }
 
 /// Like [`build_board`], but floats GREEN-ONLY into P0's pool (no WUBRG+C pool).
@@ -814,8 +803,8 @@ fn build_board(cards: &[&str]) -> Option<ComboBoard> {
 /// reading as a spurious per-color deficit the detector's `is_progress` rightly
 /// rejects. Same trick `build_board_with_vanilla` uses for Selvala. Returns the
 /// post-`build()` board with the named permanents in card order.
-fn build_board_green(cards: &[&str]) -> Option<ComboBoard> {
-    let mut board = build_board(cards)?;
+fn build_board_green(cards: &[&str]) -> ComboBoard {
+    let mut board = build_board(cards);
     {
         let state = board.runner.state_mut();
         // CR 106.4: replace the WUBRG+C pool floated by `build_board` with a
@@ -824,7 +813,7 @@ fn build_board_green(cards: &[&str]) -> Option<ComboBoard> {
         float_single_color(state, ManaType::Green, 500);
         settle_layers(state);
     }
-    Some(board)
+    board
 }
 
 /// Like [`build_board`], but first places a vanilla `power`/`toughness` creature
@@ -832,8 +821,8 @@ fn build_board_green(cards: &[&str]) -> Option<ComboBoard> {
 /// X). The vanilla creature is installed BEFORE the named combo cards, so the
 /// combo-card ids are still `ids[0..]` in card order. Returns the board plus the
 /// vanilla creature's id appended LAST in `ids`.
-fn build_board_with_vanilla(cards: &[&str], power: i32, toughness: i32) -> Option<ComboBoard> {
-    let db = card_db()?;
+fn build_board_with_vanilla(cards: &[&str], power: i32, toughness: i32) -> ComboBoard {
+    let db = card_db();
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_life(P0, 40);
@@ -851,7 +840,10 @@ fn build_board_with_vanilla(cards: &[&str], power: i32, toughness: i32) -> Optio
     {
         let state = runner.state_mut();
         for &name in cards {
-            ids.push(install_on_battlefield(state, db, name, P0)?);
+            ids.push(
+                install_on_battlefield(state, db, name, P0)
+                    .expect("corpus card must be present in the committed fixture"),
+            );
         }
         ids.push(vanilla);
         // Float GREEN only (not a full WUBRG+C pool): Selvala produces green and
@@ -862,7 +854,7 @@ fn build_board_with_vanilla(cards: &[&str], power: i32, toughness: i32) -> Optio
         float_single_color(state, ManaType::Green, 500);
         settle_layers(state);
     }
-    Some(ComboBoard { runner, ids })
+    ComboBoard { runner, ids }
 }
 
 /// Float `n` mana of a single `color` into P0's pool from a sentinel source.
@@ -1189,10 +1181,7 @@ fn is_target_creature_untap_effect(e: &crate::types::ability::Effect) -> bool {
 /// gate). Skips (does not fail) if the export is unavailable.
 #[test]
 fn drive_heliod_ballista_certificate() {
-    let Some(db) = card_db() else {
-        eprintln!("skipping drive_heliod_ballista_certificate: card-data export not present");
-        return;
-    };
+    let db = card_db();
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -1394,9 +1383,7 @@ fn family_matches_axis(family: ResourceFamily, axis: &ResourceAxis) -> bool {
 /// effectively free and no counter accrues). Board returns identical; +1 {G}/cycle.
 #[test]
 fn drive_combo_04_devoted_vizier() {
-    let Some(board) = build_board(CORPUS[6].cards) else {
-        return;
-    };
+    let board = build_board(CORPUS[6].cards);
     let druid = board.ids[0];
     let untap_idx = ability_index_where(board.runner.state(), druid, is_untap_effect)
         .expect("Druid has an untap ability");
@@ -1417,9 +1404,7 @@ fn drive_combo_04_devoted_vizier() {
 /// {C} (+3); untap it for {2} (-2) → net +1 colorless/cycle, board identical.
 #[test]
 fn drive_combo_02_grim_power() {
-    let Some(mut board) = build_board(CORPUS[4].cards) else {
-        return;
-    };
+    let mut board = build_board(CORPUS[4].cards);
     let grim = board.ids[0];
     let power_artifact = board.ids[1];
     attach_aura(board.runner.state_mut(), power_artifact, grim);
@@ -1443,9 +1428,7 @@ fn drive_combo_02_grim_power() {
 /// unbounded axes are +1/+1 counters and life — `Counters` family.
 #[test]
 fn drive_combo_47_spike_archangel() {
-    let Some(mut board) = build_board(CORPUS[49].cards) else {
-        return;
-    };
+    let mut board = build_board(CORPUS[49].cards);
     let spike = board.ids[0];
     {
         // CR 122: Spike Feeder "enters with two +1/+1 counters" — seed them (the
@@ -1475,9 +1458,7 @@ fn drive_combo_47_spike_archangel() {
 /// untap via Freed for {U} (-1) → net +1 mana/cycle, board identical.
 #[test]
 fn drive_combo_07_bloom_freed() {
-    let Some(mut board) = build_board(CORPUS[9].cards) else {
-        return;
-    };
+    let mut board = build_board(CORPUS[9].cards);
     let bloom = board.ids[0];
     let freed = board.ids[1];
     attach_aura(board.runner.state_mut(), freed, bloom);
@@ -1499,9 +1480,7 @@ fn drive_combo_07_bloom_freed() {
 /// (+N), untap via Pemmin for {U} (−1) → net (N − 1)/cycle, board identical.
 #[test]
 fn drive_combo_11_faeburrow_pemmin() {
-    let Some(mut board) = build_board(CORPUS[13].cards) else {
-        return;
-    };
+    let mut board = build_board(CORPUS[13].cards);
     let faeburrow = board.ids[0];
     let pemmin = board.ids[1];
     attach_aura(board.runner.state_mut(), pemmin, faeburrow);
@@ -1537,9 +1516,7 @@ fn drive_combo_11_faeburrow_pemmin() {
 #[test]
 fn drive_combo_11_selvala_staff() {
     // 7/7 vanilla ⇒ greatest power = 7 ⇒ Selvala adds 7 mana, net +2/cycle.
-    let Some(board) = build_board_with_vanilla(CORPUS[12].cards, 7, 7) else {
-        return;
-    };
+    let board = build_board_with_vanilla(CORPUS[12].cards, 7, 7);
     let selvala = board.ids[0];
     let staff = board.ids[1];
     let selvala_tap = ability_index_where(board.runner.state(), selvala, is_mana_effect)
@@ -1573,9 +1550,7 @@ fn drive_combo_11_selvala_staff() {
 /// proliferate trigger. Board identical.
 #[test]
 fn drive_combo_d2_kilo_freed_relic() {
-    let Some(mut board) = build_board(CORPUS[1].cards) else {
-        return;
-    };
+    let mut board = build_board(CORPUS[1].cards);
     let kilo = board.ids[0];
     let freed = board.ids[1];
     let relic = board.ids[2];
@@ -1656,9 +1631,7 @@ fn seed_subtype_creatures(state: &mut GameState, subtype: &str, count: usize) {
 #[test]
 fn drive_combo_10_priest_umbral() {
     use crate::types::ability::Effect;
-    let Some(mut board) = build_board_green(CORPUS[10].cards) else {
-        return;
-    };
+    let mut board = build_board_green(CORPUS[10].cards);
     let priest = board.ids[0];
     let umbral = board.ids[1];
     // 4 seeded Elves + Priest (itself an Elf) ⇒ Priest taps for 5 green; net +2 a
@@ -1686,9 +1659,7 @@ fn drive_combo_10_priest_umbral() {
 /// `run_combo` finds no certificate. Proves the untap is load-bearing.
 #[test]
 fn drive_combo_10_priest_umbral_requires_untap() {
-    let Some(mut board) = build_board_green(CORPUS[10].cards) else {
-        return;
-    };
+    let mut board = build_board_green(CORPUS[10].cards);
     let priest = board.ids[0];
     let umbral = board.ids[1];
     seed_subtype_creatures(board.runner.state_mut(), "Elf", 4);
@@ -1719,9 +1690,7 @@ fn drive_combo_10_priest_umbral_requires_untap() {
 #[test]
 fn drive_combo_14_marwyn_sword() {
     use crate::types::ability::Effect;
-    let Some(mut board) = build_board_green(CORPUS[14].cards) else {
-        return;
-    };
+    let mut board = build_board_green(CORPUS[14].cards);
     let marwyn = board.ids[0];
     let sword = board.ids[1];
     // CR 122: Marwyn's base power is 1; seed 6 +1/+1 counters (power 7) so a cycle
@@ -1757,9 +1726,7 @@ fn drive_combo_14_marwyn_sword() {
 /// identical ⇒ no certificate. Proves the modal untap is load-bearing.
 #[test]
 fn drive_combo_14_marwyn_sword_requires_untap() {
-    let Some(mut board) = build_board_green(CORPUS[14].cards) else {
-        return;
-    };
+    let mut board = build_board_green(CORPUS[14].cards);
     let marwyn = board.ids[0];
     let sword = board.ids[1];
     {
@@ -1943,10 +1910,18 @@ fn drive_idle_board_is_not_a_loop() {
 //    is consumed reads as a per-color deficit, which `loop_check::is_progress`
 //    rightly rejects. (Selvala + Staff IS driven because Selvala can produce the
 //    one color its whole cycle consumes — see that driver's green-only float.)
-//  * DRAIN FEEDBACK cascades (Sanguine Bond + Exquisite Blood; Marauding Blight-
-//    Priest + Bloodthirsty Conqueror): a mandatory triggered cascade that needs a
-//    clean external life-gain to start and per-pair stack stepping to measure one
-//    cycle — a bespoke driver follow-up.
+//  * DRAIN FEEDBACK cascades (Sanguine Bond + Exquisite Blood [idx 17]; Marauding
+//    Blight-Priest + Bloodthirsty Conqueror [idx 18]): a mandatory triggered cascade
+//    seeded by a clean external life-gain. PR-3 (Option C) DRIVES BOTH LIVE — they are
+//    promoted to `DRIVEN_ROW_INDICES`. The persisted `loop_detect_ring` accumulates
+//    across the per-beat `apply(PassPriority)` drive and `reconcile_terminal_result`'s
+//    §3 shortcut emits `GameOver{Some(P0)}` by ~beat 6 (CR 732.2a → CR 704.5a), well
+//    before the high-life 704.5a death. idx 17's targeted "target opponent loses life"
+//    trigger auto-resolves to the sole legal target (the opponent — "target opponent"
+//    has exactly one legal target in two-player; no target-selection stop), so the targeted
+//    shape drives identically. (Drivers: `drive_drain_idx18_wins_live`,
+//    `drive_drain_idx17_targeted_wins_live`; recursion-regression backstop
+//    `drive_drain_idx18_legal_actions_terminates_bounded`.)
 //  * CARD-GATED (4): Doc Aurlock / Professor Onyx / Animate Dead / Grindstone +
 //    Painter's Servant have Unimplemented parts (§3).
 //
@@ -1972,6 +1947,8 @@ const DRIVEN_ROW_INDICES: &[usize] = &[
     12, // Selvala, Heart of the Wilds + Staff      (drive_combo_11_selvala_staff)
     13, // Faeburrow Elder + Pemmin's Aura          (drive_combo_11_faeburrow_pemmin)
     14, // Marwyn, the Nurturer + Sword of Paruns   (drive_combo_14_marwyn_sword)
+    17, // Sanguine Bond + Exquisite Blood          (drive_drain_idx17_targeted_wins_live)
+    18, // Marauding Blight-Priest + Conqueror      (drive_drain_idx18_wins_live)
     49, // Spike Feeder + Archangel of Thune        (drive_combo_47_spike_archangel)
 ];
 
@@ -1987,4 +1964,451 @@ fn confirmed_drivers_match_expected() {
             CORPUS[idx].name
         );
     }
+}
+
+// ===========================================================================
+// PR-3 (Option C) live drain-cascade drivers. These drive the REAL per-beat
+// `apply(PassPriority)` reducer (not the offline `detect_loop` harness) so the
+// persisted `loop_detect_ring` accumulation (§2) and the reconcile-seam win
+// shortcut (§3) are exercised end-to-end. Each names its revert-fail line.
+// ===========================================================================
+
+/// Build a 2-player board with the named permanents installed on P0, P1 set to a
+/// high life total `victim_life` (so a natural CR 704.5a death cannot be the cause
+/// of any early `GameOver`), and the active player P0 at a clean `PreCombatMain`
+/// priority window. No mana is floated (the drain cascade is trigger-driven, not
+/// activated). Returns `None` if the export is absent or any name is missing.
+fn build_drain_board(cards: &[&str], victim_life: i32) -> Option<ComboBoard> {
+    let db = card_db();
+    if cards.iter().any(|c| db.get_face_by_name(c).is_none()) {
+        return None;
+    }
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 40);
+    scenario.with_life(P1, victim_life);
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+    }
+    let mut ids = Vec::new();
+    {
+        let state = runner.state_mut();
+        for &name in cards {
+            ids.push(install_on_battlefield(state, db, name, P0)?);
+        }
+        settle_layers(state);
+    }
+    Some(ComboBoard { runner, ids })
+}
+
+/// Seed a drain cascade by gaining P0 1 life through the real life-gain pipeline
+/// and placing the resulting "whenever you gain life" trigger on the stack via the
+/// production trigger chokepoint (`process_triggers`). Leaves the board at a
+/// priority window with exactly one trigger on the stack — the same shape a real
+/// external lifegain would produce. Returns the stack length after seeding.
+fn seed_lifegain_cascade(board: &mut ComboBoard) -> usize {
+    let state = board.runner.state_mut();
+    let mut events = Vec::new();
+    // CR 119.3: gain P0 1 life — fires Marauding Blight-Priest's "whenever you gain
+    // life" trigger.
+    let _ = crate::game::effects::life::apply_life_gain(state, P0, 1, &mut events);
+    // CR 603.3: put the triggered ability on the stack as a player would receive
+    // priority — the production placement path.
+    crate::game::triggers::process_triggers(state, &events);
+    // Reset to a clean active-player priority window (the seed is pre-loop setup).
+    state.priority_player = state.active_player;
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    state.stack.len()
+}
+
+/// One observation of the live per-beat drive.
+#[derive(Debug)]
+struct BeatTrace {
+    beat: usize,
+    wf: WaitingFor,
+    stack_len: usize,
+    ring_len: usize,
+    p0_life: i32,
+    p1_life: i32,
+}
+
+/// Drive `runner.act(PassPriority)` up to `max_beats` times, recording one
+/// [`BeatTrace`] per beat. Stops early on `GameOver`. Returns the trace.
+fn drive_pass_priority(board: &mut ComboBoard, max_beats: usize) -> Vec<BeatTrace> {
+    let mut trace = Vec::new();
+    for beat in 1..=max_beats {
+        if matches!(
+            board.runner.state().waiting_for,
+            WaitingFor::GameOver { .. }
+        ) {
+            break;
+        }
+        if board.runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+        let s = board.runner.state();
+        trace.push(BeatTrace {
+            beat,
+            wf: s.waiting_for.clone(),
+            stack_len: s.stack.len(),
+            ring_len: s.loop_detect_ring.len(),
+            p0_life: s.players[0].life,
+            p1_life: s.players[1].life,
+        });
+        if matches!(
+            board.runner.state().waiting_for,
+            WaitingFor::GameOver { .. }
+        ) {
+            break;
+        }
+    }
+    trace
+}
+
+/// Index of the first beat whose `waiting_for` is `GameOver { winner: Some(w) }`,
+/// or `None` if no early win occurred within the driven window.
+fn first_gameover_beat(trace: &[BeatTrace]) -> Option<(usize, PlayerId)> {
+    trace.iter().find_map(|t| match t.wf {
+        WaitingFor::GameOver {
+            winner: Some(winner),
+        } => Some((t.beat, winner)),
+        _ => None,
+    })
+}
+
+/// C-L1: the PERSISTED loop-detection ring wins idx 18 (Marauding Blight-Priest +
+/// Bloodthirsty Conqueror) LIVE under the default per-beat `apply(PassPriority)`
+/// drive. P1 starts at 200 life so a natural CR 704.5a death cannot be the cause
+/// (it would take ~400 beats); the live `GameOver{Some(P0)}` fires by ~beat 6 from
+/// the accumulated ring + the §3 reconcile shortcut.
+///
+/// REVERT-FAIL (the named discriminators, each flips this assertion):
+///  (a) remove the §3 block in `reconcile_terminal_result` (engine.rs) ⇒ the
+///      cascade grinds, no early `GameOver` within the window ⇒ `expect` fails.
+///  (b) remove the relocated §2 `record_loop_detect_sample` block in
+///      `pass_priority_once_with_pipeline` ⇒ the ring never persists across beats
+///      (caps at 0), §3 never matches ⇒ no early `GameOver` ⇒ `expect` fails. This
+///      proves the PERSISTED ring is the load-bearing new surface.
+#[test]
+fn drive_drain_idx18_wins_live() {
+    let Some(mut board) = build_drain_board(CORPUS[18].cards, 200) else {
+        return; // export absent (CI / fresh checkout): skip, never fail spuriously
+    };
+    seed_lifegain_cascade(&mut board);
+    let trace = drive_pass_priority(&mut board, 40);
+    let (beat, winner) = first_gameover_beat(&trace)
+        .expect("idx18 drain cascade must win LIVE via the persisted ring + §3 shortcut");
+    assert_eq!(
+        winner, P0,
+        "the single non-falling player (P0) must be the winner"
+    );
+    assert!(
+        beat <= 12,
+        "the live win must fire from the ring (~beat 6), not the ~400-beat 704.5a death; got beat {beat}"
+    );
+    // The PERSISTED ring accumulated across beats (≥ 3 snapshots are needed for the
+    // modulo-match that fires the win — see the §4 trace), and the cascade held the
+    // stack non-empty the whole time (a self-refilling, NON-shrinking loop).
+    let max_ring = trace.iter().map(|t| t.ring_len).max().unwrap_or(0);
+    assert!(
+        max_ring >= 3,
+        "the ring must accumulate ≥3 persisted snapshots before the shortcut (got {max_ring})"
+    );
+    assert!(
+        trace.iter().all(|t| t.stack_len >= 1),
+        "a self-refilling cascade keeps the stack non-empty at every beat"
+    );
+    // Drain direction: the victim P1 drained (and is well above 0 — the win is the
+    // SHORTCUT, not a real CR 704.5a death), while the controller P0 gained.
+    let last = trace.last().expect("at least one beat");
+    assert!(
+        last.p1_life > 100 && last.p1_life < 200,
+        "P1 must have drained but still be at high life when shortcut-eliminated (got {})",
+        last.p1_life
+    );
+    assert!(
+        last.p0_life >= 41,
+        "controller P0 gained life across the cascade"
+    );
+}
+
+/// C-L2 (a genuinely SECOND loop shape — idx 17, Sanguine Bond + Exquisite Blood,
+/// the TARGETED `LoseLife` variant). §4 disposition measurement: the per-beat drive
+/// auto-resolves Sanguine Bond's "target opponent loses that much life" trigger to
+/// the sole legal target (opponent P1) with NO target-selection stop — "target
+/// opponent" has exactly one legal target in a two-player game, so this targeted
+/// shape also wins live — promoting idx 17 alongside idx 18. The assertion that NO
+/// `TargetSelection`/`TriggerTargetSelection` window ever appears is what makes the
+/// auto-resolution claim non-vacuous (if the engine stopped for a target, this test
+/// would catch it and idx 17 would stay targeting-deferred).
+///
+/// REVERT-FAIL: same as C-L1 — removing the §3 block or the §2 sample drops the
+/// early `GameOver`. Additionally exercises §7's stack-id canon
+/// (`project_out_resources`, resource.rs:751): reverting the `entry.id =
+/// ObjectId(pos)` canon loop makes each refilled trigger's fresh `ObjectId` defeat
+/// the modulo-match, so no cycle point is ever found ⇒ no early `GameOver`.
+#[test]
+fn drive_drain_idx17_targeted_wins_live() {
+    let Some(mut board) = build_drain_board(CORPUS[17].cards, 200) else {
+        return; // export absent: skip
+    };
+    seed_lifegain_cascade(&mut board);
+    let trace = drive_pass_priority(&mut board, 40);
+    // The targeted trigger auto-resolves: no target window appears at any beat.
+    assert!(
+        trace.iter().all(|t| !matches!(
+            t.wf,
+            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. }
+        )),
+        "idx17's targeted trigger must auto-resolve (no target-selection stop) under the per-beat drive"
+    );
+    let (beat, winner) = first_gameover_beat(&trace)
+        .expect("idx17 targeted drain cascade must win LIVE (auto-resolved target)");
+    assert_eq!(winner, P0);
+    assert!(
+        beat <= 12,
+        "live win from the ring, not the 704.5a death; got beat {beat}"
+    );
+    // P1 (the targeted opponent) is the faller — the auto-resolved target is correct.
+    assert!(
+        board.runner.state().players[1].life < 200,
+        "the auto-resolved target must be the opponent P1 (its life drained)"
+    );
+}
+
+/// C-L1-probe — Defect-2 BOUNDED-TERMINATION regression guard. After the live drive
+/// has populated the ring (stack≠∅, at the RESOLVING `Priority{non-active}` window,
+/// ring ≥ 2, BEFORE any `GameOver`), call `legal_actions` directly. The legality
+/// probe clones-and-applies `PassPriority`, which resolves the top and re-enters
+/// `reconcile_terminal_result` §3 — the seam the Defect-2 recursion concern is about.
+/// This asserts the call TERMINATES with a bounded, non-empty action list and does
+/// not mutate the live game.
+///
+/// HONEST DISCRIMINATION NOTE (measured, not assumed): in the SHIPPED architecture
+/// this test is a bounded-termination *property* test, NOT a non-vacuous discriminator
+/// of the `&& !in_simulation_probe()` guard. Measured across three revert configs
+/// (drop the §3 guard; drop the filter.rs `SimulationProbeGuard::enter()` so the flag
+/// is never set; both with the real per-beat drive AND this direct `legal_actions`
+/// call), the `reconcile→§3→§9→legal_actions→SimulationFilter→reconcile` path does NOT
+/// recurse — the §9 gate (`no_living_player_has_meaningful_priority_action`) resets
+/// each probe's priority/pass state, so the nested `SimulationFilter` applies are
+/// handoffs that never re-resolve, and §3 (which only fires when a winner is FOUND)
+/// completes at ring=3 on the real path before the ring could grow. The thread-local
+/// guard is therefore DEFENSIVE DEPTH enforcing the top-level-only invariant, not the
+/// "sole barrier" the plan framed; the original SIGABRT (impl-report §2, observed at
+/// ring cap 16 with a different §9/§2 configuration) does not reproduce here. This
+/// test still guards against a FUTURE change that drops the §9 reset and re-opens the
+/// recursion: with such a change AND the guard removed it would overflow; with the
+/// guard it stays bounded.
+#[test]
+fn drive_drain_idx18_legal_actions_terminates_bounded() {
+    let Some(mut board) = build_drain_board(CORPUS[18].cards, 200) else {
+        return; // export absent: skip
+    };
+    seed_lifegain_cascade(&mut board);
+    // Drive until the ring is populated (≥ 2 snapshots) at the RESOLVING priority
+    // window — `Priority{non-active}` (the last passer), where the NEXT all-pass
+    // resolves the top and would push the ring to a modulo MATCH. This is the exact
+    // state whose legality probe (a clone-and-apply of `PassPriority`) re-enters
+    // `reconcile_terminal_result` §3; stop here, BEFORE the real drive fires GameOver.
+    let active = board.runner.state().active_player;
+    let mut reached = false;
+    for _ in 0..40 {
+        if matches!(
+            board.runner.state().waiting_for,
+            WaitingFor::GameOver { .. }
+        ) {
+            break;
+        }
+        if board.runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+        let s = board.runner.state();
+        if s.loop_detect_ring.len() >= 2
+            && !s.stack.is_empty()
+            && matches!(s.waiting_for, WaitingFor::Priority { player } if player != active)
+        {
+            reached = true;
+            break;
+        }
+    }
+    assert!(
+        reached,
+        "must reach a populated-ring RESOLVING priority window before GameOver"
+    );
+    // The decisive call: with the guard, this terminates and returns a bounded list.
+    // Without the guard it would stack-overflow (SIGABRT) and the test could not pass.
+    let actions = crate::ai_support::legal_actions(board.runner.state());
+    assert!(
+        !actions.is_empty(),
+        "legal_actions must return a bounded, non-empty action list (no recursion)"
+    );
+    // The immutable probe must not have ended the live game.
+    assert!(
+        !matches!(
+            board.runner.state().waiting_for,
+            WaitingFor::GameOver { .. }
+        ),
+        "legal_actions takes &state — it must not mutate the live game to GameOver"
+    );
+}
+
+/// Install a board-neutral artifact on `player` with a costless "draw 1" activated
+/// ability — a meaningful (loop-ending) priority action. Mirrors the engine's
+/// `add_non_mana_activated_artifact` U-gate helper at the corpus level.
+fn add_meaningful_action_artifact(state: &mut GameState, player: PlayerId) -> ObjectId {
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::CardId;
+    use crate::types::zones::Zone;
+    let id = crate::game::zones::create_object(
+        state,
+        CardId(state.next_object_id),
+        player,
+        "Loop-Ending Artifact".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).expect("just created");
+    obj.card_types.core_types.push(CoreType::Artifact);
+    obj.summoning_sick = false;
+    std::sync::Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    ));
+    id
+}
+
+/// C-neg-A (+ the live face of the all-players §9 probe): a victim that holds a
+/// MEANINGFUL loop-ending action is NEVER shortcut-eliminated. The victim P1 (the
+/// NON-current holder at the §3 site, where priority has reset to active P0) holds
+/// a costless "draw 1" ability, so `no_living_player_has_meaningful_priority_action`
+/// probes P1, finds the out, and returns `false` ⇒ the §3 shortcut is refused and
+/// the cascade falls through to the existing grind — no early `GameOver`.
+///
+/// REVERT-FAIL:
+///  - remove the §9 gate call at the §3 site ⇒ `GameOver{Some(P0)}` fires while P1
+///    had an out (unsound) — this assertion (`no early GameOver`) flips.
+///  - swap §9 for the current-holder-only `priority_player_has_meaningful_action`
+///    (which probes only P0, who has no action) ⇒ it misses P1's masked out and the
+///    shortcut wrongly fires (the all-players generalization is load-bearing; the
+///    unit-level `loop_gate_probes_all_living_players_not_just_current_holder`
+///    pins the same distinction).
+#[test]
+fn drive_drain_idx18_victim_with_out_is_not_eliminated() {
+    let Some(mut board) = build_drain_board(CORPUS[18].cards, 200) else {
+        return; // export absent: skip
+    };
+    add_meaningful_action_artifact(board.runner.state_mut(), P1);
+    settle_layers(board.runner.state_mut());
+    seed_lifegain_cascade(&mut board);
+    let trace = drive_pass_priority(&mut board, 40);
+    assert!(
+        first_gameover_beat(&trace).is_none(),
+        "P1 holds a loop-ending action — the §9 gate must refuse the shortcut (no GameOver)"
+    );
+}
+
+/// C-neg-D — ring HYGIENE: a finite, non-refilling multi-spell stack that drains to
+/// empty NEVER accumulates loop snapshots and NEVER produces a `GameOver`. Three
+/// costless "draw 1" abilities are stacked, then resolved one-per-beat; each
+/// resolution SHRINKS the stack (`len_after < len_before`), so the §2 refill gate's
+/// `stack.len() >= stack_len_before` clause is false ⇒ the clear arm runs ⇒ the
+/// ring stays empty after every shrinking resolution.
+///
+/// REVERT-FAIL: removing the `state.stack.len() >= stack_len_before` clause from the
+/// §2 refill gate makes a normal shrinking resolution RECORD a snapshot ⇒ the ring
+/// becomes non-empty ⇒ the `is_empty()` assertion flips. (No `GameOver` either way —
+/// these resolutions drain no life — so the ring-emptiness assertion is the
+/// load-bearing hygiene discriminator.)
+#[test]
+fn drive_finite_stack_keeps_ring_empty() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 40);
+    scenario.with_life(P1, 40);
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+    }
+    // A board-neutral costless "gain 1 life" ability — resolvable repeatedly with no
+    // decking SBA and no triggers on this synthetic board, so the only effect of each
+    // resolution is to SHRINK the stack.
+    let artifact = {
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+        let state = runner.state_mut();
+        let id = crate::game::zones::create_object(
+            state,
+            CardId(state.next_object_id),
+            P0,
+            "Gain-Life Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).expect("just created");
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.summoning_sick = false;
+        std::sync::Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        ));
+        id
+    };
+    settle_layers(runner.state_mut());
+    let gain_idx = ability_index_where(runner.state(), artifact, |e| {
+        matches!(e, Effect::GainLife { .. })
+    })
+    .expect("the artifact has a gain-life ability");
+    // Stack three non-refilling abilities (each ActivateAbility clears the ring, the
+    // §2.3 invalidation — so we start each measurement from an empty ring).
+    for _ in 0..3 {
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: artifact,
+                ability_index: gain_idx,
+            })
+            .expect("activate costless gain-life");
+    }
+    assert_eq!(runner.state().stack.len(), 3, "three abilities stacked");
+    // Drive PassPriority ONLY until the finite stack drains to empty (driving past
+    // empty would advance turns into a draw-step deck-out — unrelated to loop
+    // hygiene). The ring must stay empty at EVERY shrinking-resolution beat, and no
+    // shortcut GameOver may occur while the stack is non-empty.
+    let mut resolutions = 0;
+    let mut max_ring = 0usize;
+    for _ in 0..20 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        assert!(
+            !matches!(runner.state().waiting_for, WaitingFor::GameOver { .. }),
+            "a finite non-loop stack must not be shortcut to a GameOver"
+        );
+        if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+        max_ring = max_ring.max(runner.state().loop_detect_ring.len());
+        resolutions += 1;
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "the finite stack must drain to empty within the window"
+    );
+    assert_eq!(
+        max_ring, 0,
+        "a shrinking finite stack must never record a loop snapshot (ring stayed empty)"
+    );
+    assert!(resolutions >= 3, "the drive must have processed real beats");
 }
