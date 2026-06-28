@@ -12103,6 +12103,102 @@ mod tests {
     }
 
     #[test]
+    fn bound_by_moonsilver_sacrifice_another_attach_activated() {
+        const ORACLE: &str = "Enchant creature\n\
+            Enchanted creature can't attack, block, or transform.\n\
+            Sacrifice another permanent: Attach this Aura to target creature. Activate only as a sorcery and only once each turn.";
+
+        let r = parse(
+            ORACLE,
+            "Bound by Moonsilver",
+            &[],
+            &["Enchantment"],
+            &["Aura"],
+        );
+
+        assert_eq!(
+            r.abilities.len(),
+            1,
+            "expected one activated ability, got {:?}",
+            r.abilities
+        );
+        let ability = &r.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Activated);
+
+        let Some(AbilityCost::Sacrifice(sac)) = ability.cost.as_ref() else {
+            panic!("expected Sacrifice cost, got {:?}", ability.cost);
+        };
+        let TargetFilter::Typed(tf) = &sac.target else {
+            panic!("expected typed sacrifice target, got {:?}", sac.target);
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::Another),
+            "Sacrifice another permanent must carry FilterProp::Another, got {:?}",
+            tf.properties
+        );
+
+        let Effect::Attach { attachment, target } = ability.effect.as_ref() else {
+            panic!("expected Attach effect, got {:?}", ability.effect);
+        };
+        assert_eq!(*attachment, TargetFilter::SelfRef);
+        let TargetFilter::Typed(attach_target) = target else {
+            panic!("expected typed attach target, got {target:?}");
+        };
+        assert!(
+            attach_target
+                .type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Creature)),
+            "attach target must be a creature, got {:?}",
+            attach_target.type_filters
+        );
+
+        let restr = &ability.activation_restrictions;
+        assert!(
+            restr.contains(&ActivationRestriction::AsSorcery),
+            "expected AsSorcery, got {restr:?}"
+        );
+        assert!(
+            restr.contains(&ActivationRestriction::OnlyOnceEachTurn),
+            "expected OnlyOnceEachTurn, got {restr:?}"
+        );
+
+        assert!(
+            r.statics.iter().any(|s| {
+                s.mode == StaticMode::CantAttack
+                    && s.affected
+                        == Some(TargetFilter::Typed(
+                            TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                        ))
+            }),
+            "expected CantAttack on enchanted host, got {:?}",
+            r.statics
+        );
+        assert!(
+            r.statics.iter().any(|s| {
+                s.mode == StaticMode::CantBlock
+                    && s.affected
+                        == Some(TargetFilter::Typed(
+                            TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                        ))
+            }),
+            "expected CantBlock on enchanted host, got {:?}",
+            r.statics
+        );
+        assert!(
+            r.statics.iter().any(|s| {
+                matches!(&s.mode, StaticMode::Other(name) if name == "CantTransform")
+                    && s.affected
+                        == Some(TargetFilter::Typed(
+                            TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                        ))
+            }),
+            "expected CantTransform on enchanted host, got {:?}",
+            r.statics
+        );
+    }
+
+    #[test]
     fn katara_waterbend_activate_only_during_your_turn() {
         // Issue #2238: Katara, Water Tribe's Hope. The "X can't be 0." annotation
         // sits MID-ability ("… until end of turn. X can't be 0. Activate only
