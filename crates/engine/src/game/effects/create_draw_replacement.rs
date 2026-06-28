@@ -51,12 +51,12 @@ pub fn resolve(
         ability.controller,
     );
 
+    // CR 614.1a + CR 113.7a: anchor the installing controller at resolution
+    // time so the shield outlives the source permanent's zone/controller.
     let mut shield = ReplacementDefinition::new(ReplacementEvent::Draw);
     shield.runtime_execute = Some(Box::new(substitute));
     shield.consume_on_apply = true; // CR 614.6: one-shot ("the next time").
     shield.expiry = Some(RestrictionExpiry::EndOfTurn); // CR 514.2: "this turn".
-    // CR 614.1a + CR 113.7a: anchor the installing controller at resolution
-    // time so the shield outlives the source permanent's zone/controller.
     shield.source_controller = Some(ability.controller);
     shield.valid_player = Some(ReplacementPlayerScope::You);
 
