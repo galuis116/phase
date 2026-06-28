@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-06-22T00:00:00Z",
+  "updated": "2026-06-27T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -19,7 +19,7 @@
       ],
       "main": [
         {
-          "count": 4,
+          "count": 3,
           "name": "Burst Lightning"
         },
         {
@@ -35,20 +35,20 @@
           "name": "Kumano Faces Kakkazan"
         },
         {
-          "count": 2,
-          "name": "Hexing Squelcher"
-        },
-        {
-          "count": 4,
-          "name": "Monastery Swiftspear"
+          "count": 1,
+          "name": "Mountain"
         },
         {
           "count": 4,
           "name": "Monstrous Rage"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Monastery Swiftspear"
         },
         {
           "count": 2,
@@ -59,23 +59,35 @@
           "name": "Reckless Rage"
         },
         {
-          "count": 2,
-          "name": "Screaming Nemesis"
+          "count": 1,
+          "name": "Rockface Village"
+        },
+        {
+          "count": 1,
+          "name": "Burst Lightning"
         },
         {
           "count": 1,
           "name": "Sokenzan, Crucible of Defiance"
         },
         {
-          "count": 3,
+          "count": 4,
           "name": "Soul-Scar Mage"
         },
         {
-          "count": 2,
+          "count": 4,
           "name": "Sunspine Lynx"
         },
         {
           "count": 1,
+          "name": "The Legend of Roku"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 5,
           "name": "Mountain"
         },
         {
@@ -83,34 +95,22 @@
           "name": "Mountain"
         },
         {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 9,
-          "name": "Mountain"
-        },
-        {
           "count": 2,
-          "name": "Screaming Nemesis"
+          "name": "Mountain"
         },
         {
           "count": 4,
           "name": "Mutavault"
         },
         {
-          "count": 2,
-          "name": "The Legend of Roku"
+          "count": 4,
+          "name": "Screaming Nemesis"
         }
       ],
       "sideboard": [
         {
-          "count": 3,
-          "name": "Flowstone Infusion"
-        },
-        {
           "count": 2,
-          "name": "Scorching Shot"
+          "name": "Flowstone Infusion"
         },
         {
           "count": 4,
@@ -118,19 +118,23 @@
         },
         {
           "count": 1,
-          "name": "Sunspine Lynx"
-        },
-        {
-          "count": 2,
-          "name": "Ghost Vacuum"
-        },
-        {
-          "count": 2,
           "name": "Pyroclasm"
         },
         {
+          "count": 2,
+          "name": "Redcap Melee"
+        },
+        {
+          "count": 3,
+          "name": "Scorching Shot"
+        },
+        {
+          "count": 2,
+          "name": "Weathered Runestone"
+        },
+        {
           "count": 1,
-          "name": "Sunspine Lynx"
+          "name": "Pyroclasm"
         }
       ]
     },
@@ -146,16 +150,40 @@
       ],
       "main": [
         {
-          "count": 4,
-          "name": "Blooming Marsh"
+          "count": 1,
+          "name": "Overgrown Tomb"
         },
         {
           "count": 4,
-          "name": "Professor Dellian Fel"
+          "name": "Badgermole Cub"
+        },
+        {
+          "count": 1,
+          "name": "Overgrown Tomb"
         },
         {
           "count": 1,
           "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 1,
+          "name": "Culling Ritual"
+        },
+        {
+          "count": 1,
+          "name": "Emeritus of Abundance"
+        },
+        {
+          "count": 1,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 1,
+          "name": "Forest"
+        },
+        {
+          "count": 3,
+          "name": "Graveyard Trespasser"
         },
         {
           "count": 4,
@@ -163,43 +191,19 @@
         },
         {
           "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 1,
-          "name": "Emeritus of Abundance"
-        },
-        {
-          "count": 4,
-          "name": "Unholy Annex // Ritual Chamber"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
+          "name": "Llanowar Wastes"
         },
         {
           "count": 3,
-          "name": "Sheoldred, the Apocalypse"
-        },
-        {
-          "count": 1,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 1,
-          "name": "Urborg, Tomb of Yawgmoth"
-        },
-        {
-          "count": 1,
-          "name": "Wastewood Verge"
+          "name": "Fatal Push"
         },
         {
           "count": 4,
-          "name": "Abrupt Decay"
+          "name": "Professor Dellian Fel"
         },
         {
-          "count": 1,
-          "name": "Culling Ritual"
+          "count": 4,
+          "name": "Blooming Marsh"
         },
         {
           "count": 2,
@@ -207,22 +211,38 @@
         },
         {
           "count": 3,
+          "name": "Sheoldred, the Apocalypse"
+        },
+        {
+          "count": 2,
           "name": "Swamp"
         },
         {
-          "count": 4,
-          "name": "Llanowar Wastes"
-        },
-        {
           "count": 1,
-          "name": "Forest"
+          "name": "Takenuma, Abandoned Mire"
         },
         {
           "count": 1,
           "name": "Tear Asunder"
         },
         {
+          "count": 1,
+          "name": "Abrupt Decay"
+        },
+        {
           "count": 4,
+          "name": "Unholy Annex // Ritual Chamber"
+        },
+        {
+          "count": 3,
+          "name": "Abrupt Decay"
+        },
+        {
+          "count": 1,
+          "name": "Wastewood Verge"
+        },
+        {
+          "count": 2,
           "name": "Overgrown Tomb"
         },
         {
@@ -230,30 +250,42 @@
           "name": "Restless Cottage"
         },
         {
-          "count": 2,
-          "name": "Graveyard Trespasser"
-        },
-        {
           "count": 1,
-          "name": "The Soul Stone"
+          "name": "Swamp"
         },
         {
           "count": 4,
-          "name": "Badgermole Cub"
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 1,
+          "name": "Urborg, Tomb of Yawgmoth"
         }
       ],
       "sideboard": [
+        {
+          "count": 1,
+          "name": "Culling Ritual"
+        },
+        {
+          "count": 1,
+          "name": "Duress"
+        },
+        {
+          "count": 2,
+          "name": "Go Blank"
+        },
+        {
+          "count": 3,
+          "name": "Invoke Despair"
+        },
         {
           "count": 2,
           "name": "Ray of Enfeeblement"
         },
         {
           "count": 1,
-          "name": "Culling Ritual"
-        },
-        {
-          "count": 3,
-          "name": "Invoke Despair"
+          "name": "Sheoldred's Edict"
         },
         {
           "count": 2,
@@ -266,14 +298,6 @@
         {
           "count": 1,
           "name": "Duress"
-        },
-        {
-          "count": 3,
-          "name": "Go Blank"
-        },
-        {
-          "count": 1,
-          "name": "Sheoldred's Edict"
         }
       ]
     },
@@ -281,92 +305,16 @@
       "name": "Azorius Control",
       "author": "MTGGoldfish",
       "colors": [
-        "U",
-        "W"
+        "W",
+        "U"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 3,
-          "name": "Teferi, Hero of Dominaria"
-        },
-        {
-          "count": 1,
-          "name": "Dovin's Veto"
-        },
-        {
-          "count": 3,
-          "name": "Deserted Beach"
-        },
-        {
-          "count": 4,
-          "name": "March of Otherworldly Light"
-        },
-        {
           "count": 2,
           "name": "The Wandering Emperor"
-        },
-        {
-          "count": 1,
-          "name": "Otawara, Soaring City"
-        },
-        {
-          "count": 2,
-          "name": "Temporary Lockdown"
-        },
-        {
-          "count": 2,
-          "name": "Restless Anchorage"
-        },
-        {
-          "count": 4,
-          "name": "No More Lies"
-        },
-        {
-          "count": 1,
-          "name": "Ultima"
-        },
-        {
-          "count": 1,
-          "name": "Three Steps Ahead"
-        },
-        {
-          "count": 1,
-          "name": "Knockout Blow"
-        },
-        {
-          "count": 2,
-          "name": "Meticulous Archive"
-        },
-        {
-          "count": 2,
-          "name": "Emeritus of Ideation"
-        },
-        {
-          "count": 2,
-          "name": "Petrified Hamlet"
-        },
-        {
-          "count": 3,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Plains"
-        },
-        {
-          "count": 2,
-          "name": "Change the Equation"
-        },
-        {
-          "count": 4,
-          "name": "Beza, the Bounding Spring"
-        },
-        {
-          "count": 4,
-          "name": "Consult the Star Charts"
         },
         {
           "count": 4,
@@ -374,49 +322,260 @@
         },
         {
           "count": 4,
-          "name": "Floodfarm Verge"
+          "name": "Dovin's Veto"
+        },
+        {
+          "count": 3,
+          "name": "Teferi, Hero of Dominaria"
+        },
+        {
+          "count": 4,
+          "name": "Seachrome Coast"
+        },
+        {
+          "count": 2,
+          "name": "Hall of Storm Giants"
+        },
+        {
+          "count": 3,
+          "name": "Plains"
+        },
+        {
+          "count": 3,
+          "name": "Meticulous Archive"
+        },
+        {
+          "count": 4,
+          "name": "No More Lies"
+        },
+        {
+          "count": 4,
+          "name": "March of Otherworldly Light"
         },
         {
           "count": 4,
           "name": "Get Lost"
+        },
+        {
+          "count": 4,
+          "name": "Memory Deluge"
+        },
+        {
+          "count": 4,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Glacial Fortress"
+        },
+        {
+          "count": 4,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 4,
+          "name": "Deserted Beach"
+        },
+        {
+          "count": 1,
+          "name": "Castle Ardenvale"
+        },
+        {
+          "count": 2,
+          "name": "Farewell"
+        },
+        {
+          "count": 4,
+          "name": "Consult the Star Charts"
+        },
+        {
+          "count": 4,
+          "name": "Supreme Verdict"
+        },
+        {
+          "count": 4,
+          "name": "Change the Equation"
+        },
+        {
+          "count": 1,
+          "name": "Eiganjo, Seat of the Empire"
+        },
+        {
+          "count": 3,
+          "name": "Petrified Hamlet"
+        },
+        {
+          "count": 2,
+          "name": "Beza, the Bounding Spring"
+        },
+        {
+          "count": 2,
+          "name": "Restless Anchorage"
         }
       ],
       "sideboard": [
         {
-          "count": 3,
-          "name": "Knockout Blow"
+          "count": 1,
+          "name": "Yorion, Sky Nomad"
         },
         {
           "count": 2,
-          "name": "Dovin's Veto"
+          "name": "Beza, the Bounding Spring"
         },
         {
-          "count": 1,
-          "name": "Memory Deluge"
+          "count": 4,
+          "name": "Emeritus of Ideation"
+        },
+        {
+          "count": 4,
+          "name": "Aether Gust"
+        },
+        {
+          "count": 4,
+          "name": "Narset's Reversal"
+        }
+      ]
+    },
+    {
+      "name": "Izzet Prowess",
+      "author": "MTGGoldfish",
+      "colors": [
+        "R",
+        "U"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Academic Dispute"
         },
         {
           "count": 3,
-          "name": "Mystical Dispute"
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 3,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
+          "name": "Sleight of Hand"
+        },
+        {
+          "count": 3,
+          "name": "Shivan Reef"
+        },
+        {
+          "count": 1,
+          "name": "Den of the Bugbear"
         },
         {
           "count": 2,
-          "name": "Rest in Peace"
+          "name": "Mountain"
+        },
+        {
+          "count": 2,
+          "name": "Riverglide Pathway"
         },
         {
           "count": 1,
-          "name": "Stock Up"
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 4,
+          "name": "Monastery Swiftspear"
+        },
+        {
+          "count": 4,
+          "name": "Soul-Scar Mage"
+        },
+        {
+          "count": 4,
+          "name": "Stormchaser's Talent"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 3,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 4,
+          "name": "Burst Lightning"
         },
         {
           "count": 1,
-          "name": "High Noon"
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
+          "name": "Flow State"
+        },
+        {
+          "count": 3,
+          "name": "Reckless Rage"
+        },
+        {
+          "count": 3,
+          "name": "Emberheart Challenger"
+        },
+        {
+          "count": 3,
+          "name": "Experimental Synthesizer"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Boomerang Basics"
         },
         {
           "count": 1,
+          "name": "Firebending Lesson"
+        },
+        {
+          "count": 1,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 1,
+          "name": "Pyroclasm"
+        },
+        {
+          "count": 1,
+          "name": "Broadside Barrage"
+        },
+        {
+          "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 1,
+          "name": "Octopus Form"
+        },
+        {
+          "count": 1,
+          "name": "Ghost Vacuum"
+        },
+        {
+          "count": 1,
+          "name": "Abandon Attachments"
+        },
+        {
+          "count": 3,
           "name": "Spell Pierce"
         },
         {
+          "count": 2,
+          "name": "Redcap Melee"
+        },
+        {
           "count": 1,
-          "name": "High Noon"
+          "name": "Disdainful Stroke"
         }
       ]
     },
@@ -456,16 +615,16 @@
           "name": "Into the Flood Maw"
         },
         {
+          "count": 4,
+          "name": "Opt"
+        },
+        {
           "count": 3,
           "name": "Lightning Axe"
         },
         {
           "count": 4,
           "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
         },
         {
           "count": 1,
@@ -477,7 +636,11 @@
         },
         {
           "count": 1,
-          "name": "Prismari Command"
+          "name": "Prismari Charm"
+        },
+        {
+          "count": 1,
+          "name": "Brazen Borrower"
         },
         {
           "count": 1,
@@ -486,6 +649,14 @@
         {
           "count": 4,
           "name": "Riverglide Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Sleight of Hand"
+        },
+        {
+          "count": 4,
+          "name": "Steam Vents"
         },
         {
           "count": 1,
@@ -497,19 +668,7 @@
         },
         {
           "count": 4,
-          "name": "Opt"
-        },
-        {
-          "count": 1,
-          "name": "Prismari Charm"
-        },
-        {
-          "count": 4,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
+          "name": "Spirebluff Canal"
         }
       ],
       "sideboard": [
@@ -530,7 +689,7 @@
           "name": "Into the Flood Maw"
         },
         {
-          "count": 4,
+          "count": 3,
           "name": "Ledger Shredder"
         },
         {
@@ -542,159 +701,8 @@
           "name": "Redcap Melee"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Rending Volley"
-        }
-      ]
-    },
-    {
-      "name": "Izzet Prowess",
-      "author": "MTGGoldfish",
-      "colors": [
-        "R",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Academic Dispute"
-        },
-        {
-          "count": 3,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 3,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 4,
-          "name": "Emberheart Challenger"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 3,
-          "name": "Reckless Rage"
-        },
-        {
-          "count": 2,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 2,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Monastery Swiftspear"
-        },
-        {
-          "count": 4,
-          "name": "Soul-Scar Mage"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 4,
-          "name": "Stormchaser's Talent"
-        },
-        {
-          "count": 3,
-          "name": "Shivan Reef"
-        },
-        {
-          "count": 4,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 4,
-          "name": "Flow State"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 1,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 1,
-          "name": "Monstrous Rage"
-        },
-        {
-          "count": 2,
-          "name": "Screaming Nemesis"
-        },
-        {
-          "count": 3,
-          "name": "Riverpyre Verge"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 1,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 1,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 2,
-          "name": "Scorching Shot"
-        },
-        {
-          "count": 1,
-          "name": "Redcap Melee"
-        },
-        {
-          "count": 1,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 1,
-          "name": "Octopus Form"
-        },
-        {
-          "count": 1,
-          "name": "Redcap Melee"
-        },
-        {
-          "count": 1,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 1,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 1,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 1,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 1,
-          "name": "Quantum Riddler"
-        },
-        {
-          "count": 1,
-          "name": "Quantum Riddler"
         }
       ]
     },
@@ -838,6 +846,166 @@
       ]
     },
     {
+      "name": "Abzan Greasefang",
+      "author": "MTGGoldfish",
+      "colors": [
+        "W",
+        "G",
+        "B"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 1,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 3,
+          "name": "Darkbore Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Esika's Chariot"
+        },
+        {
+          "count": 4,
+          "name": "Concealed Courtyard"
+        },
+        {
+          "count": 4,
+          "name": "Greasefang, Okiba Boss"
+        },
+        {
+          "count": 4,
+          "name": "Parhelion II"
+        },
+        {
+          "count": 1,
+          "name": "Takenuma, Abandoned Mire"
+        },
+        {
+          "count": 3,
+          "name": "Blooming Marsh"
+        },
+        {
+          "count": 1,
+          "name": "Emptiness"
+        },
+        {
+          "count": 1,
+          "name": "Brushland"
+        },
+        {
+          "count": 2,
+          "name": "Bitter Triumph"
+        },
+        {
+          "count": 3,
+          "name": "Cache Grab"
+        },
+        {
+          "count": 4,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 1,
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 3,
+          "name": "Formidable Speaker"
+        },
+        {
+          "count": 1,
+          "name": "Lush Portico"
+        },
+        {
+          "count": 2,
+          "name": "Witherbloom Command"
+        },
+        {
+          "count": 2,
+          "name": "Overlord of the Balemurk"
+        },
+        {
+          "count": 1,
+          "name": "Voice of Victory"
+        },
+        {
+          "count": 1,
+          "name": "Starting Town"
+        },
+        {
+          "count": 2,
+          "name": "Thundering Broodwagon"
+        },
+        {
+          "count": 3,
+          "name": "Collective Brutality"
+        },
+        {
+          "count": 1,
+          "name": "Godless Shrine"
+        },
+        {
+          "count": 3,
+          "name": "Professor of Symbology"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Vanishing Verse"
+        },
+        {
+          "count": 1,
+          "name": "Ashiok, Dream Render"
+        },
+        {
+          "count": 2,
+          "name": "Duress"
+        },
+        {
+          "count": 2,
+          "name": "Unlicensed Hearse"
+        },
+        {
+          "count": 2,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 2,
+          "name": "Abrupt Decay"
+        },
+        {
+          "count": 2,
+          "name": "Professor Dellian Fel"
+        },
+        {
+          "count": 1,
+          "name": "Enter the Avatar State"
+        },
+        {
+          "count": 1,
+          "name": "Origin of Metalbending"
+        },
+        {
+          "count": 1,
+          "name": "Loran of the Third Path"
+        }
+      ]
+    },
+    {
       "name": "Orzhov Greasefang",
       "author": "MTGGoldfish",
       "colors": [
@@ -977,166 +1145,6 @@
         {
           "count": 2,
           "name": "Ral Zarek, Guest Lecturer"
-        }
-      ]
-    },
-    {
-      "name": "Abzan Greasefang",
-      "author": "MTGGoldfish",
-      "colors": [
-        "B",
-        "W",
-        "G"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 1,
-          "name": "Swamp"
-        },
-        {
-          "count": 1,
-          "name": "Brushland"
-        },
-        {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
-        },
-        {
-          "count": 3,
-          "name": "Blooming Marsh"
-        },
-        {
-          "count": 3,
-          "name": "Cache Grab"
-        },
-        {
-          "count": 3,
-          "name": "Collective Brutality"
-        },
-        {
-          "count": 4,
-          "name": "Concealed Courtyard"
-        },
-        {
-          "count": 3,
-          "name": "Darkbore Pathway"
-        },
-        {
-          "count": 1,
-          "name": "Emptiness"
-        },
-        {
-          "count": 4,
-          "name": "Esika's Chariot"
-        },
-        {
-          "count": 3,
-          "name": "Formidable Speaker"
-        },
-        {
-          "count": 1,
-          "name": "Godless Shrine"
-        },
-        {
-          "count": 4,
-          "name": "Greasefang, Okiba Boss"
-        },
-        {
-          "count": 1,
-          "name": "Lush Portico"
-        },
-        {
-          "count": 2,
-          "name": "Overlord of the Balemurk"
-        },
-        {
-          "count": 4,
-          "name": "Parhelion II"
-        },
-        {
-          "count": 1,
-          "name": "Plains"
-        },
-        {
-          "count": 3,
-          "name": "Professor of Symbology"
-        },
-        {
-          "count": 1,
-          "name": "Starting Town"
-        },
-        {
-          "count": 2,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 1,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 2,
-          "name": "Thundering Broodwagon"
-        },
-        {
-          "count": 1,
-          "name": "Voice of Victory"
-        },
-        {
-          "count": 2,
-          "name": "Witherbloom Command"
-        },
-        {
-          "count": 4,
-          "name": "Temple Garden"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 2,
-          "name": "Ashiok, Dream Render"
-        },
-        {
-          "count": 2,
-          "name": "Duress"
-        },
-        {
-          "count": 1,
-          "name": "Enter the Avatar State"
-        },
-        {
-          "count": 2,
-          "name": "Abrupt Decay"
-        },
-        {
-          "count": 1,
-          "name": "Loran of the Third Path"
-        },
-        {
-          "count": 1,
-          "name": "Origin of Metalbending"
-        },
-        {
-          "count": 1,
-          "name": "Unlicensed Hearse"
-        },
-        {
-          "count": 1,
-          "name": "Vanishing Verse"
-        },
-        {
-          "count": 2,
-          "name": "Professor Dellian Fel"
         }
       ]
     },
@@ -1298,84 +1306,24 @@
       "name": "Rakdos Midrange",
       "author": "MTGGoldfish",
       "colors": [
-        "R",
-        "B"
+        "B",
+        "R"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 2,
-          "name": "Mountain"
+          "count": 1,
+          "name": "Sulfurous Springs"
         },
         {
-          "count": 4,
-          "name": "Blackcleave Cliffs"
-        },
-        {
-          "count": 2,
+          "count": 3,
           "name": "Blazemire Verge"
         },
         {
-          "count": 4,
-          "name": "Blightstep Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Blood Crypt"
-        },
-        {
-          "count": 4,
-          "name": "Mutavault"
-        },
-        {
           "count": 3,
-          "name": "Swamp"
-        },
-        {
-          "count": 1,
-          "name": "Takenuma, Abandoned Mire"
-        },
-        {
-          "count": 1,
-          "name": "Urborg, Tomb of Yawgmoth"
-        },
-        {
-          "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
-        },
-        {
-          "count": 1,
-          "name": "Torch the Tower"
-        },
-        {
-          "count": 4,
           "name": "Fear of Missing Out"
-        },
-        {
-          "count": 4,
-          "name": "Bloodtithe Harvester"
-        },
-        {
-          "count": 1,
-          "name": "Liliana of the Veil"
-        },
-        {
-          "count": 2,
-          "name": "Graveyard Trespasser"
-        },
-        {
-          "count": 4,
-          "name": "Fable of the Mirror-Breaker"
-        },
-        {
-          "count": 3,
-          "name": "Sheoldred, the Apocalypse"
         },
         {
           "count": 4,
@@ -1383,45 +1331,121 @@
         },
         {
           "count": 1,
-          "name": "Invoke Despair"
+          "name": "Torch the Tower"
+        },
+        {
+          "count": 3,
+          "name": "Sheoldred, the Apocalypse"
+        },
+        {
+          "count": 1,
+          "name": "Takenuma, Abandoned Mire"
+        },
+        {
+          "count": 1,
+          "name": "Sokenzan, Crucible of Defiance"
+        },
+        {
+          "count": 4,
+          "name": "Fable of the Mirror-Breaker"
+        },
+        {
+          "count": 4,
+          "name": "Bloodtithe Harvester"
+        },
+        {
+          "count": 2,
+          "name": "Graveyard Trespasser"
+        },
+        {
+          "count": 4,
+          "name": "Blightstep Pathway"
+        },
+        {
+          "count": 1,
+          "name": "Abrade"
         },
         {
           "count": 2,
           "name": "Go for the Throat"
         },
         {
+          "count": 4,
+          "name": "Blood Crypt"
+        },
+        {
           "count": 1,
-          "name": "Multiversal Passage"
+          "name": "Urborg, Tomb of Yawgmoth"
+        },
+        {
+          "count": 4,
+          "name": "Mutavault"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 4,
+          "name": "Blackcleave Cliffs"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 1,
+          "name": "Duress"
+        },
+        {
+          "count": 1,
+          "name": "Kolaghan's Command"
+        },
+        {
+          "count": 1,
+          "name": "Kroxa, Titan of Death's Hunger"
+        },
+        {
+          "count": 2,
+          "name": "Swamp"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Petrified Hamlet"
-        },
-        {
-          "count": 3,
-          "name": "Duress"
-        },
-        {
-          "count": 4,
-          "name": "Leyline of the Void"
+          "name": "Pyroclasm"
         },
         {
           "count": 2,
+          "name": "Duress"
+        },
+        {
+          "count": 1,
           "name": "Damping Sphere"
         },
         {
           "count": 2,
-          "name": "Invoke Despair"
+          "name": "Ray of Enfeeblement"
         },
         {
-          "count": 1,
-          "name": "Go Blank"
+          "count": 3,
+          "name": "Invoke Despair"
         },
         {
           "count": 2,
           "name": "Hidetsugu Consumes All"
+        },
+        {
+          "count": 2,
+          "name": "Unlicensed Hearse"
+        },
+        {
+          "count": 1,
+          "name": "Gix's Command"
+        },
+        {
+          "count": 1,
+          "name": "Sheoldred's Edict"
         }
       ]
     }

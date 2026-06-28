@@ -791,6 +791,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceInZone { .. }
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::AdditionalCostPaid
+        | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => false,
     }
 }
@@ -917,6 +918,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceInZone { .. }
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::AdditionalCostPaid
+        | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => false,
     }
 }
@@ -1304,6 +1306,9 @@ fn evaluate_condition_with_context(
             .filter(|pc| pc.object_id == source_id)
             .map(|pc| pc.ability.context.additional_cost_paid)
             .unwrap_or(false),
+        // CR 702.34a: Cast-time variant gates are evaluated in
+        // `collect_self_spell_cost_modifiers`, not the layer pipeline.
+        StaticCondition::CastingAsVariant { .. } => false,
         StaticCondition::None => true,
         // CR 309.7: True when the controller has completed at least one dungeon.
         StaticCondition::CompletedADungeon => state
@@ -2848,6 +2853,15 @@ fn expand_granted_activated_abilities(
     let mut out = Vec::new();
     let mut provider_ids: Vec<ObjectId> = state.objects.keys().copied().collect();
     provider_ids.sort_unstable_by_key(|id| id.0);
+    // CR 109.5: the provider `source` filter resolves through a context built
+    // purely from the (constant) host id and the recipient's controller — the
+    // recipient id is NOT part of it. So the matching-provider set is identical
+    // for every recipient sharing a controller. Memoize it per controller so
+    // the O(recipients × objects) filter sweep collapses to O(controllers ×
+    // objects). The recipient-equality self-skip stays per-recipient at
+    // emission (CR 613.1f), keeping the emitted set byte-identical.
+    let mut providers_by_controller: std::collections::HashMap<PlayerId, Vec<ObjectId>> =
+        std::collections::HashMap::new();
     for &recipient_id in &state.battlefield {
         if !crate::game::filter::matches_target_filter(
             state,
@@ -2874,21 +2888,30 @@ fn expand_granted_activated_abilities(
         // (Agatha's Soul Cauldron grants creatures-you-control the abilities of
         // *its own* exiled creature cards) only the host id finds the exile
         // links while "you" still tracks the recipient's controller.
-        let provider_ctx = crate::game::filter::FilterContext::from_source_with_controller(
-            host_source_id,
-            recipient_controller,
-        );
+        let matching = providers_by_controller
+            .entry(recipient_controller)
+            .or_insert_with(|| {
+                let provider_ctx = crate::game::filter::FilterContext::from_source_with_controller(
+                    host_source_id,
+                    recipient_controller,
+                );
+                provider_ids
+                    .iter()
+                    .copied()
+                    .filter(|&provider_id| {
+                        crate::game::perf_counters::record_granted_ability_provider_scan();
+                        crate::game::filter::matches_target_filter(
+                            state,
+                            provider_id,
+                            source,
+                            &provider_ctx,
+                        )
+                    })
+                    .collect()
+            });
         let mut next_mod_index = 0usize;
-        for &provider_id in &provider_ids {
+        for &provider_id in matching.iter() {
             if provider_id == recipient_id {
-                continue;
-            }
-            if !crate::game::filter::matches_target_filter(
-                state,
-                provider_id,
-                source,
-                &provider_ctx,
-            ) {
                 continue;
             }
             let Some(provider) = state.objects.get(&provider_id) else {
@@ -6893,7 +6916,7 @@ mod tests {
             let qty = QuantityExpr::Ref {
                 qty: QuantityRef::ManaSymbolsInManaCost {
                     scope: crate::types::ability::ObjectScope::Recipient,
-                    color: ManaColor::White,
+                    color: Some(ManaColor::White),
                 },
             };
             obj.static_definitions.push(
@@ -9292,6 +9315,309 @@ mod tests {
         );
     }
 
+    /// CR 613.1f + CR 603.3: Runtime zone-filter regression for battlefield
+    /// source-set grants ("all creatures your opponents control"). The parser
+    /// encodes `InZone { Battlefield }` in the source filter; this test
+    /// proves `expand_granted_activated_abilities` honours it at runtime by
+    /// building `provider_ids` from ALL objects in `state.objects` and
+    /// relying on `matches_target_filter` to exclude off-battlefield objects.
+    ///
+    /// Discriminating: an identical provider creature in HAND must not donate
+    /// its activated abilities even though it appears in `state.objects`, while
+    /// the same creature ON THE BATTLEFIELD still does.
+    ///
+    /// Reverting `InZone { Battlefield }` from the parser arm (or removing it
+    /// from the source filter here) causes the hand-provider assertion to fail,
+    /// flipping the non-donation assertion. Replacing `state.objects.keys()` in
+    /// `expand_granted_activated_abilities` with a battlefield-only scan would
+    /// trivially make this green without the filter — but that would break the
+    /// graveyard provider arms (Necrotic Ooze / "all creature cards in all
+    /// graveyards") which scan off-battlefield zones deliberately.
+    #[test]
+    fn off_battlefield_provider_does_not_donate_activated_abilities() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr,
+        };
+
+        let mut state = setup();
+
+        // Host: a creature on the battlefield (player 0) carrying the
+        // "has all activated abilities of all creatures your opponents
+        // control" static, parsed end-to-end.
+        let host = make_creature(&mut state, "Drana and Linvala", 3, 4, PlayerId(0));
+        let parsed = parse_oracle_text(
+            "Drana and Linvala have all activated abilities of all creatures \
+             your opponents control.",
+            "Drana and Linvala",
+            &[],
+            &["Creature".into(), "Legendary".into()],
+            &[],
+        );
+        assert_eq!(
+            parsed.statics.len(),
+            1,
+            "grant-opponents-control clause parses to one static; got {:?}",
+            parsed.statics
+        );
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.static_definitions = parsed.statics.clone().into();
+        }
+
+        // Activated ability template: {T}: gain 3 life.
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+
+        // BATTLEFIELD provider: opponent creature on the battlefield —
+        // InZone { Battlefield } must match → ability IS donated to host.
+        let bf_provider = make_creature(&mut state, "Battlefield Beast", 2, 2, PlayerId(1));
+        Arc::make_mut(&mut state.objects.get_mut(&bf_provider).unwrap().abilities)
+            .push(ability.clone());
+
+        // HAND provider: identical opponent creature in hand —
+        // InZone { Battlefield } must NOT match → ability is NOT donated.
+        let hand_provider = create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(1),
+            "Hand Beast".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&hand_provider).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        Arc::make_mut(&mut state.objects.get_mut(&hand_provider).unwrap().abilities)
+            .push(ability.clone());
+
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+
+        let host_obj = state.objects.get(&host).unwrap();
+        assert!(
+            host_obj.abilities.iter().any(|a| a == &ability),
+            "host must gain the battlefield opponent creature's activated \
+             ability (InZone{{Battlefield}} matches); got {:?}",
+            host_obj.abilities
+        );
+        // The hand provider has the same ability; if InZone{Battlefield} is not
+        // enforced at runtime, the ability would appear twice in host_obj.abilities
+        // (once per provider). We assert exactly ONE grant was applied.
+        let grant_count = host_obj.abilities.iter().filter(|a| *a == &ability).count();
+        assert_eq!(
+            grant_count, 1,
+            "hand provider must NOT donate: expected 1 grant (from bf_provider), \
+             got {grant_count} (hand_provider donated a duplicate)"
+        );
+    }
+
+    /// CR 109.5 + CR 604.1: `expand_granted_activated_abilities` memoizes the
+    /// matching-provider set per recipient controller. With K recipients sharing
+    /// ONE controller, the provider filter sweep runs exactly once (M scans, one
+    /// per object), and every recipient still gains each provider's activated
+    /// ability. Reverting the per-controller cache restores the K×M sweep,
+    /// flipping the `granted_ability_provider_scans == M` assertion.
+    #[test]
+    fn granted_activated_abilities_scan_providers_once_per_controller() {
+        use crate::types::game_state::{ExileLink, ExileLinkKind};
+
+        let mut state = setup();
+
+        // Host cauldron-like artifact (NOT a creature, so not a recipient of its
+        // own grant) carrying "creatures you control have all activated abilities
+        // of all cards exiled with this".
+        let host = create_object(
+            &mut state,
+            CardId(800),
+            PlayerId(0),
+            "Soul Cauldron".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions = vec![StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                ))
+                .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                    source: TargetFilter::ExiledBySource,
+                }])]
+            .into();
+        }
+
+        // K=8 recipient creatures, all controlled by player 0.
+        let recipients: Vec<ObjectId> = (0..8)
+            .map(|i| make_creature(&mut state, &format!("Recipient {i}"), 1, 1, PlayerId(0)))
+            .collect();
+
+        // Two exiled provider cards, each carrying one distinct activated ability,
+        // both tracked by the host.
+        let mut provider_abilities = Vec::new();
+        for i in 0..2 {
+            let provider = create_object(
+                &mut state,
+                CardId(810 + i),
+                PlayerId(0),
+                format!("Exiled Source {i}"),
+                Zone::Exile,
+            );
+            let ability = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed {
+                        value: 2 + i as i32,
+                    },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Tap);
+            Arc::make_mut(&mut state.objects.get_mut(&provider).unwrap().abilities)
+                .push(ability.clone());
+            state.exile_links.push(ExileLink {
+                exiled_id: provider,
+                source_id: host,
+                kind: ExileLinkKind::TrackedBySource,
+            });
+            provider_abilities.push(ability);
+        }
+
+        let m = state.objects.len() as u64;
+        let affected = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        let source = TargetFilter::ExiledBySource;
+
+        // Single deterministic invocation of the seam so the per-pass scan count
+        // is unambiguous (evaluate_layers re-runs the expansion each pass; this
+        // isolates one pass). Single controller ⟹ exactly M provider scans.
+        crate::game::perf_counters::reset();
+        let effects = expand_granted_activated_abilities(&state, host, 1, &affected, &source);
+        let scans = crate::game::perf_counters::snapshot().granted_ability_provider_scans;
+        assert_eq!(
+            scans, m,
+            "single controller must scan the provider set exactly once (M objects)"
+        );
+        // 8 recipients × 2 provider abilities = 16 grant effects.
+        assert_eq!(
+            effects.len(),
+            16,
+            "every recipient gains both provider abilities"
+        );
+
+        // Behavioral equivalence through the production entry point.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        for &recipient in &recipients {
+            let obj = state.objects.get(&recipient).unwrap();
+            for ability in &provider_abilities {
+                assert!(
+                    obj.abilities.iter().any(|a| a == ability),
+                    "each recipient must gain every exiled provider's activated ability"
+                );
+            }
+        }
+    }
+
+    /// CR 109.5: the provider cache is keyed per controller, not over-collapsed.
+    /// Two recipients with DIFFERENT controllers force TWO full provider sweeps
+    /// (2×M scans), and each still receives the controller-independent
+    /// `ExiledBySource` provider abilities. Reverting the cache key to a single
+    /// shared entry would under-count to M.
+    #[test]
+    fn granted_activated_abilities_scan_per_distinct_controller() {
+        use crate::types::game_state::{ExileLink, ExileLinkKind};
+
+        let mut state = setup();
+
+        // Host grants to ALL creatures (no controller restriction) so recipients
+        // of either controller match the affected filter.
+        let host = create_object(
+            &mut state,
+            CardId(800),
+            PlayerId(0),
+            "Soul Cauldron".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&host).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions = vec![StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(TypedFilter::creature()))
+                .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
+                    source: TargetFilter::ExiledBySource,
+                }])]
+            .into();
+        }
+
+        // One recipient per controller.
+        let recipient_p0 = make_creature(&mut state, "Recipient P0", 1, 1, PlayerId(0));
+        let recipient_p1 = make_creature(&mut state, "Recipient P1", 1, 1, PlayerId(1));
+
+        let provider = create_object(
+            &mut state,
+            CardId(810),
+            PlayerId(0),
+            "Exiled Source".to_string(),
+            Zone::Exile,
+        );
+        let ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        Arc::make_mut(&mut state.objects.get_mut(&provider).unwrap().abilities)
+            .push(ability.clone());
+        state.exile_links.push(ExileLink {
+            exiled_id: provider,
+            source_id: host,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+
+        let m = state.objects.len() as u64;
+        let affected = TargetFilter::Typed(TypedFilter::creature());
+        let source = TargetFilter::ExiledBySource;
+
+        // Single deterministic invocation: two distinct recipient controllers ⟹
+        // two cache entries ⟹ two full provider sweeps (2×M scans).
+        crate::game::perf_counters::reset();
+        let effects = expand_granted_activated_abilities(&state, host, 1, &affected, &source);
+        let scans = crate::game::perf_counters::snapshot().granted_ability_provider_scans;
+        assert_eq!(
+            scans,
+            2 * m,
+            "two distinct controllers must each trigger one full provider sweep"
+        );
+        // 2 recipients × 1 provider ability = 2 grant effects.
+        assert_eq!(
+            effects.len(),
+            2,
+            "each controller's recipient gains the provider ability"
+        );
+
+        // Behavioral equivalence through the production entry point.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        for recipient in [recipient_p0, recipient_p1] {
+            let obj = state.objects.get(&recipient).unwrap();
+            assert!(
+                obj.abilities.iter().any(|a| a == &ability),
+                "each controller's recipient must gain the exiled provider's ability"
+            );
+        }
+    }
+
     #[test]
     fn emblem_static_applies_to_matching_creatures() {
         let mut state = setup();
@@ -11467,6 +11793,239 @@ mod tests {
         assert!(
             !bear_obj.has_keyword(&Keyword::Haste),
             "Without a Mountain, the compound condition fails and Haste is not granted"
+        );
+    }
+
+    /// Builds a Doctor Doom permanent on player 0's battlefield whose static
+    /// grants itself Indestructible while its controller controls an artifact
+    /// creature or a Plan — the exact typed condition the parser now lowers
+    /// ("you control an artifact creature or a Plan").
+    ///
+    /// CR 604.1 + CR 611.3a + CR 702.12b. The condition is the typed
+    /// `IsPresent { Or[ Typed{[Artifact,Creature],You,Battlefield},
+    /// Typed{[Plan],You,Battlefield} ] }` (see
+    /// `parser::oracle_nom::condition::tests::doctor_doom_disjunctive_control_condition_is_typed_not_unrecognized`).
+    fn doctor_doom_static() -> StaticDefinition {
+        use crate::types::keywords::Keyword;
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Indestructible,
+            }])
+            .condition(StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Artifact, TypeFilter::Creature],
+                            controller: Some(ControllerRef::You),
+                            properties: vec![FilterProp::InZone {
+                                zone: Zone::Battlefield,
+                            }],
+                        }),
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Subtype("Plan".to_string())],
+                            controller: Some(ControllerRef::You),
+                            properties: vec![FilterProp::InZone {
+                                zone: Zone::Battlefield,
+                            }],
+                        }),
+                    ],
+                }),
+            })
+    }
+
+    fn make_doctor_doom(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let doom = make_creature(state, "Doctor Doom", 4, 4, player);
+        let s = doctor_doom_static();
+        let obj = state.objects.get_mut(&doom).unwrap();
+        Arc::make_mut(&mut obj.base_static_definitions).push(s.clone());
+        obj.static_definitions.push(s);
+        doom
+    }
+
+    fn make_artifact_creature(state: &mut GameState, name: &str, player: PlayerId) -> ObjectId {
+        let id = make_creature(state, name, 1, 1, player);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types = obj.card_types.clone();
+        id
+    }
+
+    /// CR 205.3h: a permanent that is `Enchantment — Plan` (e.g. Doom Reigns
+    /// Supreme). "Plan" is an enchantment subtype, so the second disjunct
+    /// `Typed{[Subtype("Plan")], You, Battlefield}` matches it.
+    fn make_plan_enchantment(state: &mut GameState, name: &str, player: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(0),
+            player,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Plan".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        id
+    }
+
+    /// Arm A (positive): player 0 controls an artifact creature, so the typed
+    /// `IsPresent { Or[..] }` condition is true and Doctor Doom has
+    /// Indestructible. CR 611.3a (continuous re-evaluation) + CR 702.12b.
+    #[test]
+    fn doctor_doom_has_indestructible_with_artifact_creature() {
+        use crate::types::keywords::Keyword;
+        let mut state = setup();
+        let doom = make_doctor_doom(&mut state, PlayerId(0));
+        make_artifact_creature(&mut state, "Doombot", PlayerId(0));
+
+        evaluate_layers(&mut state);
+
+        assert!(
+            state
+                .objects
+                .get(&doom)
+                .unwrap()
+                .has_keyword(&Keyword::Indestructible),
+            "Doctor Doom must have Indestructible while you control an artifact creature"
+        );
+    }
+
+    /// Arm B (revert-probe / discriminating): player 0 controls NO artifact
+    /// creature and NO Plan, so the condition is false and Doctor Doom does NOT
+    /// have Indestructible. PRE-FIX the parser lowered this condition to
+    /// `Unrecognized`, which `evaluate_condition` treats as `true` — making the
+    /// grant always-on so this assertion would FAIL on revert.
+    #[test]
+    fn doctor_doom_no_indestructible_without_artifact_creature_or_plan() {
+        use crate::types::keywords::Keyword;
+        let mut state = setup();
+        let doom = make_doctor_doom(&mut state, PlayerId(0));
+        // A plain (non-artifact) creature must not satisfy the AND-of-types leg.
+        make_creature(&mut state, "Vanilla Bear", 2, 2, PlayerId(0));
+
+        evaluate_layers(&mut state);
+
+        assert!(
+            !state
+                .objects
+                .get(&doom)
+                .unwrap()
+                .has_keyword(&Keyword::Indestructible),
+            "Doctor Doom must NOT have Indestructible with no artifact creature/Plan you control"
+        );
+    }
+
+    /// Arm C (multi-authority / proves `ControllerRef::You`): the only artifact
+    /// creature is controlled by the OPPONENT (player 1), so the `You`-scoped
+    /// condition is false and Doctor Doom does NOT have Indestructible. A naive
+    /// global "is any artifact creature present" rescan would wrongly grant it.
+    /// CR 109.5 ("you" = the static's controller).
+    #[test]
+    fn doctor_doom_no_indestructible_when_opponent_controls_artifact_creature() {
+        use crate::types::keywords::Keyword;
+        let mut state = setup();
+        let doom = make_doctor_doom(&mut state, PlayerId(0));
+        make_artifact_creature(&mut state, "Enemy Doombot", PlayerId(1));
+
+        evaluate_layers(&mut state);
+
+        assert!(
+            !state
+                .objects
+                .get(&doom)
+                .unwrap()
+                .has_keyword(&Keyword::Indestructible),
+            "an opponent-controlled artifact creature must NOT satisfy the You-scoped condition"
+        );
+    }
+
+    /// Arm D (positive, Subtype("Plan") leg): player 0 controls an
+    /// `Enchantment — Plan` permanent and NO artifact creature, so the second
+    /// disjunct `Typed{[Subtype("Plan")], You, Battlefield}` is satisfied and
+    /// Doctor Doom has Indestructible. This exercises the RUNTIME half — the
+    /// layer-eval + filter-match against a hand-built `Subtype("Plan")`
+    /// condition and a hand-set `Enchantment — Plan` permanent. It does NOT
+    /// exercise the parser or `ENCHANTMENT_SUBTYPES`; the parser-side
+    /// discrimination ("a Plan" → `Subtype("Plan")`, not a CoreType axis) lives
+    /// in the parser tests (`parse_type_filter_word`,
+    /// `doctor_doom_disjunctive_control_condition_is_typed_not_unrecognized`)
+    /// and in the end-to-end test below. CR 205.3h.
+    #[test]
+    fn doctor_doom_has_indestructible_with_plan_enchantment() {
+        use crate::types::keywords::Keyword;
+        let mut state = setup();
+        let doom = make_doctor_doom(&mut state, PlayerId(0));
+        make_plan_enchantment(&mut state, "Doom Reigns Supreme", PlayerId(0));
+
+        evaluate_layers(&mut state);
+
+        assert!(
+            state
+                .objects
+                .get(&doom)
+                .unwrap()
+                .has_keyword(&Keyword::Indestructible),
+            "Doctor Doom must have Indestructible while you control a Plan (enchantment subtype)"
+        );
+    }
+
+    /// End-to-end (parser → layers), the true Plan-as-subtype revert probe:
+    /// Doctor Doom's printed indestructible line is PARSED (not hand-built), so
+    /// the second disjunct is produced by `parse_type_filter_word` consulting
+    /// `ENCHANTMENT_SUBTYPES`. With a real `Enchantment — Plan` permanent and no
+    /// artifact creature in play, `evaluate_layers` grants Indestructible only
+    /// if the parsed condition's "a Plan" disjunct lowered to
+    /// `Subtype("Plan")`. CR 205.3h + CR 604.1 + CR 702.12b.
+    ///
+    /// DISCRIMINATION: reverting the Plan-as-subtype rework makes the parser
+    /// produce the old `CoreType::Plan` axis (or drop "Plan" from
+    /// `ENCHANTMENT_SUBTYPES`), so the parsed disjunct no longer matches a
+    /// subtype-Plan enchantment, the condition is unsatisfied, and Doctor Doom
+    /// does NOT gain Indestructible — flipping this assertion.
+    #[test]
+    fn doctor_doom_indestructible_parsed_end_to_end_with_plan_enchantment() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::keywords::Keyword;
+        let mut state = setup();
+
+        // Doctor Doom carries the PARSER-PRODUCED indestructible static.
+        let doom = make_creature(&mut state, "Doctor Doom", 4, 4, PlayerId(0));
+        let parsed = parse_oracle_text(
+            "As long as you control an artifact creature or a Plan, \
+             Doctor Doom has indestructible.",
+            "Doctor Doom",
+            &[],
+            &["Creature".into()],
+            &[],
+        );
+        assert_eq!(
+            parsed.statics.len(),
+            1,
+            "the indestructible line parses to exactly one static; got {:?}",
+            parsed.statics
+        );
+        {
+            let obj = state.objects.get_mut(&doom).unwrap();
+            for s in parsed.statics.iter() {
+                Arc::make_mut(&mut obj.base_static_definitions).push(s.clone());
+                obj.static_definitions.push(s.clone());
+            }
+        }
+
+        // A real `Enchantment — Plan` permanent (no artifact creature), so only
+        // the Subtype("Plan") disjunct can satisfy the condition.
+        make_plan_enchantment(&mut state, "Doom Reigns Supreme", PlayerId(0));
+
+        evaluate_layers(&mut state);
+
+        assert!(
+            state
+                .objects
+                .get(&doom)
+                .unwrap()
+                .has_keyword(&Keyword::Indestructible),
+            "parsed condition's Subtype(\"Plan\") disjunct must match the Plan enchantment"
         );
     }
 

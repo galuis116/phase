@@ -1,6 +1,7 @@
 pub mod ability_utils;
 pub mod arithmetic;
 pub mod attractions;
+pub mod augment;
 pub mod bending;
 pub mod blitz;
 // Tests for `blitz` live in a sibling file (declared here, not in `blitz.rs`,
@@ -9,6 +10,7 @@ pub mod blitz;
 #[path = "blitz_tests.rs"]
 mod blitz_tests;
 pub mod bracket_estimate;
+pub mod card_subset;
 pub mod casting;
 pub(crate) mod casting_costs;
 pub(crate) mod casting_targets;
@@ -23,6 +25,10 @@ pub mod combat_damage;
 pub mod commander;
 pub mod companion;
 pub(crate) mod conditions;
+pub mod contraptions;
+#[cfg(test)]
+#[path = "contraptions_tests.rs"]
+mod contraptions_tests;
 pub mod cost_payability;
 pub(crate) mod costs;
 pub mod coverage;
@@ -73,9 +79,15 @@ pub mod meld;
 // Tests for `meld` live in a sibling file (declared here, not in `meld.rs`,
 // so `meld.rs` stays implementation-only).
 #[cfg(test)]
+#[path = "marksman_tests.rs"]
+mod marksman_tests;
+#[cfg(test)]
 #[path = "meld_tests.rs"]
 mod meld_tests;
 pub mod merge;
+#[cfg(test)]
+#[path = "omnath_tests.rs"]
+mod omnath_tests;
 // Tests for `merge` live in a sibling file (declared here, not in `merge.rs`,
 // so `merge.rs` stays implementation-only).
 pub mod archenemy;
@@ -98,6 +110,9 @@ pub mod perf_counters;
 #[cfg(test)]
 #[path = "archenemy_tests.rs"]
 mod archenemy_tests;
+#[cfg(test)]
+#[path = "augment_tests.rs"]
+mod augment_tests;
 pub mod phasing;
 pub mod planechase;
 // Tests for `planechase` live in a sibling file (declared here, not in
@@ -132,6 +147,7 @@ pub mod stickers;
 mod stickers_tests;
 pub mod targeting;
 pub mod token_presets;
+pub mod topology;
 pub mod transform;
 pub mod trigger_index;
 pub(crate) mod trigger_matchers;
@@ -156,8 +172,9 @@ pub use deck_loading::{
 pub use deck_validation::{
     can_pair_commanders, deck_copy_limit_for, evaluate_deck_compatibility,
     is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
-    validate_deck_for_format, validate_name_deck_for_format, CompatibilityCheck,
-    DeckCompatibilityRequest, DeckCompatibilityResult, DeckCoverage, UnsupportedCard,
+    validate_deck_for_format, validate_name_deck_for_format, validate_name_deck_for_format_full,
+    CompatibilityCheck, DeckCompatibilityRequest, DeckCompatibilityResult, DeckCoverage,
+    UnsupportedCard,
 };
 pub use engine::{
     apply, apply_as_current, new_game, start_game, start_game_skip_mulligan,

@@ -197,6 +197,151 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     parse_target_with_ctx(text, &mut ParseContext::default())
 }
 
+/// Parse a target noun phrase, additionally consuming an optional trailing
+/// heterogeneous relative-clause disjunction that the base grammar cannot fold
+/// into one typed filter — a card type ("that's an artifact") OR a mana-value
+/// bound ("that has mana value 3 or less"). Desdemona, Freedom's Edge: "target
+/// creature card in your graveyard that's an artifact or that has mana value 3
+/// or less".
+///
+/// CR 115.1 + CR 608.2c: a card type lives in `type_filters` and a mana-value
+/// bound lives in `properties` — both AND-combined within a single
+/// `TypedFilter` — so an "or" *between* the two layers cannot collapse into one
+/// `FilterProp::AnyOf`. Instead the disjunction distributes over the whole typed
+/// filter as `TargetFilter::Or`, one leg per disjunct: each leg is the base
+/// filter plus that disjunct's restriction. A lone (non-"or") relative clause
+/// collapses to a single restricted `TypedFilter`.
+///
+/// Returns the base filter and remainder unchanged when the base is not a single
+/// typed filter or no such relative clause follows — every existing call shape
+/// is preserved.
+pub(crate) fn parse_target_with_disjunctive_restriction(text: &str) -> (TargetFilter, &str) {
+    let (base, rest) = parse_target(text);
+    let TargetFilter::Typed(base_typed) = &base else {
+        return (base, rest);
+    };
+    // The relative clause is case-insensitive; lowercasing is byte-length
+    // preserving for the ASCII relative-clause grammar, so `consumed` maps
+    // directly back onto `rest`.
+    let rest_lower = rest.to_lowercase();
+    let Some((restrictions, consumed)) = parse_disjunctive_relative_restriction(&rest_lower) else {
+        return (base, rest);
+    };
+    let filter = if restrictions.len() == 1 {
+        TargetFilter::Typed(restrictions[0].apply(base_typed))
+    } else {
+        TargetFilter::Or {
+            filters: restrictions
+                .iter()
+                .map(|r| TargetFilter::Typed(r.apply(base_typed)))
+                .collect(),
+        }
+    };
+    (filter, &rest[consumed..])
+}
+
+/// One disjunct of a heterogeneous relative-clause restriction (see
+/// `parse_target_with_disjunctive_restriction`).
+#[derive(Debug, Clone)]
+enum DisjunctRestriction {
+    /// "that's an artifact" — an additional card type AND-merged into the leg's
+    /// `type_filters`.
+    CardType(TypeFilter),
+    /// "that has mana value 3 or less" — a `FilterProp::Cmc` bound AND-merged
+    /// into the leg's `properties` (CR 202.3).
+    ManaValue {
+        comparator: Comparator,
+        value: QuantityExpr,
+    },
+}
+
+impl DisjunctRestriction {
+    /// Build a leg by cloning the base typed filter and applying this disjunct's
+    /// restriction at its native layer (type vs property).
+    fn apply(&self, base: &TypedFilter) -> TypedFilter {
+        let mut leg = base.clone();
+        match self {
+            DisjunctRestriction::CardType(tf) => leg.type_filters.push(tf.clone()),
+            DisjunctRestriction::ManaValue { comparator, value } => {
+                leg.properties.push(FilterProp::Cmc {
+                    comparator: *comparator,
+                    value: value.clone(),
+                });
+            }
+        }
+        leg
+    }
+}
+
+/// Parse `that('s|is|has|have) <disjunct> [ or that(...) <disjunct> ]*` from
+/// already-lowercased text, returning the disjuncts and the bytes consumed
+/// (including any leading whitespace). Returns `None` when the text does not
+/// open a recognized relative-clause disjunct.
+fn parse_disjunctive_relative_restriction(
+    input: &str,
+) -> Option<(Vec<DisjunctRestriction>, usize)> {
+    let trimmed = input.trim_start();
+    let leading_ws = input.len() - trimmed.len();
+    let (mut remaining, first) = parse_disjunct_restriction(trimmed).ok()?;
+    let mut restrictions = vec![first];
+    while let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>(" or ").parse(remaining) {
+        match parse_disjunct_restriction(after_or) {
+            Ok((rest, next)) => {
+                restrictions.push(next);
+                remaining = rest;
+            }
+            // A non-relative-clause "or" (e.g. "or a Goblin you control") ends
+            // the disjunction; leave it for the caller to reject as leftover.
+            Err(_) => break,
+        }
+    }
+    Some((restrictions, leading_ws + (trimmed.len() - remaining.len())))
+}
+
+/// Parse a single "that('s|is|has|have) <card type | mana value bound>" disjunct.
+fn parse_disjunct_restriction(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, DisjunctRestriction> {
+    let (after_intro, _) = alt((
+        tag::<_, _, OracleError<'_>>("that's "),
+        tag("that is "),
+        tag("that has "),
+        tag("that have "),
+    ))
+    .parse(input)?;
+    alt((parse_disjunct_card_type, parse_disjunct_mana_value)).parse(after_intro)
+}
+
+/// "an artifact" / "a creature" → a card-type restriction.
+fn parse_disjunct_card_type(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, DisjunctRestriction> {
+    let (after_article, _) = alt((tag::<_, _, OracleError<'_>>("an "), tag("a "))).parse(input)?;
+    let (rest, tf) = nom_target::parse_type_filter_word(after_article)?;
+    Ok((rest, DisjunctRestriction::CardType(tf)))
+}
+
+/// "mana value 3 or less" / "mana value 5 or greater" → a `Cmc` bound (CR 202.3).
+fn parse_disjunct_mana_value(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, DisjunctRestriction> {
+    let (after_mv, _) = tag::<_, _, OracleError<'_>>("mana value ").parse(input)?;
+    let (after_num, mv) = nom_quantity::parse_quantity_expr_number(after_mv)?;
+    let after_num = after_num.trim_start();
+    let (rest, comparator) = alt((
+        value(Comparator::LE, tag::<_, _, OracleError<'_>>("or less")),
+        value(Comparator::GE, tag("or greater")),
+    ))
+    .parse(after_num)?;
+    Ok((
+        rest,
+        DisjunctRestriction::ManaValue {
+            comparator,
+            value: mv,
+        },
+    ))
+}
+
 /// Context-aware variant of `parse_target`. TargetFallback diagnostics are
 /// accumulated on `ctx.diagnostics` instead of being silently lost.
 ///
@@ -2263,6 +2408,20 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += remaining_offset + of_chosen_len;
     }
 
+    // CR 115.2: A spell or ability may target an object in a zone other than
+    // the battlefield only when it specifies that zone, so the trailing zone
+    // phrase must be parsed onto the target filter. Zone phrases may trail "of
+    // the chosen type" ("target creature card of the chosen type from your
+    // graveyard", From the Rubble). The primary `parse_zone_suffix` arm above
+    // runs before this suffix.
+    if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
+        properties.extend(zone_props);
+        pos += consumed;
+        if controller.is_none() {
+            controller = zone_ctrl;
+        }
+    }
+
     let mut exclude_chosen_type = false;
     let mut exclude_owned_by_controller: Option<ControllerRef> = None;
     let remaining_not_owned = lower[pos..].trim_start();
@@ -3347,9 +3506,25 @@ fn parse_combat_relation_suffix(text: &str) -> Option<(FilterProp, usize)> {
 /// then verifies a trailing space exists (color as adjective, not standalone).
 fn parse_color_prefix(text: &str) -> Option<(FilterProp, usize)> {
     let (rest, color) = nom_primitives::parse_color(text).ok()?;
-    // Must be followed by a space (color adjective prefix, not standalone color word).
-    let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
-    let consumed = text.len() - rest.len();
+    // CR 105.1: A color word is an adjective prefix only when a separator
+    // follows, so a bare color word ("whiteness") never matches. Two separators
+    // are accepted:
+    //   * a trailing space — the ordinary "white creature" prefix (consumed);
+    //   * a comma — the color-list continuation "white, blue, or black
+    //     creature", where the comma is left in place for the `TYPE_SEPARATORS`
+    //     recursion to consume as a ", " / ", or " disjunction separator. That
+    //     recursion + `distribute_core_type_to_or` then assemble the ≥3-color
+    //     prenominal chain into the same Or-of-legs shape the 2-color "green or
+    //     white creature" form already produces, with the core type backfilled
+    //     onto every color-only leg.
+    let consumed = if let Ok((after_space, _)) = tag::<_, _, OracleError<'_>>(" ").parse(rest) {
+        text.len() - after_space.len()
+    } else if peek(tag::<_, _, OracleError<'_>>(",")).parse(rest).is_ok() {
+        // Comma left in place for the `TYPE_SEPARATORS` recursion to consume.
+        text.len() - rest.len()
+    } else {
+        return None;
+    };
     Some((FilterProp::HasColor { color }, consumed))
 }
 
@@ -3591,6 +3766,11 @@ fn superlative_property_filter_prop(
             comparator: Comparator::EQ,
             value,
         },
+        // ManaSymbolCount is a zone-aggregated chroma property (`QuantityRef::
+        // Aggregate`), never a per-object superlative comparison filter.
+        ObjectProperty::ManaSymbolCount(_) => unreachable!(
+            "ManaSymbolCount is aggregated via QuantityRef::Aggregate, not a superlative filter"
+        ),
     }
 }
 
@@ -4401,7 +4581,7 @@ fn parse_keyword_suffix(text: &str) -> Option<(KeywordSuffix, usize)> {
 /// Parse "without [keyword]" suffix — negated keyword filter.
 /// Handles "without flying", "without first strike", etc.
 /// Parallels `parse_keyword_suffix` but emits `WithoutKeyword`.
-fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
+pub(crate) fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
     let (after_without, _) = tag::<_, _, OracleError<'_>>("without ")
@@ -9875,16 +10055,61 @@ mod tests {
     }
 
     #[test]
+    fn or_color_disjunction_three_colors_backfills_core_type() {
+        // ≥3-color prenominal disjunction class: "target white, blue, or black
+        // creature". Unlike the 2-color "green or white creature" form (which the
+        // bare " or " `TYPE_SEPARATORS` arm assembles), the inner legs here are
+        // comma-separated bare color words ("blue,"). `parse_color_prefix` now
+        // accepts a color followed by a comma, so the leading color is consumed
+        // and the ", " / ", or " separators drive the same recursion; the
+        // [Any]-typed color-only legs are then backfilled to [Creature] by
+        // `distribute_core_type_to_or`. This pins the full parse pipeline (the
+        // surface assembly the distributor-only test below cannot reach).
+        let (f, rest) = parse_target("target white, blue, or black creature");
+        assert_eq!(rest.trim(), "");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(filters.len(), 3, "expected 3-way OR, got {filters:#?}");
+        // Every leg must carry exactly [Creature] (the white/blue legs were [Any]).
+        for (i, leg) in filters.iter().enumerate() {
+            let tf = typed_leg(leg).unwrap_or_else(|| panic!("leg {i} not Typed: {leg:?}"));
+            assert_eq!(
+                tf.type_filters,
+                vec![TypeFilter::Creature],
+                "leg {i} must be [Creature], got {:?}",
+                tf.type_filters
+            );
+        }
+        assert_eq!(
+            leg_color(&filters[0]),
+            Some(ManaColor::White),
+            "leg 0 = white"
+        );
+        assert_eq!(
+            leg_color(&filters[1]),
+            Some(ManaColor::Blue),
+            "leg 1 = blue"
+        );
+        assert_eq!(
+            leg_color(&filters[2]),
+            Some(ManaColor::Black),
+            "leg 2 = black"
+        );
+    }
+
+    #[test]
     fn distribute_core_type_to_or_backfills_every_flat_any_leg() {
         // Building-block test: `merge_or_filters` flattens nested `Or`s, so a
         // ≥3-disjunct list arrives at `distribute_core_type_to_or` as flat
         // siblings. Drive the distributor directly with a flat 3-leg Or in which
         // two legs are the deferred-type `[Any]` shape (color-only) and the last
         // carries the concrete `[Creature]`. EVERY `[Any]` leg must inherit
-        // `[Creature]`; the type-bearing leg is untouched. (The surface parser
-        // does not yet assemble a ≥3 color-only disjunction — comma/no-comma color
-        // chains are a separate gap — so we pin the distributor at its own seam,
-        // which is exactly the level `merge_or_filters` feeds.)
+        // `[Creature]`; the type-bearing leg is untouched. The surface parser now
+        // assembles ≥3-color prenominal chains (see
+        // `or_color_disjunction_three_colors_backfills_core_type`); this test pins
+        // the distributor at its own seam — exactly the level `merge_or_filters`
+        // feeds — independent of the surface grammar.
         let any_leg = |color: ManaColor| {
             TargetFilter::Typed(TypedFilter {
                 type_filters: vec![TypeFilter::Any],
@@ -13351,5 +13576,64 @@ mod tests {
         );
         assert_eq!(tf.controller, Some(ControllerRef::You));
         assert!(tf.properties.contains(&FilterProp::Another));
+    }
+
+    /// CR 205.3h: `parse_type_phrase` parses "a Plan" — "Plan" is an enchantment
+    /// subtype (Marvel's Spider-Man) — to `Typed{[Subtype("Plan")]}`, fully
+    /// consumed. The elided-verb "or" disjunction ("you control an artifact
+    /// creature or a Plan") is assembled one level up in `parse_you_control_a`,
+    /// so `parse_type_phrase` itself stops at the first segment and leaves the
+    /// connector as remainder (asserted below).
+    #[test]
+    fn parse_type_phrase_recognizes_plan() {
+        let (f, rest) = parse_type_phrase("a Plan");
+        assert!(rest.trim().is_empty(), "remainder must be empty: {rest:?}");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected single Typed filter, got {f:?}");
+        };
+        assert_eq!(
+            tf.type_filters,
+            vec![TypeFilter::Subtype("Plan".to_string())]
+        );
+    }
+
+    /// `parse_type_phrase` does NOT swallow an article-led "or" RHS — it stops at
+    /// the first segment and leaves " or a Plan" as remainder. This is the
+    /// load-bearing precondition for the `parse_you_control_a` elided-verb loop:
+    /// the connector must survive so the condition layer can fold the disjuncts.
+    #[test]
+    fn parse_type_phrase_leaves_article_led_or_rhs_as_remainder() {
+        let (f, rest) = parse_type_phrase("an artifact creature or a Plan");
+        assert_eq!(rest, " or a Plan", "article-led or RHS must remain");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected single Typed filter, got {f:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    }
+
+    /// Regression: a single article-led conjunction with no connector still
+    /// parses to a single Typed filter (not an Or).
+    #[test]
+    fn single_artifact_creature_still_typed_not_or() {
+        let (f, rest) = parse_type_phrase("an artifact creature");
+        assert!(rest.trim().is_empty(), "remainder must be empty: {rest:?}");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected single Typed filter, got {f:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    }
+
+    /// Regression: a bare (no-article) connector RHS still parses to an Or via
+    /// the existing non-comma separator branch (unchanged by this work).
+    #[test]
+    fn bare_connector_rhs_still_or() {
+        let (f, rest) = parse_type_phrase("artifact creature or enchantment");
+        assert!(rest.trim().is_empty(), "remainder must be empty: {rest:?}");
+        assert!(
+            matches!(f, TargetFilter::Or { .. }),
+            "expected Or filter, got {f:?}"
+        );
     }
 }

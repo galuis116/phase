@@ -172,6 +172,8 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::Saddled { .. }
         // CR 702.140c + CR 730.2: a mutating creature spell merged with a permanent.
         | GameEvent::Mutated { .. }
+        // Unstable Host/Augment: a card with augment combined with a Host creature.
+        | GameEvent::Augmented { .. }
         | GameEvent::BecomesPlotted { .. } => LogCategory::State,
 
         GameEvent::SpeedChanged { .. } => LogCategory::Special,
@@ -215,9 +217,11 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::SchemeAbandoned { .. }
         | GameEvent::InitiativeTaken { .. }
         | GameEvent::AttractionOpened { .. }
+        | GameEvent::ContraptionAssembled { .. }
         | GameEvent::StickerPlaced { .. }
         | GameEvent::AttractionsRolledToVisit { .. }
         | GameEvent::AttractionVisited { .. }
+        | GameEvent::ContraptionCranked { .. }
         | GameEvent::Specialized { .. }
         | GameEvent::Clash { .. }
         | GameEvent::VoteCast { .. }
@@ -321,6 +325,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 AbilityTag::PowerUp => " activates power-up: ",
                 // CR 702.6a: Equip activation.
                 AbilityTag::Equip => " activates equip: ",
+                AbilityTag::Augment => " activates augment: ",
             };
             vec![
                 player_seg(state, *player_id),
@@ -704,6 +709,16 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             card_seg(state, *merged_id),
         ],
 
+        GameEvent::Augmented {
+            merged_id,
+            augmenting_id,
+            ..
+        } => vec![
+            card_seg(state, *augmenting_id),
+            text(" augments "),
+            card_seg(state, *merged_id),
+        ],
+
         GameEvent::TurnedFaceUp { object_id } => {
             vec![card_seg(state, *object_id), text(" is turned face up")]
         }
@@ -1082,6 +1097,16 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::AttractionOpened { object_id, .. } => {
             vec![text("Opened Attraction "), card_seg(state, *object_id)]
         }
+        GameEvent::ContraptionAssembled {
+            object_id,
+            sprocket,
+            ..
+        } => vec![
+            text("Assembled Contraption "),
+            card_seg(state, *object_id),
+            text(" onto sprocket "),
+            text(&sprocket.to_string()),
+        ],
         GameEvent::StickerPlaced {
             object_id, kind, ..
         } => vec![
@@ -1110,6 +1135,16 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 text(")"),
             ]
         }
+        GameEvent::ContraptionCranked {
+            contraption_id,
+            sprocket,
+            ..
+        } => vec![
+            text("Cranked Contraption "),
+            card_seg(state, *contraption_id),
+            text(" on sprocket "),
+            text(&sprocket.to_string()),
+        ],
         GameEvent::Clash { .. } => vec![text("Clash")],
         GameEvent::VoteCast { voter, choice, .. } => {
             vec![player_seg(state, *voter), text(" voted "), text(choice)]

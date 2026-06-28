@@ -11,7 +11,7 @@ use crate::parser::oracle_nom::error::OracleResult;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
     AbilityKind, AbilityTag, Comparator, Effect, LinkedExileScope, ManaContribution,
-    ManaProduction, ManaSpendRestriction, QuantityExpr, QuantityRef,
+    ManaProduction, ManaSpendRestriction, ObjectScope, QuantityExpr, QuantityRef,
 };
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{
@@ -140,6 +140,24 @@ fn strip_mana_subject_prefix(text: &str) -> Option<(TargetFilter, &str)> {
         )
         .parse(i)
     })
+}
+
+/// CR 202.2c: Recognize the dynamic-color tail of an "any combination of …"
+/// mana clause that refers to a scoped object's colors ("its colors" / "that
+/// card's colors" — Omnath, Locus of All). Maps to `ObjectScope::Target` so the
+/// runtime resolver surveys the bound object's colors at resolution time. Unlike
+/// the static `parse_mana_color_set` path, the color set here is computed
+/// dynamically (CR 106.1 + CR 106.5).
+fn parse_object_colors_scope(text: &str) -> Option<ObjectScope> {
+    let lower = text.trim().trim_end_matches('.').to_lowercase();
+    let mut parser = all_consuming(value(
+        ObjectScope::Target,
+        alt((
+            tag::<_, _, OracleError<'_>>("its colors"),
+            tag("that card's colors"),
+        )),
+    ));
+    parser.parse(lower.as_str()).ok().map(|(_, scope)| scope)
 }
 
 pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
@@ -574,6 +592,19 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
             value((), tag("mana in any combination of ")).parse(i)
         }) {
             let color_set_text = after_combo.trim();
+            // CR 106.1 + CR 202.2c: "...of its colors" / "...of that card's colors"
+            // produces mana freely chosen among a scoped object's colors, resolved
+            // dynamically at resolution time (Omnath, Locus of All). Dispatch this
+            // dynamic-color branch BEFORE the static brace-only color-set path.
+            if let Some(scope) = parse_object_colors_scope(color_set_text) {
+                return Some(Effect::Mana {
+                    produced: ManaProduction::AnyCombinationOfObjectColors { count, scope },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: where_x_target,
+                });
+            }
             if let Some(color_options) = parse_mana_color_set(color_set_text) {
                 return Some(Effect::Mana {
                     produced: ManaProduction::AnyCombination {
@@ -1531,6 +1562,18 @@ pub(crate) fn parse_mana_spend_restriction(
         }
     }
 
+    // CR 116.2b + CR 702.37e + CR 116.2m + CR 709.5e: Special-action-only spend
+    // restriction with no "to cast " head ("to turn permanents face up",
+    // "to unlock doors"). The "to cast " strip below would reject these, so try
+    // the standalone special-action clauses first (Overgrown Zealot's second
+    // ability is turn-face-up-only). The clause parsers tolerate the leading "to ".
+    if let Some(restriction) = parse_turn_face_up_clause(base, &base_lower) {
+        return Some((restriction, vec![]));
+    }
+    if let Some(restriction) = parse_unlock_door_clause(base, &base_lower) {
+        return Some((restriction, vec![]));
+    }
+
     let (_, rest) = nom_on_lower(base, &base_lower, |i| value((), tag("to cast ")).parse(i))?;
     let rest = rest.trim();
 
@@ -1617,6 +1660,13 @@ fn parse_single_cast_clause(rest: &str) -> Option<ManaSpendRestriction> {
         }));
     }
 
+    // CR 708.4: "face-down spells" — gated on the spell's face-down status.
+    // Checked before the type-phrase fallback so "face-down" is not lowered to a
+    // `SpellType("Face-down")` reading.
+    if let Some(restriction) = parse_face_down_spell_clause(rest, &rest_lower) {
+        return Some(restriction);
+    }
+
     // CR 106.6: Check for an "or activate …" ability-activation suffix. If
     // present, emit a combined SpellTypeOrAbilityActivation restriction whose
     // `ability` scope is `OfSpellType` (typed suffix) or `Any` (generic suffix).
@@ -1690,6 +1740,57 @@ fn parse_unlock_door_clause(clause: &str, clause_lower: &str) -> Option<ManaSpen
     .map(|(restriction, _)| restriction)
 }
 
+/// CR 106.6 + CR 116.2b + CR 702.37e: Recognize the non-cast "turn [a ]
+/// permanent[s]/creature[s] face up" special-action clause of a spend
+/// restriction (Overgrown Zealot: "turn permanents face up"; Tin Street Gossip:
+/// "turn creatures face up"). Tolerates an optional leading "to " (a trailing
+/// split clause may keep it) and the singular-article / subject-noun forms,
+/// composed as independent `alt` axes rather than full-string permutations.
+/// Returns the `TurnPermanentFaceUp` leaf. Pure combinator — no string dispatch.
+fn parse_turn_face_up_clause(clause: &str, clause_lower: &str) -> Option<ManaSpendRestriction> {
+    nom_on_lower(clause, clause_lower, |i| {
+        let (i, _) = opt(tag("to ")).parse(i)?;
+        let (i, _) = tag("turn ").parse(i)?;
+        let (i, _) = opt(alt((tag("a "), tag("an ")))).parse(i)?;
+        // CR 116.2b names creatures; cards generalize to "permanents". Accept the
+        // subject noun (singular or plural) as one axis.
+        let (i, _) = alt((
+            tag("permanents"),
+            tag("permanent"),
+            tag("creatures"),
+            tag("creature"),
+        ))
+        .parse(i)?;
+        value(
+            ManaSpendRestriction::TurnPermanentFaceUp,
+            all_consuming(tag(" face up")),
+        )
+        .parse(i)
+    })
+    .map(|(restriction, _)| restriction)
+}
+
+/// CR 106.6 + CR 708.4: Recognize the "[cast ][a ]face-down spell[s]" cast
+/// clause of a spend restriction (Tin Street Gossip: "cast face-down spells").
+/// Tolerates a leading "to cast "/"cast " (the disjunction split may leave it),
+/// an optional article, and singular/plural spell forms, plus the hyphenated and
+/// spaced "face-down"/"face down" Oracle variants. Returns the `FaceDownSpell`
+/// leaf. Must run before the generic type-phrase fallback so "face-down" is not
+/// mis-parsed as a spell type. Pure combinator — no string dispatch.
+fn parse_face_down_spell_clause(clause: &str, clause_lower: &str) -> Option<ManaSpendRestriction> {
+    nom_on_lower(clause, clause_lower, |i| {
+        let (i, _) = opt(alt((tag("to cast "), tag("cast ")))).parse(i)?;
+        let (i, _) = opt(alt((tag("a "), tag("an ")))).parse(i)?;
+        let (i, _) = alt((tag("face-down"), tag("face down"))).parse(i)?;
+        value(
+            ManaSpendRestriction::FaceDownSpell,
+            all_consuming(alt((tag(" spells"), tag(" spell")))),
+        )
+        .parse(i)
+    })
+    .map(|(restriction, _)| restriction)
+}
+
 fn parse_disjunctive_clause(clause: &str) -> Option<ManaSpendRestriction> {
     let clause = clause.trim();
     let clause_lower = clause.to_lowercase();
@@ -1698,6 +1799,18 @@ fn parse_disjunctive_clause(clause: &str) -> Option<ManaSpendRestriction> {
     // before the cast/activate arms so "unlock doors" isn't mistaken for a cast
     // clause (it has no " spell" terminator and would otherwise fail to parse).
     if let Some(restriction) = parse_unlock_door_clause(clause, &clause_lower) {
+        return Some(restriction);
+    }
+
+    // CR 116.2b + CR 702.37e: Non-cast turn-face-up special-action clause — tried
+    // before the cast/activate arms for the same reason as the door clause.
+    if let Some(restriction) = parse_turn_face_up_clause(clause, &clause_lower) {
+        return Some(restriction);
+    }
+
+    // CR 708.4: Face-down cast clause — tried before the generic type-phrase
+    // fallback so "face-down spells" isn't lowered to `SpellType("Face-down")`.
+    if let Some(restriction) = parse_face_down_spell_clause(clause, &clause_lower) {
         return Some(restriction);
     }
 
@@ -2483,6 +2596,42 @@ mod tests {
             }) => Some(options),
             _ => None,
         }
+    }
+
+    /// CR 106.1 + CR 202.2c: Omnath, Locus of All — "add three mana in any
+    /// combination of its colors" lowers to the dynamic-color
+    /// `AnyCombinationOfObjectColors { scope: Target }`, NOT the static
+    /// `AnyCombination`. The "its colors" dispatch must beat the brace-only
+    /// `parse_mana_color_set` path. "that card's colors" is the sibling phrasing.
+    #[test]
+    fn add_mana_in_any_combination_of_its_colors_is_dynamic() {
+        for oracle in [
+            "Add three mana in any combination of its colors",
+            "Add three mana in any combination of that card's colors",
+        ] {
+            let effect = try_parse_add_mana_effect(oracle)
+                .unwrap_or_else(|| panic!("{oracle:?} must parse as a mana effect"));
+            let Effect::Mana { produced, .. } = effect else {
+                panic!("expected Effect::Mana for {oracle:?}");
+            };
+            let ManaProduction::AnyCombinationOfObjectColors { count, scope } = produced else {
+                panic!("expected AnyCombinationOfObjectColors for {oracle:?}, got {produced:?}");
+            };
+            assert_eq!(count, QuantityExpr::Fixed { value: 3 });
+            assert_eq!(scope, ObjectScope::Target);
+        }
+
+        // The static brace form is unchanged (not captured by the dynamic branch).
+        let effect =
+            try_parse_add_mana_effect("Add three mana in any combination of {W}, {U}, or {B}")
+                .expect("static color-set form must still parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana");
+        };
+        assert!(
+            matches!(produced, ManaProduction::AnyCombination { .. }),
+            "brace color-set must stay static AnyCombination, got {produced:?}"
+        );
     }
 
     /// CR 603.7c + CR 106.3: Roxanne, Starfall Savant — the mana-echo anaphor
@@ -3635,22 +3784,26 @@ mod tests {
         );
     }
 
-    // HONEST-DEFER GUARD: the four batch-7 members whose disjunction contains a
-    // non-cast leaf with no restriction-aware payment seam (turn-face-up,
-    // activate-equip) must NOT produce a partial `Any` that silently drops the
-    // unenforceable leaf — a partial disjunction would over-restrict the mana
-    // (it could no longer pay the legal non-cast action). They stay an honest
-    // gap (None) until the underlying special-action payment seams exist.
+    // CR 106.6 + CR 708.4 + CR 116.2b + CR 702.37e + CR 116.2m + CR 709.5e: the
+    // face-down-cast and turn-face-up action-classes are now representable, so
+    // these cards lower to a COMPLETE `Any` (no leaf is dropped — the mana is
+    // never over-restricted). The turn-face-up runtime leaf is conservatively
+    // unsatisfiable until its morph-cost payment seam exists (honest-deferred at
+    // the runtime layer, not the parser layer); the door-unlock and
+    // enchantment-cast leaves are fully live.
     #[test]
-    fn mana_spend_restriction_unenforceable_noncast_leaves_stay_gap() {
-        // Creeping Peeper: enchantment-spell, unlock-door, turn-face-up. The
-        // turn-face-up leaf is unenforceable, so the whole thing is deferred.
+    fn mana_spend_restriction_noncast_action_class_leaves_parse_completely() {
+        // Creeping Peeper: enchantment-spell, unlock-door, turn-face-up.
         assert_eq!(
             parse_mana_spend_restriction(
                 "spend this mana only to cast an enchantment spell, unlock a door, or turn a permanent face up",
             )
             .map(|(r, _)| r),
-            None,
+            Some(ManaSpendRestriction::Any(vec![
+                ManaSpendRestriction::SpellType("Enchantment".to_string()),
+                ManaSpendRestriction::UnlockDoor,
+                ManaSpendRestriction::TurnPermanentFaceUp,
+            ])),
         );
         // Tin Street Gossip: face-down spells or turn creatures face up.
         assert_eq!(
@@ -3658,13 +3811,16 @@ mod tests {
                 "spend this mana only to cast face-down spells or to turn creatures face up",
             )
             .map(|(r, _)| r),
-            None,
+            Some(ManaSpendRestriction::Any(vec![
+                ManaSpendRestriction::FaceDownSpell,
+                ManaSpendRestriction::TurnPermanentFaceUp,
+            ])),
         );
         // Overgrown Zealot: pure turn-permanents-face-up (no cast clause at all).
         assert_eq!(
             parse_mana_spend_restriction("spend this mana only to turn permanents face up")
                 .map(|(r, _)| r),
-            None,
+            Some(ManaSpendRestriction::TurnPermanentFaceUp),
         );
     }
 

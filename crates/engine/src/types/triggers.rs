@@ -158,7 +158,7 @@ pub enum TriggerEventKey {
     DiscoverResolved,
     /// CR 701.46a: An adapt resolution.
     AdaptResolved,
-    /// CR 701.50b: A permanent connived (the connive process — draw, discard,
+    /// CR 701.50f: A permanent connived (the connive process — draw, discard,
     /// maybe +1/+1 — completed).
     ConniveResolved,
     /// CR 701.43d: A creature was exerted.
@@ -437,7 +437,7 @@ pub enum TriggerMode {
     // Adapt / amass / learn / venture
     /// CR 701.46: Triggers when a creature adapts.
     Adapt,
-    /// CR 701.50b: Triggers when a permanent connives (after the connive process
+    /// CR 701.50f: Triggers when a permanent connives (after the connive process
     /// completes).
     Connives,
     /// CR 702.143: Triggers when a card is foretold.
@@ -534,6 +534,10 @@ pub enum TriggerMode {
     EntersOrAttacks,
     /// "Whenever ~ attacks or blocks" — fires on both attack (CR 508.3a) and block (CR 509.1h) events.
     AttacksOrBlocks,
+    /// CR 702.55c: "~ enters or the creature it haunts dies" — parsed as one compound
+    /// trigger; the ETB half fires on the battlefield and synthesis clones the effect into
+    /// a `HauntedCreatureDies` trigger in exile for the haunted-dies half.
+    EntersOrHauntedCreatureDies,
 
     /// CR 603.8: State trigger — fires when a game-state condition becomes true, rather than
     /// in response to an event. Checked whenever a player would receive priority.
@@ -640,6 +644,7 @@ impl FromStr for TriggerMode {
             "Enlisted" => TriggerMode::Enlisted,
             "AttacksOrBlocks" => TriggerMode::AttacksOrBlocks,
             "EntersOrAttacks" => TriggerMode::EntersOrAttacks,
+            "EntersOrHauntedCreatureDies" => TriggerMode::EntersOrHauntedCreatureDies,
             "Evolve" => TriggerMode::Evolve,
             "Evolved" => TriggerMode::Evolved,
             "ExcessDamage" => TriggerMode::ExcessDamage,
@@ -908,6 +913,7 @@ mod tests {
             "ElementalBend",
             "Enlisted",
             "EntersOrAttacks",
+            "EntersOrHauntedCreatureDies",
             "Evolve",
             "Evolved",
             "ExcessDamage",

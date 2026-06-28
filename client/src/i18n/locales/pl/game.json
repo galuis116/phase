@@ -359,7 +359,8 @@
     "onlyForActivation": "Wydaj tylko na aktywowanie zdolności",
     "onlyForXCosts": "Wydaj tylko na koszty zawierające {X}",
     "convokePayment": "Płatność Convoke",
-    "grantsProperty": "Nadaje czarowi właściwość"
+    "grantsProperty": "Nadaje czarowi właściwość",
+    "grantCantBeCountered": "Wydaj na ten czar, aby nie można było go skontrować"
   },
   "zone": {
     "commandZone": "Strefa dowodzenia",
@@ -416,13 +417,22 @@
     "paymentPending": "Płatność wciąż oczekuje. Obróć trwałe lub anuluj tę akcję.",
     "poolLabel": "Pula:",
     "poolEmpty": "Pusta",
+    "pinUnit": "Przypnij tę manę, aby zapłacić najpierw",
+    "unpinUnit": "Odepnij tę manę",
     "pay": "Zapłać",
     "chooseAmountTitle": "Wybierz kwotę do zapłaty",
     "chooseAmountAria": "Wybierz kwotę do zapłaty",
     "payAmount": "Zapłać {{value}} {{resource}}",
     "resourceEnergy": "energii",
     "resourceMana": "many",
-    "resourceCounters": "znaczników"
+    "resourceCounters": "znaczników",
+    "resourceSpeed": "prędkości",
+    "manualMana": "Ręcznie",
+    "manualManaTooltip": "Ręczna mana — tylko ta gra. Stuknij własne ziemie i manę, aby zapłacić.",
+    "spendHint": "Kliknij swoją manę, aby wydać ją na ten koszt",
+    "covered": "✓ Pokryte",
+    "spending": "Wydawane",
+    "fillHint": "(shift+klik dodaje wszystkie z jednego źródła)"
   },
   "hand": {
     "viewFullHand_one": "Zobacz całą rękę ({{count}} karta)",
@@ -889,6 +899,7 @@
     "startMatch": "Rozpocznij mecz",
     "startMatchWithOpponents": "Rozpocznij mecz ({{count}} przec.)",
     "deckNotLegal": "Talia nie jest dozwolona w formacie {{format}}.",
+    "aiUnsupportedFormat": "{{format}} jest dostępny do hostowania gier wieloosobowych, ale mecze z AI nie są jeszcze obsługiwane.",
     "cedhWarning": "Twoja talia to bracket {{bracket}} przeciwko SI cEDH — spodziewaj się szybkiej porażki.",
     "cedhWarningUntagged": "bez bracketu",
     "bracketViolation": {
@@ -1217,6 +1228,22 @@
       "title": "Zbierz dowody",
       "subtitle": "Wygnaj karty ze swojego cmentarza o łącznej wartości many {{minimum}} lub większej"
     },
+    "bulk": {
+      "selectAll": "Zaznacz wszystko",
+      "invert": "Odwróć",
+      "clear": "Wyczyść",
+      "sortLabel": "Sortuj",
+      "groupLabel": "Grupuj",
+      "optNone": "Brak",
+      "optName": "Nazwa",
+      "optCmc": "Wartość many",
+      "optType": "Typ",
+      "optColor": "Kolor",
+      "counterDiscard": "Odrzuć {{selected}} z {{cap}}",
+      "counterKeep": "Zatrzymaj {{selected}} z {{cap}}",
+      "keepInstead": "Zatrzymaj zamiast tego",
+      "discardInstead": "Odrzuć zamiast tego"
+    },
     "discard": {
       "title": "Odrzuć",
       "titleAdditionalCost": "Odrzuć jako koszt dodatkowy",
@@ -1231,7 +1258,9 @@
       "subtitleUpTo_other": "Wybierz do {{count}} kart do odrzucenia",
       "subtitleUnless": "Wybierz {{count}} kart lub 1 pasującą kartę do odrzucenia",
       "subtitleExact_one": "Wybierz {{count}} kartę do odrzucenia",
-      "subtitleExact_other": "Wybierz {{count}} kart do odrzucenia"
+      "subtitleExact_other": "Wybierz {{count}} kart do odrzucenia",
+      "subtitleKeep_one": "Wybierz 1 kartę do zatrzymania — reszta zostaje odrzucona",
+      "subtitleKeep_other": "Wybierz {{count}} kart do zatrzymania — reszta zostaje odrzucona"
     },
     "harmonize": {
       "title": "Harmonize",
@@ -1532,6 +1561,8 @@
     "crashBody": "phase.rs napotkał wewnętrzny błąd i nie może bezpiecznie kontynuować tej akcji. Twoja ostatnia zapisana tura jest zachowana — odśwież, aby przywrócić grę. <strong>Zgłoś to</strong>, abyśmy mogli to naprawić.",
     "connectionTitle": "Utracono połączenie z silnikiem",
     "connectionBody": "phase.rs utracił połączenie z silnikiem gry — najczęściej spowodowane aktualizacją w tle aktywowaną w trakcie gry. Twoja ostatnia zapisana tura jest zachowana; odśwież, aby przywrócić grę.",
+    "timeoutTitle": "Silnik potrzebował zbyt dużo czasu",
+    "timeoutBody": "phase.rs nie zdążył obliczyć tej akcji w wyznaczonym czasie. Może się to zdarzyć na bardzo złożonych stołach (na przykład setki żetonów). Twoja ostatnia zapisana tura jest zachowana — odśwież, aby przywrócić grę, i rozważ wyeksportowanie stanu, aby go zgłosić.",
     "diagnostic": "diagnostyka: {{reason}}",
     "showDetails": "Pokaż szczegóły",
     "exportGameState": "Eksportuj stan gry",
@@ -1814,5 +1845,20 @@
     "skip": "Skip",
     "groupCount": "{{selected}} / {{count}} selected",
     "groupPower": "Power {{selected}} / {{required}}"
+  },
+  "planechase": {
+    "active": "Active plane",
+    "none": "None",
+    "noPlane": "No plane",
+    "deckCount": "{{count}} in deck",
+    "cost": "Cost",
+    "roll": "Roll planar die"
+  },
+  "archenemy": {
+    "active": "Active scheme",
+    "none": "None",
+    "noScheme": "No scheme",
+    "deckCount": "{{count}} in deck",
+    "heroCount": "{{count}} heroes"
   }
 }

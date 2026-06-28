@@ -1026,7 +1026,18 @@ pub(super) fn handle_resolution_choice(
             }
             if let Some(pending_mana_ability) = pending_mana_ability {
                 let mut pending = pending_mana_ability.as_ref().clone();
-                pending.chosen_counter_count = Some(amount);
+                // CR 107.1c / CR 107.3a: bind the announced amount to the
+                // correct mana-ability cost axis — a removed-counter count
+                // (CR 122.1) or an announced X for `Pay X speed` (CR 702.179e).
+                match resource {
+                    PayableResource::Counters => pending.chosen_counter_count = Some(amount),
+                    PayableResource::Speed => pending.chosen_x = Some(amount),
+                    other => {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Unexpected pay-amount resource {other:?} for mana ability"
+                        )))
+                    }
+                }
                 let waiting_for =
                     mana_abilities::advance_mana_ability_activation(state, pending, events)?;
                 return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
@@ -1067,6 +1078,14 @@ pub(super) fn handle_resolution_choice(
                 PayableResource::Counters => {
                     return Err(EngineError::InvalidAction(
                         "Counter amount choices require a pending mana ability".to_string(),
+                    ));
+                }
+                PayableResource::Speed => {
+                    // CR 702.179e: `Pay X speed` only ever arises as a mana-ability
+                    // activation cost, which carries a `pending_mana_ability` and
+                    // is handled above. Reaching the standalone branch is a bug.
+                    return Err(EngineError::InvalidAction(
+                        "Speed amount choices require a pending mana ability".to_string(),
                     ));
                 }
                 PayableResource::Life => {
@@ -2366,7 +2385,7 @@ pub(super) fn handle_resolution_choice(
             };
 
             effects::connive::add_connive_counters(state, conniver_id, nonland_count, events);
-            // CR 701.50b + CR 701.50c: the EffectResolved carries the CONNIVER's
+            // CR 701.50f + CR 701.50b: the EffectResolved carries the CONNIVER's
             // id (LKI if it left the battlefield) so "whenever a creature you
             // control connives" matches the conniving permanent, not the source.
             events.push(GameEvent::EffectResolved {
@@ -2567,13 +2586,39 @@ pub(super) fn handle_resolution_choice(
             // action, so batch this discard's observer triggers (Waste Not,
             // Megrim, Bone Miser) across the `DiscardChoice` pause — exactly
             // as the `Sacrifice` branch does for dies-triggers.
-            if let Some(outcome) = batch_or_drain_observer_triggers(
-                state,
-                events,
-                events_before_effect,
-                events_after_move,
-            ) {
-                return Ok(outcome);
+            //
+            // CR 608.2c: A sequential continuation stashed behind this interactive
+            // discard (e.g. Shorikai's "then create a Pilot creature token")
+            // emits ZoneChanged/TokenCreated during `finish_with_continuation`.
+            // Collect BOTH the discard slice and the continuation slice into
+            // `deferred_triggers` before a single drain — the discard slice must
+            // stay bounded to the move itself, but an early drain after only the
+            // discard slice would return `WaitingForWithInlineTriggers` and skip
+            // the continuation slice entirely (issue #4245).
+            for (start, end) in [
+                (events_before_effect, events_after_move),
+                (events_after_move, events.len()),
+            ] {
+                if end <= start {
+                    continue;
+                }
+                let trigger_events: Vec<GameEvent> = events[start..end]
+                    .iter()
+                    .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                    .cloned()
+                    .collect();
+                if !trigger_events.is_empty() {
+                    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                }
+            }
+
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
+                }
+                return Ok(ResolutionChoiceOutcome::WaitingForWithInlineTriggers(
+                    waiting_for,
+                ));
             }
             ResolutionChoiceOutcome::WaitingFor(waiting_for)
         }
@@ -3323,7 +3368,7 @@ pub(super) fn handle_resolution_choice(
                         ability_index,
                         pending.ability,
                         pending.activation_cost.as_ref(),
-                        pending.x_residual_activation,
+                        pending.activation_residual,
                         events,
                     )?;
                 } else {
@@ -4086,6 +4131,26 @@ pub(crate) fn run_batch_completion(
                 // CR 609.3 inside: opens as many as possible; never errors.
                 let _ =
                     crate::game::attractions::open_attractions(state, player, remaining, events);
+            }
+        }
+        BatchCompletion::ContraptionAssembleRemainder {
+            player,
+            source_id,
+            object_id,
+            sprocket,
+            remaining_after,
+        } => {
+            crate::game::contraptions::finish_contraption_assembly(
+                state, player, object_id, sprocket, events,
+            );
+            if remaining_after > 0 {
+                crate::game::contraptions::continue_assemble_batch(
+                    state,
+                    player,
+                    source_id,
+                    remaining_after,
+                    events,
+                );
             }
         }
     }

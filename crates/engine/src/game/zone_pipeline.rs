@@ -17,8 +17,8 @@
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    AdditionalCostInstancePayment, CastTimingPermission, Duration, Effect, KickerVariant,
-    LibraryPosition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    AdditionalCostInstancePayment, CastTimingPermission, CostPaidObjectSnapshot, Duration, Effect,
+    KickerVariant, LibraryPosition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -488,6 +488,10 @@ struct CastLinkSnapshot {
     additional_cost_payment_count: u32,
     additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     convoked_creatures: Vec<ObjectId>,
+    // CR 400.7d: the object paid as a cost to cast the spell (e.g. the
+    // emerge-sacrificed creature) is part of the cast-link family cleared on
+    // entry; snapshot and restore it like the other members.
+    cast_cost_paid_object: Option<CostPaidObjectSnapshot>,
 }
 
 /// Result of a single zone-move attempt through the replacement pipeline.
@@ -602,6 +606,17 @@ pub(crate) fn move_object(
                     // CR: `NthFromTop { n }` is 1-based ("second from the top" =>
                     // n=2, index 1); `move_to_library_at_index` is 0-based.
                     LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
+                    // CR 401.7: "beneath the top N cards" is only produced by the
+                    // `PutAtLibraryPosition` resolver, which moves directly and never
+                    // routes through this rebuilt-tail path. Handled for exhaustiveness:
+                    // a literal depth is honored (0-based index), a runtime-resolved
+                    // depth cannot be evaluated without the originating ability here.
+                    LibraryPosition::BeneathTop { depth } => match depth {
+                        crate::types::ability::QuantityExpr::Fixed { value } => {
+                            Some(value.max(0) as usize)
+                        }
+                        _ => None,
+                    },
                 };
                 zones::move_to_library_at_index(state, req.object_id, index, events);
                 return ZoneMoveResult::Done;
@@ -1564,6 +1579,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     additional_cost_payment_count: obj.additional_cost_payment_count,
                     additional_cost_payments: obj.additional_cost_payments.clone(),
                     convoked_creatures: obj.convoked_creatures.clone(),
+                    cast_cost_paid_object: obj.cast_cost_paid_object.clone(),
                 })
             })
             .flatten();
@@ -1601,6 +1617,16 @@ pub(crate) fn deliver_replaced_zone_change(
                     // CR: `NthFromTop { n }` is 1-based ("second from the top"
                     // => n=2, index 1); `move_to_library_at_index` is 0-based.
                     LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
+                    // CR 401.7: "beneath the top N cards" only flows from the
+                    // `PutAtLibraryPosition` resolver (direct move), never this
+                    // path. Exhaustiveness arm: honor a literal depth; a
+                    // runtime-resolved depth needs the originating ability.
+                    LibraryPosition::BeneathTop { depth } => match depth {
+                        crate::types::ability::QuantityExpr::Fixed { value } => {
+                            Some((*value).max(0) as usize)
+                        }
+                        _ => None,
+                    },
                 };
                 zones::move_to_library_at_index(state, object_id, index, events);
             }
@@ -1633,6 +1659,7 @@ pub(crate) fn deliver_replaced_zone_change(
                 obj.additional_cost_payment_count = link.additional_cost_payment_count;
                 obj.additional_cost_payments = link.additional_cost_payments;
                 obj.convoked_creatures = link.convoked_creatures;
+                obj.cast_cost_paid_object = link.cast_cost_paid_object;
             }
         }
         if to == Zone::Battlefield || from == Zone::Battlefield {

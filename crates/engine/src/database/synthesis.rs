@@ -2190,15 +2190,7 @@ fn casualty_copy_ability_definition_for_ordinal(origin_ordinal: Option<u32>) -> 
 }
 
 fn casualty_copy_rider_from_oracle(oracle: &str) -> (Vec<ContinuousModification>, bool) {
-    let lower = oracle.to_lowercase();
-    let mut modifications = Vec::new();
-    if lower.contains("the copy isn't legendary") || lower.contains("the copy is not legendary") {
-        modifications.push(ContinuousModification::RemoveSupertype {
-            supertype: Supertype::Legendary,
-        });
-    }
-    let starting_loyalty = lower.contains("has starting loyalty");
-    (modifications, starting_loyalty)
+    crate::parser::oracle_effect::become_copy_except::parse_casualty_copy_riders_from_oracle(oracle)
 }
 
 fn casualty_copy_ability_definition_for_ordinal_with_rider(
@@ -8078,6 +8070,8 @@ fn bloodthirst_counter_quantity(value: &BloodthirstValue) -> QuantityExpr {
                 aggregate: AggregateFunction::Sum,
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
+
+                excess_only: false,
             },
         },
     }
@@ -8977,6 +8971,8 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.75a: Hideaway ETB look-and-exile-face-down — self-contained
     // building block (Dig + conceal continuation).
     crate::database::hideaway::synthesize_hideaway(face);
+    crate::database::augment::synthesize_augment(face);
+    crate::database::contraptions::synthesize_contraptions(face);
     synthesize_outlast(face);
     synthesize_reinforce(face);
     synthesize_casualty(face);
@@ -16995,24 +16991,7 @@ mod station_synthesis_tests {
     ///     (not support-only despite first-draft speculation).
     #[test]
     fn station_32_tdm_spacecraft_regression_suite() {
-        use crate::database::CardDatabase;
-        use std::path::PathBuf;
-
-        // CARGO_MANIFEST_DIR points at crates/engine; the workspace root is
-        // two levels up. Skip gracefully if the export has not been generated
-        // (fresh clone before setup.sh).
-        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..");
-        let path = workspace_root.join("client/public/card-data.json");
-        if !path.exists() {
-            eprintln!(
-                "skipping: {} not found (run ./scripts/gen-card-data.sh)",
-                path.display()
-            );
-            return;
-        }
-        let db = CardDatabase::from_export(&path).expect("card-data.json loads as a valid export");
+        let db = crate::test_support::shared_card_db();
 
         // Ground truth: (card name, expected creature-shift). None = support-only
         // or excluded (non-Station Spacecraft crossover).
@@ -17101,12 +17080,10 @@ mod station_synthesis_tests {
             }
         }
 
-        if !missing.is_empty() {
-            eprintln!(
-                "skipping regression for cards missing from export: {}",
-                missing.join(", ")
-            );
-        }
+        assert!(
+            missing.is_empty(),
+            "fixture missing TDM Spacecraft cards: {missing:?}"
+        );
         assert!(
             wrong.is_empty(),
             "synthesize_station produced wrong thresholds:\n  {}",

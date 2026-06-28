@@ -143,6 +143,19 @@ pub enum GameEvent {
         merging_id: ObjectId,
         controller: PlayerId,
     },
+    /// Unstable Host/Augment: a card with augment combined with a Host
+    /// creature, forming a merged permanent. Emitted by `augment.rs`.
+    /// `merged_id` is the surviving permanent's `ObjectId` (the Host
+    /// creature's continuity id); `augmenting_id` is the augment component that
+    /// merged onto it; `controller` is the player who performed the combine.
+    ///
+    /// Distinct from `Mutated`: Augment reuses merge-like bookkeeping but is a
+    /// separate mechanic and must not satisfy `TriggerMode::Mutates`.
+    Augmented {
+        merged_id: ObjectId,
+        augmenting_id: ObjectId,
+        controller: PlayerId,
+    },
     /// CR 707.10: A spell was copied onto the stack. A copy of a spell isn't
     /// cast, so this is a distinct event from `SpellCast` — copy-sensitive
     /// triggers (Magecraft, "whenever you copy a spell") fire on this, while
@@ -471,7 +484,7 @@ pub enum GameEvent {
         target: TargetRef,
         source_id: ObjectId,
     },
-    /// CR 702.122d: A Vehicle's crew ability resolved.
+    /// CR 702.122e: A Vehicle's crew ability resolved.
     /// Carries creature list for trigger conditions that reference "creatures that crewed it".
     VehicleCrewed {
         vehicle_id: ObjectId,
@@ -703,6 +716,13 @@ pub enum GameEvent {
         player_id: PlayerId,
         object_id: ObjectId,
     },
+    /// Unstable Contraptions: a Contraption was assembled from a player's
+    /// supplementary Contraption deck onto a sprocket.
+    ContraptionAssembled {
+        player_id: PlayerId,
+        object_id: ObjectId,
+        sprocket: u8,
+    },
     StickerPlaced {
         player_id: PlayerId,
         object_id: ObjectId,
@@ -718,6 +738,13 @@ pub enum GameEvent {
         player_id: PlayerId,
         roll: u8,
         attraction_id: ObjectId,
+    },
+    /// Unstable Contraptions: a specific Contraption on a sprocket was
+    /// cranked. `TriggerMode::CrankContraption` listens to this event.
+    ContraptionCranked {
+        player_id: PlayerId,
+        sprocket: u8,
+        contraption_id: ObjectId,
     },
     /// Avatar crossover: A firebending ability resolved and produced mana.
     Firebend {

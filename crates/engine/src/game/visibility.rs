@@ -188,6 +188,17 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    let all_contraption_ids: Vec<ObjectId> = filtered
+        .players
+        .iter()
+        .flat_map(|p| p.contraption_deck.iter().copied())
+        .collect();
+    for obj_id in all_contraption_ids {
+        if !state.revealed_cards.contains(&obj_id) {
+            hide_card(&mut filtered, obj_id);
+        }
+    }
+
     // CR 901.15 + CR 904.4: Planar and scheme decks are hidden-order
     // supplementary decks whose face-down cards live in the command zone. Redact
     // every unrevealed card identity for all viewers, matching the library and
@@ -649,6 +660,9 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             pool.registered_sideboard = Arc::new(Vec::new());
             pool.current_main = Arc::new(Vec::new());
             pool.current_sideboard = Arc::new(Vec::new());
+            pool.registered_planar_deck = Arc::new(Vec::new());
+            pool.registered_scheme_deck = Arc::new(Vec::new());
+            pool.current_scheme_deck = Arc::new(Vec::new());
         }
     }
 
@@ -926,10 +940,11 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: crate::types::game_state::AssistState::NotOffered,
-            x_residual_activation: false,
+            activation_residual: crate::types::game_state::ActivationResidual::None,
         })
     }
 
@@ -947,6 +962,8 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_counter_count: None,
+            chosen_x: None,
+            collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,

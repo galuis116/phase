@@ -359,7 +359,8 @@
     "onlyForActivation": "Nur zum Aktivieren von Fähigkeiten ausgeben",
     "onlyForXCosts": "Nur für Kosten ausgeben, die {X} enthalten",
     "convokePayment": "Beschwörbeitrag-Bezahlung",
-    "grantsProperty": "Verleiht dem Zauberspruch eine Eigenschaft"
+    "grantsProperty": "Verleiht dem Zauberspruch eine Eigenschaft",
+    "grantCantBeCountered": "Für diesen Zauberspruch ausgeben, damit er nicht neutralisiert werden kann"
   },
   "zone": {
     "commandZone": "Kommandozone",
@@ -416,13 +417,22 @@
     "paymentPending": "Die Bezahlung steht noch aus. Tappe bleibende Karten oder brich diese Aktion ab.",
     "poolLabel": "Vorrat:",
     "poolEmpty": "Leer",
+    "pinUnit": "Dieses Mana zum Bezahlen vormerken",
+    "unpinUnit": "Mana-Vormerkung aufheben",
     "pay": "Bezahlen",
     "chooseAmountTitle": "Wähle die zu zahlende Menge",
     "chooseAmountAria": "Wähle die zu zahlende Menge",
     "payAmount": "{{value}} {{resource}} bezahlen",
     "resourceEnergy": "Energie",
     "resourceMana": "Mana",
-    "resourceCounters": "Marken"
+    "resourceCounters": "Marken",
+    "resourceSpeed": "Tempo",
+    "manualMana": "Manuell",
+    "manualManaTooltip": "Manuelles Mana — nur für dieses Spiel. Tippe deine eigenen Länder und dein Mana an, um zu bezahlen.",
+    "spendHint": "Klicke auf dein Mana, um es für diese Kosten einzusetzen",
+    "covered": "✓ Gedeckt",
+    "spending": "Wird ausgegeben",
+    "fillHint": "(Umschalt+Klick fügt alle einer Quelle hinzu)"
   },
   "hand": {
     "viewFullHand_one": "Volle Hand ansehen ({{count}} Karte)",
@@ -889,6 +899,7 @@
     "startMatch": "Partie starten",
     "startMatchWithOpponents": "Partie starten ({{count}} Geg.)",
     "deckNotLegal": "Das Deck ist nicht legal in {{format}}.",
+    "aiUnsupportedFormat": "{{format}} ist für das Hosten von Mehrspielerpartien verfügbar, aber KI-Partien werden dafür noch nicht unterstützt.",
     "cedhWarning": "Dein Deck ist Bracket {{bracket}} gegen eine cEDH-KI – rechne mit einer schnellen Niederlage.",
     "cedhWarningUntagged": "ohne Bracket",
     "bracketViolation": {
@@ -1217,6 +1228,22 @@
       "title": "Beweise sammeln",
       "subtitle": "Schicke Karten aus deinem Friedhof mit einem Gesamtmanawert von {{minimum}} oder mehr ins Exil"
     },
+    "bulk": {
+      "selectAll": "Alle auswählen",
+      "invert": "Umkehren",
+      "clear": "Leeren",
+      "sortLabel": "Sortieren",
+      "groupLabel": "Gruppieren",
+      "optNone": "Keine",
+      "optName": "Name",
+      "optCmc": "Manawert",
+      "optType": "Typ",
+      "optColor": "Farbe",
+      "counterDiscard": "{{selected}} von {{cap}} abwerfen",
+      "counterKeep": "{{selected}} von {{cap}} behalten",
+      "keepInstead": "Stattdessen behalten",
+      "discardInstead": "Stattdessen abwerfen"
+    },
     "discard": {
       "title": "Abwerfen",
       "titleAdditionalCost": "Als zusätzliche Kosten abwerfen",
@@ -1231,7 +1258,9 @@
       "subtitleUpTo_other": "Wähle bis zu {{count}} Karten zum Abwerfen",
       "subtitleUnless": "Wähle {{count}} Karten oder 1 passende Karte zum Abwerfen",
       "subtitleExact_one": "Wähle {{count}} Karte zum Abwerfen",
-      "subtitleExact_other": "Wähle {{count}} Karten zum Abwerfen"
+      "subtitleExact_other": "Wähle {{count}} Karten zum Abwerfen",
+      "subtitleKeep_one": "Wähle 1 Karte zum Behalten — der Rest wird abgeworfen",
+      "subtitleKeep_other": "Wähle {{count}} Karten zum Behalten — der Rest wird abgeworfen"
     },
     "harmonize": {
       "title": "Harmonisieren",
@@ -1532,6 +1561,8 @@
     "crashBody": "phase.rs ist auf einen internen Fehler gestoßen und kann diese Aktion nicht sicher fortsetzen. Dein zuletzt gespeicherter Zug bleibt erhalten — lade neu, um das Spiel wiederherzustellen. <strong>Bitte melde dies</strong>, damit wir es beheben können.",
     "connectionTitle": "Engine-Verbindung verloren",
     "connectionBody": "phase.rs hat die Verbindung zur Spiel-Engine verloren — meist durch ein Hintergrund-Update verursacht, das mitten im Spiel aktiviert wurde. Dein zuletzt gespeicherter Zug bleibt erhalten; lade neu, um das Spiel wiederherzustellen.",
+    "timeoutTitle": "Engine hat zu lange gebraucht",
+    "timeoutBody": "phase.rs konnte diese Aktion nicht innerhalb des Zeitlimits berechnen. Das kann bei sehr komplexen Spielfeldern passieren (zum Beispiel Hunderte von Spielsteinen). Dein zuletzt gespeicherter Zug bleibt erhalten — lade neu, um das Spiel wiederherzustellen, und exportiere ggf. den Spielstand, um ihn zu melden.",
     "diagnostic": "Diagnose: {{reason}}",
     "showDetails": "Details anzeigen",
     "exportGameState": "Spielzustand exportieren",
@@ -1814,5 +1845,20 @@
     "skip": "Skip",
     "groupCount": "{{selected}} / {{count}} selected",
     "groupPower": "Power {{selected}} / {{required}}"
+  },
+  "planechase": {
+    "active": "Active plane",
+    "none": "None",
+    "noPlane": "No plane",
+    "deckCount": "{{count}} in deck",
+    "cost": "Cost",
+    "roll": "Roll planar die"
+  },
+  "archenemy": {
+    "active": "Active scheme",
+    "none": "None",
+    "noScheme": "No scheme",
+    "deckCount": "{{count}} in deck",
+    "heroCount": "{{count}} heroes"
   }
 }
