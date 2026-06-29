@@ -1047,6 +1047,36 @@ impl GameObject {
                 self.base_power = Some(*power);
                 self.base_toughness = Some(*toughness);
             }
+            PerpetualModification::ModifyPowerToughness {
+                power_delta,
+                toughness_delta,
+            } => {
+                let base_power = self
+                    .base_power
+                    .or(self.power)
+                    .unwrap_or(0)
+                    .saturating_add(*power_delta);
+                let base_toughness = self
+                    .base_toughness
+                    .or(self.toughness)
+                    .unwrap_or(0)
+                    .saturating_add(*toughness_delta);
+                self.base_power = Some(base_power);
+                self.base_toughness = Some(base_toughness);
+            }
+            PerpetualModification::GrantKeywords { keywords } => {
+                for keyword in keywords {
+                    if !self.keywords.contains(keyword) {
+                        self.keywords.push(keyword.clone());
+                    }
+                    // CR 613.1: perpetual keyword grants must survive the layer
+                    // pass's `keywords = base_keywords.clone()` reset — mirror
+                    // base_* P/T edits and the crew-keyword test seeding pattern.
+                    if !self.base_keywords.contains(keyword) {
+                        self.base_keywords.push(keyword.clone());
+                    }
+                }
+            }
         }
         self.perpetual_mods.push(modification.clone());
     }
@@ -1350,6 +1380,10 @@ impl GameObject {
             colors: self.color.clone(),
             chosen_attributes: self.chosen_attributes.clone(),
             counters: self.counters.clone(),
+            // CR 110.5: Capture live tap status. This snapshot is taken while the
+            // object is still in its public zone (mana-spent / attack-declaration
+            // captures), so `self.tapped` is authoritative.
+            tapped: self.tapped,
         }
     }
 
