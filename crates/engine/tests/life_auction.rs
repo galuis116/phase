@@ -453,3 +453,62 @@ fn topping_bid_above_life_is_rejected() {
         "rejected bid must leave the auction prompt unchanged"
     );
 }
+
+/// Revert-fail guard: a settlement failure must propagate and preserve the
+/// auction prompt instead of clearing it via `finish_with_continuation`.
+#[test]
+fn settlement_failure_preserves_auction_prompt() {
+    let mut state = GameState::new_two_player(42);
+    let p1 = state.players[0].id;
+    let p2 = state.players[1].id;
+
+    let creature = create_object(
+        &mut state,
+        CardId(10),
+        p2,
+        "Bear".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&creature)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+
+    let source = ObjectId(907);
+    let ability = auction_ability(
+        Effect::AuctionBid {
+            opening_bid: AuctionOpening::Fixed(0),
+            voter_scope: VoterScope::AllPlayers,
+            winner_effect: gain_control_def(),
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        },
+        source,
+        p1,
+        vec![TargetRef::Object(creature)],
+    );
+
+    let mut events = Vec::new();
+    auction::resolve(&mut state, &ability, &mut events).expect("auction parks");
+
+    // P1 passes the opening bid of 0; P2 is next to act.
+    apply(&mut state, p1, GameAction::SubmitBid { amount: 0 }).expect("P1 passes opening");
+
+    // The auction target is gone before settlement — GainControl must fail when
+    // the final pass triggers `auction::settle`.
+    state.battlefield.retain(|id| *id != creature);
+    state.objects.remove(&creature);
+    let parked = state.waiting_for.clone();
+
+    let result = apply(&mut state, p2, GameAction::SubmitBid { amount: 0 });
+    assert!(
+        result.is_err(),
+        "settlement failure must propagate to the caller"
+    );
+    assert_eq!(
+        state.waiting_for, parked,
+        "failed settlement must not clear the auction prompt"
+    );
+}

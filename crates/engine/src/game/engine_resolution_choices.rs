@@ -1374,7 +1374,7 @@ pub(super) fn handle_resolution_choice(
                     ));
                 }
                 // Only the starter is eligible — the opening bid stands.
-                let _ = effects::auction::settle(
+                effects::auction::settle(
                     state,
                     player,
                     amount,
@@ -1383,7 +1383,8 @@ pub(super) fn handle_resolution_choice(
                     controller,
                     source_id,
                     events,
-                );
+                )
+                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     finish_with_continuation(state, controller, events),
                 ));
@@ -1408,7 +1409,7 @@ pub(super) fn handle_resolution_choice(
             let settle_threshold = eligible.len().saturating_sub(1) as u32;
             if new_passes >= settle_threshold {
                 if let Some(winner) = new_high_bidder {
-                    let _ = effects::auction::settle(
+                    effects::auction::settle(
                         state,
                         winner,
                         new_high_bid,
@@ -1417,7 +1418,8 @@ pub(super) fn handle_resolution_choice(
                         controller,
                         source_id,
                         events,
-                    );
+                    )
+                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
                 } else {
                     // No bidder ever topped (only possible for a fixed opening,
                     // where `high_bidder` is always Some). Defensive: resolve
@@ -1461,7 +1463,7 @@ pub(super) fn handle_resolution_choice(
                 // reached — e.g. an elimination emptied the round. Settle on the
                 // standing high bid so the auction can never hang.
                 if let Some(winner) = new_high_bidder {
-                    let _ = effects::auction::settle(
+                    effects::auction::settle(
                         state,
                         winner,
                         new_high_bid,
@@ -1470,7 +1472,8 @@ pub(super) fn handle_resolution_choice(
                         controller,
                         source_id,
                         events,
-                    );
+                    )
+                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
                 }
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     finish_with_continuation(state, controller, events),
