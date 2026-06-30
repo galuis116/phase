@@ -7998,7 +7998,8 @@ impl FaceDownProfile {
 ///
 /// Increment 1 covers base power/toughness setting; the enum is extensible to the
 /// other perpetual forms (`ModifyPowerToughness` for "perpetually gets +N/+N",
-/// `GrantAbility` for "perpetually gains ...", `Become` for type changes).
+/// `GrantAbility` for "perpetually gains ...", `Become` for type changes,
+/// `ModifyCost` for "perpetually gains \"This spell costs {N} less/more to cast\"").
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 #[serde(tag = "kind")]
 pub enum PerpetualModification {
@@ -8027,6 +8028,16 @@ pub enum PerpetualModification {
         toughness: i32,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         keywords: Vec<crate::types::keywords::Keyword>,
+    },
+    /// Digital-only Alchemy (no CR entry for "perpetually"; the cost change itself
+    /// is CR 601.2f): "[card] perpetually gains \"This spell costs {N} less/more to
+    /// cast\"" — records a permanent self-referential cast-cost modifier, realized
+    /// by injecting a synthetic self-spell `StaticMode::ModifyCost` into the card's
+    /// persistent static baseline so the existing self-spell cost collector consumes
+    /// it unchanged and it survives every layer/zone reset.
+    ModifyCost {
+        mode: crate::types::statics::CostModifyMode,
+        amount: ManaCost,
     },
 }
 
