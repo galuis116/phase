@@ -89,6 +89,7 @@ import { StackDisplay } from "../components/stack/StackDisplay.tsx";
 import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
 import { PlayerHud } from "../components/hud/PlayerHud.tsx";
 import { OpponentHud } from "../components/hud/OpponentHud.tsx";
+import { TurnStatusLine } from "../components/hud/TurnStatusLine.tsx";
 import { GraveyardPile } from "../components/zone/GraveyardPile.tsx";
 import { LibraryPile } from "../components/zone/LibraryPile.tsx";
 import { ExilePile } from "../components/zone/ExilePile.tsx";
@@ -1335,6 +1336,7 @@ function GamePageContent({
         {showFlowHelpNudge && <FlowHelpNudge />}
         {showSandboxToolsNudge && <SandboxToolsNudge />}
         <CombatPhaseIndicator />
+        <TurnStatusLine />
         {!isSpectatorMode && (
           <>
             <div className="flex items-center gap-1.5">
