@@ -190,7 +190,10 @@ pub(crate) fn settle(
     // CR 119.3: The high bidder loses life equal to the high bid.
     if high_bid > 0 {
         let lose = lose_life_ability(high_bidder, high_bid, source_id);
-        crate::game::effects::resolve_ability_chain(state, &lose, events, 1)?;
+        // Leaf payoff — call `resolve_effect` directly so settlement failures
+        // propagate (`resolve_ability_chain` swallows handler errors in its
+        // single-iteration loop).
+        crate::game::effects::resolve_effect(state, &lose, events)?;
     }
 
     // CR 608.2c: Resolve the payoff for the high bidder. The Mages' Contest
@@ -207,7 +210,7 @@ pub(crate) fn settle(
     }
 
     let winner_ability = resolved_winner(winner_effect, source_id, high_bidder, target);
-    crate::game::effects::resolve_ability_chain(state, &winner_ability, events, 1)?;
+    crate::game::effects::resolve_effect(state, &winner_ability, events)?;
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::AuctionBid,
