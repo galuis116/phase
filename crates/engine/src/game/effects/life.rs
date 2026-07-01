@@ -317,7 +317,8 @@ pub fn resolve_lose(
 
     let proposed = ProposedEvent::LifeLoss {
         player_id: target_player_id,
-        amount: amount as u32,
+        amount: u32::try_from(amount)
+            .map_err(|_| EffectError::InvalidParam("life loss amount out of range".into()))?,
         applied: HashSet::new(),
     };
 

@@ -509,3 +509,99 @@ fn settlement_failure_preserves_auction_prompt() {
         "failed settlement must not clear the auction prompt"
     );
 }
+
+/// CR 101.4: all-player auctions start with the controller, not the active
+/// player, when the two differ ("Starting with you").
+#[test]
+fn all_player_auction_order_starts_with_controller_not_active_player() {
+    let mut state = GameState::new_two_player(17);
+    let p1 = state.players[0].id;
+    let p2 = state.players[1].id;
+    state.active_player = p2;
+    let source = ObjectId(908);
+
+    let ability = auction_ability(
+        Effect::AuctionBid {
+            opening_bid: AuctionOpening::PlayerChosen,
+            voter_scope: VoterScope::AllPlayers,
+            winner_effect: draw_four_def(),
+            target: TargetFilter::None,
+        },
+        source,
+        p1,
+        vec![],
+    );
+
+    let mut events = Vec::new();
+    auction::resolve(&mut state, &ability, &mut events).expect("auction parks");
+
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::AuctionBid { player, eligible, .. }
+                if player == p1 && eligible == vec![p1, p2]
+        ),
+        "controller must act first and eligible order must start with controller"
+    );
+}
+
+/// Opening bids above the signed life-loss range must be rejected.
+#[test]
+fn opening_bid_u32_max_is_rejected() {
+    let mut state = GameState::new_two_player(19);
+    let p1 = state.players[0].id;
+    let source = ObjectId(909);
+
+    let ability = auction_ability(
+        Effect::AuctionBid {
+            opening_bid: AuctionOpening::PlayerChosen,
+            voter_scope: VoterScope::AllPlayers,
+            winner_effect: draw_four_def(),
+            target: TargetFilter::None,
+        },
+        source,
+        p1,
+        vec![],
+    );
+
+    let mut events = Vec::new();
+    auction::resolve(&mut state, &ability, &mut events).expect("auction parks");
+    let parked = state.waiting_for.clone();
+
+    let result = apply(&mut state, p1, GameAction::SubmitBid { amount: u32::MAX });
+    assert!(result.is_err(), "u32::MAX opening bid must be rejected");
+    assert_eq!(
+        state.waiting_for, parked,
+        "rejected opening bid must preserve the auction prompt"
+    );
+}
+
+/// Topping bids above the signed life-loss range must be rejected.
+#[test]
+fn topping_bid_u32_max_is_rejected() {
+    let mut state = GameState::new_two_player(23);
+    let p1 = state.players[0].id;
+    let p2 = state.players[1].id;
+    let source = ObjectId(910);
+
+    state.waiting_for = WaitingFor::AuctionBid {
+        player: p2,
+        current_high_bid: 3,
+        high_bidder: Some(p1),
+        eligible: vec![p1, p2],
+        remaining_in_round: vec![],
+        passes_in_a_row: 0,
+        winner_effect: gain_control_def(),
+        target: None,
+        controller: p1,
+        source_id: source,
+    };
+    let parked = state.waiting_for.clone();
+
+    let result = apply(&mut state, p2, GameAction::SubmitBid { amount: u32::MAX });
+    assert!(result.is_err(), "u32::MAX topping bid must be rejected");
+    assert_eq!(
+        state.waiting_for, parked,
+        "rejected topping bid must preserve the auction prompt"
+    );
+}

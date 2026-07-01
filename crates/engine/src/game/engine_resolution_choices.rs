@@ -1310,9 +1310,9 @@ pub(super) fn handle_resolution_choice(
                 ))
             }
         }
-        // CR 119.3 + CR 101.4: Open-bid life auction step. Each `SubmitBid`
-        // either tops the high bid or passes; when every OTHER eligible player
-        // passes consecutively the high bid stands and the auction settles via
+        // CR 101.4: Open-bid life auction step. Each `SubmitBid` either tops the
+        // high bid or passes; when every OTHER eligible player passes
+        // consecutively the high bid stands and the auction settles via
         // `auction::settle` (life loss + winner payoff bound to the high
         // bidder). See effects/auction.rs.
         (
@@ -1330,6 +1330,9 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::SubmitBid { amount },
         ) => {
+            effects::auction::bid_amount_in_range(amount)
+                .map_err(|msg| EngineError::InvalidAction(msg.to_string()))?;
+
             // CR 119.3: Auction bids are not life payments — the high bidder
             // loses life equal to the bid only when the auction settles. Bids
             // may exceed the bidder's current life total.
@@ -1388,8 +1391,9 @@ pub(super) fn handle_resolution_choice(
                 (current_high_bid, high_bidder, passes_in_a_row + 1)
             };
 
-            // CR 119.3: "The bidding ends if the high bid stands." Settlement
-            // fires when every OTHER eligible player has passed consecutively.
+            // Illicit Auction / Pain's Reward Oracle: "The bidding ends if the high
+            // bid stands." Settlement fires when every OTHER eligible player has
+            // passed consecutively.
             let settle_threshold = eligible.len().saturating_sub(1) as u32;
             if new_passes >= settle_threshold {
                 if let Some(winner) = new_high_bidder {

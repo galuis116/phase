@@ -4100,14 +4100,15 @@ pub enum WaitingFor {
         #[serde(default)]
         tally_mode: super::ability::VoteTally,
     },
-    /// CR 119.3 + CR 101.4 + CR 608.2: An open-bid life auction is in progress
+    /// CR 101.4 + CR 608.2: An open-bid life auction is in progress
     /// (`Effect::AuctionBid` — Illicit Auction, Pain's Reward, Mages' Contest).
     /// The current actor (`player`) submits a `GameAction::SubmitBid`. Each bid
     /// either tops the current high bid (`amount > current_high_bid`) or passes
     /// (`amount <= current_high_bid`). Bidding ends when every other eligible
-    /// player has passed consecutively (CR 119.3: "the bidding ends if the high bid
-    /// stands"); the high bidder then loses life equal to the high bid (CR
-    /// 119.3) and `winner_effect` resolves once, bound to the high bidder.
+    /// player has passed consecutively (Illicit Auction / Pain's Reward Oracle:
+    /// "The bidding ends if the high bid stands"); the high bidder then loses
+    /// life equal to the high bid (CR 119.3) and `winner_effect` resolves once,
+    /// bound to the high bidder.
     /// Lives in the engine — the frontend renders a numeric bid/pass overlay.
     AuctionBid {
         /// The player currently deciding whether to top the high bid.
@@ -4129,9 +4130,10 @@ pub enum WaitingFor {
         /// it empties, a fresh round is built from `eligible` (excluding the
         /// current high bidder — they cannot top their own standing bid).
         remaining_in_round: Vec<PlayerId>,
-        /// CR 119.3: "The bidding ends if the high bid stands." Consecutive passes
-        /// since the last successful top. Settlement fires when this reaches
-        /// `eligible.len() - 1` (every other eligible player passed in a row).
+        /// Illicit Auction / Pain's Reward Oracle: "The bidding ends if the high
+        /// bid stands." Consecutive passes since the last successful top.
+        /// Settlement fires when this reaches `eligible.len() - 1` (every other
+        /// eligible player passed in a row).
         passes_in_a_row: u32,
         /// CR 608.2c: The payoff resolved once for the high bidder, bound as
         /// controller (GainControl / Draw / Counter). For Mages' Contest the

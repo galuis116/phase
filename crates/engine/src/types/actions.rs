@@ -646,11 +646,12 @@ pub enum GameAction {
     ChooseX {
         value: u32,
     },
-    /// CR 119.3 + CR 101.4: Submit a bid in an open-bid life auction
+    /// CR 101.4: Submit a bid in an open-bid life auction
     /// (`WaitingFor::AuctionBid`). During the opening phase of a player-chosen
     /// auction (Pain's Reward), `amount` sets the opening high bid. Otherwise
     /// `amount` tops the current high bid; an `amount <= current_high_bid`
-    /// is a pass (the bidder declines to top).
+    /// is a pass (the bidder declines to top). Amounts above `i32::MAX` are
+    /// rejected because life loss is represented as a signed `i32` quantity.
     SubmitBid {
         amount: u32,
     },

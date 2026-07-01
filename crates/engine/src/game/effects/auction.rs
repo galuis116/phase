@@ -1,12 +1,13 @@
-//! CR 119.3 + CR 101.4 + CR 608.2: Open-bid life auction — the "bid life"
-//! family (Illicit Auction, Pain's Reward, Mages' Contest).
+//! CR 101.4 + CR 608.2: Open-bid life auction — the "bid life" family (Illicit
+//! Auction, Pain's Reward, Mages' Contest).
 //!
-//! Each eligible player, in turn order starting with the controller, may top
-//! the current high bid ("In turn order, each player may top the high bid").
-//! Bidding ends when the high bid stands — i.e. every OTHER eligible player has
-//! passed consecutively (CR 119.3: "The bidding ends if the high bid stands"). The
-//! high bidder then loses life equal to the high bid (CR 119.3) and the
-//! `winner_effect` resolves once, bound to the high bidder as controller.
+//! Each eligible player, in turn order starting with the controller (CR 101.4),
+//! may top the current high bid ("In turn order, each player may top the high
+//! bid"). Bidding ends when the high bid stands — i.e. every OTHER eligible
+//! player has passed consecutively (Illicit Auction / Pain's Reward Oracle:
+//! "The bidding ends if the high bid stands"). The high bidder then loses life
+//! equal to the high bid (CR 119.3) and the `winner_effect` resolves once,
+//! bound to the high bidder as controller.
 //!
 //! The resolver parks on [`WaitingFor::AuctionBid`] for the first actor and the
 //! bid loop / settlement lives in `engine_resolution_choices.rs`, mirroring the
@@ -19,14 +20,28 @@
 
 use crate::game::players::apnap_order_from;
 use crate::types::ability::{
-    AuctionOpening, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
+    AuctionOpening, ControllerRef, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
-/// CR 119.3 + CR 101.4: Initiate an open-bid life auction. Resolves the target
+/// Maximum auction bid representable as signed life loss (`QuantityExpr::Fixed` /
+/// `Effect::LoseLife`). Values above this wrap when cast to `i32` and must be
+/// rejected at bid submission and settlement.
+pub(crate) const MAX_REPRESENTABLE_BID: u32 = i32::MAX as u32;
+
+/// Reject bids that cannot be represented as a signed life-loss amount.
+pub(crate) fn bid_amount_in_range(amount: u32) -> Result<(), &'static str> {
+    if amount > MAX_REPRESENTABLE_BID {
+        Err("bid amount exceeds representable life-loss range")
+    } else {
+        Ok(())
+    }
+}
+
+/// CR 101.4: Initiate an open-bid life auction. Resolves the target
 /// (creature / stack spell / none), builds the eligible bidder queue, and parks
 /// on [`WaitingFor::AuctionBid`] for the first actor.
 pub fn resolve(
@@ -84,7 +99,7 @@ pub fn resolve(
                 }
                 v
             }
-            None => apnap_order_from(state, None, controller)
+            None => apnap_order_from(state, Some(ControllerRef::You), controller)
                 .into_iter()
                 .collect(),
         };
@@ -120,14 +135,11 @@ pub fn resolve(
             };
         }
         AuctionOpening::Fixed(opening) => {
-            // CR 119.3 + CR 101.4: The controller announces the fixed opening
-            // bid (0 for Illicit Auction, 1 for Mages' Contest) and is the
-            // standing high bidder. Topping then proceeds "in turn order"
-            // starting WITH the controller — so the controller acts first and
-            // may top their own opening bid. The auction settles when every
-            // other eligible player has passed consecutively against the
-            // standing high bid (CR 119.3: "the bidding ends if the high bid
-            // stands").
+            // Illicit Auction / Pain's Reward Oracle: "The bidding ends if the high
+            // bid stands." Topping then proceeds "in turn order" starting WITH
+            // the controller — so the controller acts first and may top their own
+            // opening bid. The auction settles when every other eligible player
+            // has passed consecutively against the standing high bid.
             let Some((first, rest)) = eligible.split_first() else {
                 // Unreachable (eligible non-empty checked above), but settle
                 // defensively rather than parking on an empty queue.
@@ -187,6 +199,8 @@ pub(crate) fn settle(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    bid_amount_in_range(high_bid).map_err(|msg| EffectError::InvalidParam(msg.into()))?;
+
     // CR 119.3: The high bidder loses life equal to the high bid.
     if high_bid > 0 {
         let lose = lose_life_ability(high_bidder, high_bid, source_id);
@@ -223,12 +237,11 @@ pub(crate) fn settle(
 /// `target: None`, `resolve_life_loss_target` falls back to the controller, so
 /// the high bidder loses the life.
 fn lose_life_ability(player: PlayerId, amount: u32, source_id: ObjectId) -> ResolvedAbility {
+    let loss = i32::try_from(amount).expect("auction bids are range-checked before settlement");
     let def = crate::types::ability::AbilityDefinition::new(
         crate::types::ability::AbilityKind::Spell,
         Effect::LoseLife {
-            amount: crate::types::ability::QuantityExpr::Fixed {
-                value: amount as i32,
-            },
+            amount: crate::types::ability::QuantityExpr::Fixed { value: loss },
             target: None,
         },
     );
