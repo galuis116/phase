@@ -441,6 +441,7 @@
     "bidEquals": "Offri {{value}}",
     "bidAria": "Scegli una quantità di punti vita da offrire",
     "lifeMax": "max {{max}}",
+    "minBid": "min {{min}}",
     "submitBid": "Offri {{value}} punti vita",
     "pass": "Passa"
   },

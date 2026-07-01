@@ -374,15 +374,14 @@ fn ai_legal_actions_on_auction_returns_safe_pass() {
     );
 }
 
-/// Revert-fail guard (CR 119.3): an OPENING bid above the bidder's life is
-/// illegal. P1 (Pain's Reward, player-chosen opening) has only 2 life and tries
-/// to open at 5 → `apply` returns Err and NO auction/life state is mutated.
+/// CR 119.3: an opening bid above the bidder's current life is legal — bids
+/// cause life loss at settlement, not as a payable cost. P1 (Pain's Reward) has
+/// only 2 life and opens at 5 → accepted, life unchanged until settlement.
 #[test]
-fn opening_bid_above_life_is_rejected() {
+fn opening_bid_above_life_is_allowed() {
     let mut state = GameState::new_two_player(7);
     let p1 = state.players[0].id;
-    let _p2 = state.players[1].id;
-    // P1 can only legally bid up to 2.
+    let p2 = state.players[1].id;
     state.players[0].life = 2;
     let source = ObjectId(905);
 
@@ -400,34 +399,32 @@ fn opening_bid_above_life_is_rejected() {
 
     let mut events = Vec::new();
     auction::resolve(&mut state, &ability, &mut events).expect("auction parks");
-    let parked = state.waiting_for.clone();
 
-    // Over-life opening bid: 5 > 2 → rejected, state unchanged.
-    let result = apply(&mut state, p1, GameAction::SubmitBid { amount: 5 });
-    assert!(
-        result.is_err(),
-        "an opening bid above the bidder's life must be rejected (CR 119.3)"
-    );
-    assert_eq!(life(&state, p1), 2, "rejected bid must not change life");
-    assert_eq!(
-        state.waiting_for, parked,
-        "rejected bid must leave the auction prompt unchanged"
-    );
+    apply(&mut state, p1, GameAction::SubmitBid { amount: 5 })
+        .expect("an opening bid above current life must be legal (CR 119.3)");
+    assert_eq!(life(&state, p1), 2, "life is not lost until settlement");
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::AuctionBid {
+            player,
+            current_high_bid: 5,
+            high_bidder: Some(winner),
+            ..
+        } if player == p2 && winner == p1
+    ));
 }
 
-/// Revert-fail guard (CR 119.3): a TOPPING bid above the bidder's life is
-/// illegal. A fixed-opening auction stands at 3 (P1 high bidder); P2 has only 2
-/// life and tries to top with 6 → `apply` returns Err, life + auction unchanged.
+/// CR 119.3: a topping bid above the bidder's current life is legal. P2 has
+/// only 2 life and tops P1's standing bid of 3 with 6 → accepted, life unchanged.
 #[test]
-fn topping_bid_above_life_is_rejected() {
+fn topping_bid_above_life_is_allowed() {
     let mut state = GameState::new_two_player(11);
     let p1 = state.players[0].id;
     let p2 = state.players[1].id;
-    // P2 can only legally bid up to 2 — well below the high bid of 3.
     state.players[1].life = 2;
     let source = ObjectId(906);
 
-    let parked = WaitingFor::AuctionBid {
+    state.waiting_for = WaitingFor::AuctionBid {
         player: p2,
         current_high_bid: 3,
         high_bidder: Some(p1),
@@ -439,19 +436,18 @@ fn topping_bid_above_life_is_rejected() {
         controller: p1,
         source_id: source,
     };
-    state.waiting_for = parked.clone();
 
-    // Over-life topping bid: 6 > 2 → rejected, state unchanged.
-    let result = apply(&mut state, p2, GameAction::SubmitBid { amount: 6 });
-    assert!(
-        result.is_err(),
-        "a topping bid above the bidder's life must be rejected (CR 119.3)"
-    );
-    assert_eq!(life(&state, p2), 2, "rejected bid must not change life");
-    assert_eq!(
-        state.waiting_for, parked,
-        "rejected bid must leave the auction prompt unchanged"
-    );
+    apply(&mut state, p2, GameAction::SubmitBid { amount: 6 })
+        .expect("a topping bid above current life must be legal (CR 119.3)");
+    assert_eq!(life(&state, p2), 2, "life is not lost until settlement");
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::AuctionBid {
+            current_high_bid: 6,
+            high_bidder: Some(winner),
+            ..
+        } if winner == p2
+    ));
 }
 
 /// Revert-fail guard: a settlement failure must propagate and preserve the

@@ -441,6 +441,7 @@
     "bidEquals": "Apostar {{value}}",
     "bidAria": "Escolha uma quantidade de vidas para apostar",
     "lifeMax": "máx. {{max}}",
+    "minBid": "mín. {{min}}",
     "submitBid": "Apostar {{value}} vidas",
     "pass": "Passar"
   },

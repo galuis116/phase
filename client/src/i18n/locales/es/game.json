@@ -441,6 +441,7 @@
     "bidEquals": "Pujar {{value}}",
     "bidAria": "Elige una cantidad de vidas para pujar",
     "lifeMax": "máx. {{max}}",
+    "minBid": "mín. {{min}}",
     "submitBid": "Pujar {{value}} vidas",
     "pass": "Pasar"
   },

@@ -1329,26 +1329,9 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::SubmitBid { amount },
         ) => {
-            // CR 119.3: a player can't bid more life than they have. A bid is
-            // a real NEW bid only when it opens the auction (`high_bidder` is
-            // None) OR strictly tops the current high bid; a pass
-            // (`amount <= current_high_bid` with a standing bidder) pays no
-            // life and is always legal. Validate BEFORE mutating any auction
-            // state so an illegal bid leaves the prompt unchanged.
-            let is_new_bid = high_bidder.is_none() || amount > current_high_bid;
-            if is_new_bid {
-                let player_life = state
-                    .players
-                    .iter()
-                    .find(|p| p.id == player)
-                    .map(|p| p.life)
-                    .unwrap_or(0);
-                if player_life < 0 || amount > player_life as u32 {
-                    return Err(EngineError::InvalidAction(format!(
-                        "cannot bid {amount} life: player only has {player_life} life (CR 119.3)"
-                    )));
-                }
-            }
+            // CR 119.3: Auction bids are not life payments — the high bidder
+            // loses life equal to the bid only when the auction settles. Bids
+            // may exceed the bidder's current life total.
 
             // CR 119.3: Player-chosen opening bid (Pain's Reward). The starter's
             // amount sets the opening high bid; round-robin topping begins next.

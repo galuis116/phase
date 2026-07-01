@@ -470,6 +470,7 @@
     "bidEquals": "Bid {{value}}",
     "bidAria": "Choose a life amount to bid",
     "lifeMax": "max {{max}}",
+    "minBid": "min {{min}}",
     "submitBid": "Bid {{value}} life",
     "pass": "Pass"
   },

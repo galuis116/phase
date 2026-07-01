@@ -17,8 +17,8 @@ import { gameButtonClass } from "../ui/buttonStyles.ts";
  * sets the opening high bid, so the minimum is 0 and a "pass" of 0 is a legal
  * opening bid of zero.
  *
- * Pure display layer: it never bids on the player's behalf and bounds the input
- * by the bidder's own life total (you cannot bid more life than you have).
+ * Pure display layer: it never bids on the player's behalf. Bids may exceed
+ * the bidder's life total — life is lost only when the auction settles.
  */
 export function AuctionBidUI() {
   const { t } = useTranslation("game");
@@ -37,16 +37,6 @@ export function AuctionBidUI() {
   // the opening phase the minimum is 0 ("a bid of any number").
   const minBid = openingPhase ? 0 : currentHighBid + 1;
 
-  // You cannot bid more life than you have (CR 119.3 — life loss equals the
-  // bid). Bound the slider by the bidder's life total.
-  const bidderLife = useMemo(() => {
-    if (!gameState || !data) return 0;
-    return gameState.players.find((p) => p.id === data.player)?.life ?? 0;
-  }, [gameState, data]);
-
-  const maxBid = Math.max(minBid, bidderLife);
-  const canTop = bidderLife >= minBid;
-
   const [value, setValue] = useState(minBid);
 
   useEffect(() => {
@@ -59,9 +49,9 @@ export function AuctionBidUI() {
   }, [gameState, data]);
 
   const handleBid = useCallback(() => {
-    const amount = Math.min(Math.max(value, minBid), maxBid);
+    const amount = Math.max(value, minBid);
     dispatch({ type: "SubmitBid", data: { amount } });
-  }, [dispatch, value, minBid, maxBid]);
+  }, [dispatch, value, minBid]);
 
   const handlePass = useCallback(() => {
     // CR 119.3: A pass is any bid that does not top the high bid. During the
@@ -97,37 +87,34 @@ export function AuctionBidUI() {
               : t("auctionBid.highBid", { bid: currentHighBid })}
           </p>
 
-          {canTop && (
-            <div className="mb-4 px-2">
-              <label className="flex items-center gap-3 text-sm text-gray-200">
-                <span className="shrink-0 font-mono text-base text-cyan-300">
-                  {t("auctionBid.bidEquals", { value })}
-                </span>
-                <input
-                  type="range"
-                  min={minBid}
-                  max={maxBid}
-                  value={value}
-                  onChange={(e) => setValue(Number(e.target.value))}
-                  className="h-2 w-full cursor-pointer appearance-none rounded-full bg-gray-700 accent-cyan-500"
-                  aria-label={t("auctionBid.bidAria")}
-                />
-                <span className="shrink-0 text-xs text-gray-500">
-                  {t("auctionBid.lifeMax", { max: maxBid })}
-                </span>
-              </label>
-            </div>
-          )}
+          <div className="mb-4 px-2">
+            <label className="flex items-center gap-3 text-sm text-gray-200">
+              <span className="shrink-0 font-mono text-base text-cyan-300">
+                {t("auctionBid.bidEquals", { value })}
+              </span>
+              <input
+                type="number"
+                min={minBid}
+                value={value}
+                onChange={(e) =>
+                  setValue(Math.max(minBid, Number(e.target.value) || minBid))
+                }
+                className="w-full rounded-lg border border-gray-600 bg-gray-800 px-3 py-1.5 font-mono text-base text-cyan-300"
+                aria-label={t("auctionBid.bidAria")}
+              />
+              <span className="shrink-0 text-xs text-gray-500">
+                {t("auctionBid.minBid", { min: minBid })}
+              </span>
+            </label>
+          </div>
 
           <div className="flex justify-center gap-3">
-            {canTop && (
-              <button
-                onClick={handleBid}
-                className={gameButtonClass({ tone: "emerald", size: "md" })}
-              >
-                {t("auctionBid.submitBid", { value })}
-              </button>
-            )}
+            <button
+              onClick={handleBid}
+              className={gameButtonClass({ tone: "emerald", size: "md" })}
+            >
+              {t("auctionBid.submitBid", { value })}
+            </button>
             <button
               onClick={handlePass}
               className="rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"

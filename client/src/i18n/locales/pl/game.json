@@ -441,6 +441,7 @@
     "bidEquals": "Licytuj {{value}}",
     "bidAria": "Wybierz ilość życia do zalicytowania",
     "lifeMax": "maks. {{max}}",
+    "minBid": "min. {{min}}",
     "submitBid": "Licytuj {{value}} życia",
     "pass": "Pas"
   },

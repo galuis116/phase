@@ -441,6 +441,7 @@
     "bidEquals": "Miser {{value}}",
     "bidAria": "Choisissez un montant de points de vie à miser",
     "lifeMax": "max {{max}}",
+    "minBid": "min {{min}}",
     "submitBid": "Miser {{value}} points de vie",
     "pass": "Passer"
   },
