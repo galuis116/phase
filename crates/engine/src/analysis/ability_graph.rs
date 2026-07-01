@@ -867,6 +867,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::EndTheTurn
         | Effect::EndCombatPhase
         | Effect::Vote { .. }
+        | Effect::AuctionBid { .. }
         | Effect::SeparateIntoPiles { .. }
         | Effect::SwitchPT { .. }
         | Effect::CombineHost { .. }

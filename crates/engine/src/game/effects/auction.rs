@@ -304,5 +304,6 @@ fn resolved_from_def(
         sub_link: def.sub_link,
         modal: def.modal.clone(),
         mode_abilities: def.mode_abilities.clone(),
+        dig_found_nothing_for_parent_target: false,
     }
 }
