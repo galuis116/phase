@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
-import type { WaitingFor } from "../../adapter/types";
-import { MAX_AUCTION_BID } from "../../game/auctionBidLimits";
-import { useGameStore } from "../../stores/gameStore";
+import type { WaitingFor } from "../../../adapter/types";
+import { MAX_AUCTION_BID } from "../../../game/auctionBidLimits";
+import { useGameStore } from "../../../stores/gameStore";
 import { AuctionBidUI } from "../AuctionBidUI";
 
 function auctionWaitingFor(
