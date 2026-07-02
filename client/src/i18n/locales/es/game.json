@@ -479,6 +479,7 @@
     "bidEquals": "Pujar {{value}}",
     "bidAria": "Elige una cantidad de vidas para pujar",
     "lifeMax": "máx. {{max}}",
+    "maxBid": "máx. {{max}}",
     "minBid": "mín. {{min}}",
     "submitBid": "Pujar {{value}} vidas",
     "pass": "Pasar"
@@ -1958,6 +1959,7 @@
       "mulligan": "mulligan decision",
       "discarding": "discarding",
       "orderingTriggers": "ordering triggers",
+      "biddingLife": "bidding life",
       "respondingToStack": "responding to the stack",
       "priorityCombat": "combat",
       "priorityMain": "main phase",

@@ -140,7 +140,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "RevealUntilKeptChoice",
     "RepeatDecision",
     "VoteChoice",
-    // CR 119.3: open-bid life auction (AuctionBidUI numeric overlay).
+    // Open-bid life auction (AuctionBidUI numeric overlay).
     "AuctionBid",
     "SeparatePilesPartition",
     "SeparatePilesChoice",
@@ -235,6 +235,8 @@ export function waitingForReason(
       return { key: "status.reason.discarding" };
     case "OrderTriggers":
       return { key: "status.reason.orderingTriggers" };
+    case "AuctionBid":
+      return { key: "status.reason.biddingLife" };
     case "Priority": {
       // CR 117: the priority window. The engine-provided stack depth and phase
       // tell us what kind of window this is — purely descriptive labeling.

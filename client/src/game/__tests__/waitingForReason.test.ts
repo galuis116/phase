@@ -42,6 +42,8 @@ describe("waitingForReason", () => {
       .toBe("status.reason.mulligan");
     expect(waitingForReason(wf("OrderTriggers"), gs("Upkeep"))?.key)
       .toBe("status.reason.orderingTriggers");
+    expect(waitingForReason(wf("AuctionBid"), gs("PreCombatMain"))?.key)
+      .toBe("status.reason.biddingLife");
   });
 
   it("disambiguates the Priority window by stack depth then phase", () => {

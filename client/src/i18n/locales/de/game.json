@@ -479,6 +479,7 @@
     "bidEquals": "{{value}} bieten",
     "bidAria": "Wähle einen Lebensbetrag zum Bieten",
     "lifeMax": "max. {{max}}",
+    "maxBid": "max. {{max}}",
     "minBid": "min. {{min}}",
     "submitBid": "{{value}} Leben bieten",
     "pass": "Passen"
@@ -1958,6 +1959,7 @@
       "mulligan": "mulligan decision",
       "discarding": "discarding",
       "orderingTriggers": "ordering triggers",
+      "biddingLife": "bidding life",
       "respondingToStack": "responding to the stack",
       "priorityCombat": "combat",
       "priorityMain": "main phase",

@@ -2,6 +2,10 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import {
+  clampAuctionBid,
+  MAX_AUCTION_BID,
+} from "../../game/auctionBidLimits.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
@@ -9,8 +13,8 @@ import { gameButtonClass } from "../ui/buttonStyles.ts";
 /**
  * Overlay for the `WaitingFor::AuctionBid` state.
  *
- * CR 119.3 + CR 101.4: Open-bid life auction (Illicit Auction, Pain's Reward,
- * Mages' Contest). The acting player either tops the current high bid or passes.
+ * CR 101.4: Open-bid life auction (Illicit Auction, Pain's Reward, Mages'
+ * Contest). The acting player either tops the current high bid or passes.
  * A bid `amount > current_high_bid` tops; passing dispatches
  * `SubmitBid { amount: current_high_bid }` (any value `<= current_high_bid` is a
  * pass). During the player-chosen opening phase (Pain's Reward) the first bid
@@ -18,7 +22,8 @@ import { gameButtonClass } from "../ui/buttonStyles.ts";
  * opening bid of zero.
  *
  * Pure display layer: it never bids on the player's behalf. Bids may exceed
- * the bidder's life total — life is lost only when the auction settles.
+ * the bidder's life total — life is lost only when the auction settles (CR
+ * 119.3).
  */
 export function AuctionBidUI() {
   const { t } = useTranslation("game");
@@ -33,8 +38,8 @@ export function AuctionBidUI() {
   // The opening phase (Pain's Reward) is exactly when no high bidder is set yet.
   const openingPhase = data ? data.high_bidder === null : false;
 
-  // CR 119.3: A topping bid must strictly exceed the current high bid. During
-  // the opening phase the minimum is 0 ("a bid of any number").
+  // A topping bid must strictly exceed the current high bid. During the opening
+  // phase the minimum is 0 ("a bid of any number").
   const minBid = openingPhase ? 0 : currentHighBid + 1;
 
   const [value, setValue] = useState(minBid);
@@ -49,13 +54,13 @@ export function AuctionBidUI() {
   }, [gameState, data]);
 
   const handleBid = useCallback(() => {
-    const amount = Math.max(value, minBid);
+    const amount = clampAuctionBid(value, minBid);
     dispatch({ type: "SubmitBid", data: { amount } });
   }, [dispatch, value, minBid]);
 
   const handlePass = useCallback(() => {
-    // CR 119.3: A pass is any bid that does not top the high bid. During the
-    // opening phase, the player must still set an opening — pass of 0.
+    // A pass is any bid that does not top the high bid. During the opening
+    // phase, the player must still set an opening — pass of 0.
     dispatch({
       type: "SubmitBid",
       data: { amount: openingPhase ? 0 : currentHighBid },
@@ -95,15 +100,23 @@ export function AuctionBidUI() {
               <input
                 type="number"
                 min={minBid}
+                max={MAX_AUCTION_BID}
                 value={value}
                 onChange={(e) =>
-                  setValue(Math.max(minBid, Number(e.target.value) || minBid))
+                  setValue(
+                    clampAuctionBid(
+                      Number(e.target.value) || minBid,
+                      minBid,
+                    ),
+                  )
                 }
                 className="w-full rounded-lg border border-gray-600 bg-gray-800 px-3 py-1.5 font-mono text-base text-cyan-300"
                 aria-label={t("auctionBid.bidAria")}
               />
               <span className="shrink-0 text-xs text-gray-500">
                 {t("auctionBid.minBid", { min: minBid })}
+                {" · "}
+                {t("auctionBid.maxBid", { max: MAX_AUCTION_BID })}
               </span>
             </label>
           </div>
