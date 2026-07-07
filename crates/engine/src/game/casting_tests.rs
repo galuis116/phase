@@ -33276,6 +33276,75 @@ mod loyalty_gate {
         );
     }
 
+    /// CR 606.3 + CR 606.1 + CR 118.7: A loyalty ability whose activation cost was
+    /// raised by a static (Eidolon of Obstruction) carries its `Loyalty` cost
+    /// inside a `Composite`. The DIRECT `GameAction::ActivateAbility` guard in
+    /// `handle_activate_ability` classifies the already tax-mutated cost with
+    /// `is_loyalty_ability_cost`, so that predicate must keep recognizing the
+    /// taxed composite — otherwise a second taxed loyalty activation in the same
+    /// turn bypasses the per-permanent CR 606.3 gate (candidate generation still
+    /// blocks through its pre-tax path). Reverting the `Composite` arm of
+    /// `is_loyalty_ability_cost` makes the guard skip and this activation succeed.
+    #[test]
+    fn direct_activation_of_taxed_loyalty_ability_second_time_denied() {
+        use crate::types::ability::{StaticDefinition, TargetFilter, TypeFilter, TypedFilter};
+        use crate::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
+
+        let mut state = setup_game_at_main_phase();
+        // P0's planeswalker with a single loyalty ability.
+        let pw = add_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "Taxed Walker",
+            4,
+            vec![make_loyalty_ability(1)],
+        );
+        // P1's Eidolon of Obstruction taxes loyalty abilities of planeswalkers
+        // P1's opponents (P0) control.
+        let eidolon_card_id = CardId(state.next_object_id);
+        let eidolon = create_object(
+            &mut state,
+            eidolon_card_id,
+            PlayerId(1),
+            "Eidolon of Obstruction".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&eidolon).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Raise,
+                keyword: "loyalty".to_string(),
+                amount: 1,
+                minimum_mana: None,
+                dynamic_count: None,
+                exemption: ActivationExemption::None,
+                activator: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
+            ))]
+            .into();
+        }
+
+        // Simulate P0 having already activated a loyalty ability of this PW this turn.
+        state
+            .objects
+            .get_mut(&pw)
+            .unwrap()
+            .loyalty_activations_this_turn = 1;
+
+        // CR 606.3: the direct activation must be rejected even though the tax
+        // wrapped the loyalty cost in a `Composite`.
+        let mut events = Vec::new();
+        let result = handle_activate_ability(&mut state, PlayerId(0), pw, 0, &mut events);
+        assert!(
+            matches!(result, Err(EngineError::ActionNotAllowed(ref m)) if m.contains("loyalty")),
+            "a taxed loyalty ability must still hit the CR 606.3 once-per-turn guard, got {result:?}"
+        );
+    }
+
     /// CR 606.3: The per-permanent gate resets at the start of the controller's
     /// turn (verified via `loyalty_activation_resets_at_turn_start` in
     /// `planeswalker.rs`). Reproducing the reset effect here ensures the

@@ -15602,10 +15602,9 @@ fn increase_generic_in_cost(cost: &mut AbilityCost, amount: u32) {
         // Obstruction actually tax an opponent's loyalty ability by {1}.
         _ => {
             let existing = std::mem::replace(cost, AbilityCost::Composite { costs: Vec::new() });
-            if let AbilityCost::Composite { costs } = cost {
-                costs.push(existing);
-                costs.push(added_generic_mana_cost(amount));
-            }
+            *cost = AbilityCost::Composite {
+                costs: vec![existing, added_generic_mana_cost(amount)],
+            };
         }
     }
 }
@@ -15698,18 +15697,16 @@ fn apply_static_activated_ability_cost_reduction(
     // abilities" / "that aren't mana abilities" — Suppression Field, Zirda) can
     // skip a mana ability's cost.
     let ability_is_mana = super::mana_abilities::is_mana_ability(ability_def);
-    // CR 606.1: Loyalty abilities are activated abilities identified by their
-    // `AbilityCost::Loyalty` cost, not by an `AbilityTag`. A `ReduceAbilityCost`
-    // static keyed on `keyword == "loyalty"` (Eidolon of Obstruction) matches
-    // exactly this class, so classify it here before the mutable cost borrow.
-    let ability_is_loyalty = ability_def
-        .cost
-        .as_ref()
-        .is_some_and(crate::types::ability::is_loyalty_ability_cost);
 
     let Some(cost) = ability_def.cost.as_mut() else {
         return;
     };
+    // CR 606.1: Loyalty abilities are activated abilities identified by their
+    // `AbilityCost::Loyalty` cost, not by an `AbilityTag`. A `ReduceAbilityCost`
+    // static keyed on `keyword == "loyalty"` (Eidolon of Obstruction) matches
+    // exactly this class. Classified on the unwrapped cost (a `&mut` reborrows to
+    // `&`) before the loop mutates it.
+    let ability_is_loyalty = crate::types::ability::is_loyalty_ability_cost(cost);
 
     for (static_source, def) in super::functioning_abilities::battlefield_active_statics(state) {
         let StaticMode::ReduceAbilityCost {
