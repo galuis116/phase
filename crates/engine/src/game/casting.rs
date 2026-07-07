@@ -15575,15 +15575,49 @@ fn increase_generic_in_cost(cost: &mut AbilityCost, amount: u32) {
         } => {
             *generic = generic.saturating_add(amount);
         }
+        // A pre-resolution placeholder mana cost (`NoCost`, `SelfManaCost`, …) or a
+        // `ManaDynamic` cost carries no concrete generic component to grow here; it
+        // is concretized on its own path, so leave it untouched.
+        AbilityCost::Mana { .. } | AbilityCost::ManaDynamic { .. } => {}
         AbilityCost::Composite { costs } => {
-            if let Some(sub) = costs
-                .iter_mut()
-                .find(|c| matches!(c, AbilityCost::Mana { .. }))
-            {
+            if let Some(sub) = costs.iter_mut().find(|c| {
+                matches!(
+                    c,
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { .. }
+                    }
+                )
+            }) {
                 increase_generic_in_cost(sub, amount);
+            } else {
+                // CR 118.7: no concrete mana component to grow — add one so the
+                // increase still applies (e.g. a Composite of only `{T}`/sacrifice).
+                costs.push(added_generic_mana_cost(amount));
             }
         }
-        _ => {} // Non-mana costs unaffected
+        // CR 118.7 + CR 606.1: A non-mana cost (a loyalty ability's `Loyalty` cost,
+        // a bare `{T}` / sacrifice / pay-life cost) has no generic mana to grow, so
+        // a raise must ADD a generic-mana component. Wrap the existing cost in a
+        // `Composite` with the added `{amount}` — this is what makes Eidolon of
+        // Obstruction actually tax an opponent's loyalty ability by {1}.
+        _ => {
+            let existing = std::mem::replace(cost, AbilityCost::Composite { costs: Vec::new() });
+            if let AbilityCost::Composite { costs } = cost {
+                costs.push(existing);
+                costs.push(added_generic_mana_cost(amount));
+            }
+        }
+    }
+}
+
+/// CR 118.7: A `{amount}` generic-mana `AbilityCost`, used to add a mana component
+/// to an ability whose printed cost has none when a cost-raise static applies.
+fn added_generic_mana_cost(amount: u32) -> AbilityCost {
+    AbilityCost::Mana {
+        cost: ManaCost::Cost {
+            shards: Vec::new(),
+            generic: amount,
+        },
     }
 }
 
@@ -15664,6 +15698,14 @@ fn apply_static_activated_ability_cost_reduction(
     // abilities" / "that aren't mana abilities" — Suppression Field, Zirda) can
     // skip a mana ability's cost.
     let ability_is_mana = super::mana_abilities::is_mana_ability(ability_def);
+    // CR 606.1: Loyalty abilities are activated abilities identified by their
+    // `AbilityCost::Loyalty` cost, not by an `AbilityTag`. A `ReduceAbilityCost`
+    // static keyed on `keyword == "loyalty"` (Eidolon of Obstruction) matches
+    // exactly this class, so classify it here before the mutable cost borrow.
+    let ability_is_loyalty = ability_def
+        .cost
+        .as_ref()
+        .is_some_and(crate::types::ability::is_loyalty_ability_cost);
 
     let Some(cost) = ability_def.cost.as_mut() else {
         return;
@@ -15682,7 +15724,13 @@ fn apply_static_activated_ability_cost_reduction(
         else {
             continue;
         };
-        if (keyword != "activated" && Some(keyword.as_str()) != active_keyword) || *amount == 0 {
+        // CR 601.2f + CR 606.1: match the "activated" blanket arm, a tag-keyed
+        // keyword (power-up, exhaust, …), or the "loyalty" arm against a loyalty
+        // ability's cost.
+        let keyword_matches = keyword == "activated"
+            || Some(keyword.as_str()) == active_keyword
+            || (keyword == "loyalty" && ability_is_loyalty);
+        if !keyword_matches || *amount == 0 {
             continue;
         }
         // CR 605.1a: a mana ability bypasses a "unless they're mana abilities"

@@ -38759,6 +38759,171 @@ fn skyseer_increases_chosen_name_activated_ability_cost() {
     );
 }
 
+/// CR 606.1 + CR 118.7 + CR 601.2f: Eidolon of Obstruction — "Loyalty abilities
+/// of planeswalkers your opponents control cost {1} more to activate." Loyalty
+/// abilities are activated abilities (CR 606.1) whose printed cost is a bare
+/// `Loyalty` cost with no mana component, so the raise must ADD a generic-mana
+/// component (CR 118.7) rather than grow a nonexistent one. The generalized
+/// "Activated/Loyalty abilities of [subject]" parser emits
+/// `ReduceAbilityCost { keyword: "loyalty" }`, and the runtime gate matches it
+/// against an ability whose cost `is_loyalty_ability_cost`.
+///
+/// Drives the production seam `apply_cost_reduction`. Discriminating assertions:
+///   - An opponent's planeswalker loyalty ability gains a {1} generic component.
+///     Reverting the `increase_generic_in_cost` non-mana arm leaves the bare
+///     `Loyalty` cost untouched, so this reads {0} and fails.
+///   - The controller's OWN planeswalker loyalty ability is untaxed (the
+///     `controller: Opponent` affected filter excludes it).
+///   - A non-loyalty (mana-cost) activated ability on the opponent's
+///     planeswalker is untaxed — the "loyalty" keyword requires a loyalty cost.
+///     Reverting the gate's `keyword == "loyalty"` arm would leave the first
+///     assertion at {0}.
+#[test]
+fn eidolon_of_obstruction_taxes_opponent_loyalty_ability() {
+    use crate::types::ability::{
+        AbilityCost, Effect, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    };
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::CardId;
+    use crate::types::mana::ManaCost;
+    use crate::types::statics::{CostModifyMode, StaticMode};
+
+    let mut state = GameState::new_two_player(7);
+
+    // Eidolon of Obstruction (controlled by P0) carries the parsed Raise static
+    // keyed on "loyalty", affecting planeswalkers P0's opponents control.
+    let eidolon = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Eidolon of Obstruction".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&eidolon).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Raise,
+            keyword: "loyalty".to_string(),
+            amount: 1,
+            minimum_mana: None,
+            dynamic_count: None,
+            exemption: crate::types::statics::ActivationExemption::None,
+            activator: None,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
+        ))]
+        .into();
+    }
+
+    // Opponent's planeswalker (P1) and the controller's own planeswalker (P0).
+    let opp_pw = create_object(
+        &mut state,
+        CardId(2),
+        PlayerId(1),
+        "Opponent Walker".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&opp_pw)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Planeswalker);
+    let own_pw = create_object(
+        &mut state,
+        CardId(3),
+        PlayerId(0),
+        "Own Walker".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&own_pw)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Planeswalker);
+
+    let make_loyalty_def = || {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Unimplemented {
+                name: "loyalty".to_string(),
+                description: None,
+            },
+        );
+        def.cost = Some(AbilityCost::Loyalty { amount: 1 });
+        def
+    };
+    let make_mana_def = || {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Unimplemented {
+                name: "mana".to_string(),
+                description: None,
+            },
+        );
+        def.cost = Some(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards: vec![],
+                generic: 3,
+            },
+        });
+        def
+    };
+    // Sum the generic mana across a (possibly composite) cost.
+    let added_generic = |def: &AbilityDefinition| -> u32 {
+        match def.cost.as_ref().unwrap() {
+            AbilityCost::Composite { costs } => costs
+                .iter()
+                .filter_map(|c| match c {
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { generic, .. },
+                    } => Some(*generic),
+                    _ => None,
+                })
+                .sum(),
+            AbilityCost::Loyalty { .. } => 0,
+            AbilityCost::Mana {
+                cost: ManaCost::Cost { generic, .. },
+            } => *generic,
+            other => panic!("unexpected cost {other:?}"),
+        }
+    };
+
+    // Opponent's loyalty ability: the bare Loyalty cost gains a {1} component.
+    let mut def_opp = make_loyalty_def();
+    apply_cost_reduction(&state, &mut def_opp, PlayerId(1), opp_pw);
+    assert_eq!(
+        added_generic(&def_opp),
+        1,
+        "an opponent's loyalty ability must be taxed {{1}}"
+    );
+
+    // Controller's OWN loyalty ability: untaxed (opponent-scoped affected filter).
+    let mut def_own = make_loyalty_def();
+    apply_cost_reduction(&state, &mut def_own, PlayerId(0), own_pw);
+    assert_eq!(
+        added_generic(&def_own),
+        0,
+        "the controller's own loyalty ability must not be taxed"
+    );
+
+    // A non-loyalty (mana-cost) activated ability on the opponent's planeswalker:
+    // untaxed — the loyalty-keyed static requires a loyalty cost.
+    let mut def_mana = make_mana_def();
+    apply_cost_reduction(&state, &mut def_mana, PlayerId(1), opp_pw);
+    assert_eq!(
+        added_generic(&def_mana),
+        3,
+        "the loyalty-keyed static must not tax a non-loyalty ability"
+    );
+}
+
 /// CR 601.2f + CR 208.1 + CR 113.7: Agatha of the Vile Cauldron — "Activated
 /// abilities of creatures you control cost {X} less to activate, where X is
 /// ~'s power. ... can't reduce ... less than one mana." The reduction is
