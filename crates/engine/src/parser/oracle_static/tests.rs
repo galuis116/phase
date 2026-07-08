@@ -521,6 +521,30 @@ fn static_ignore_hexproof_without_ward_emits_single_static() {
     assert_eq!(defs[0].mode, StaticMode::IgnoreHexproof);
 }
 
+/// CR 702.11b: Glaring Spotlight — "Creatures your opponents control with
+/// hexproof can be the targets of spells and abilities YOU CONTROL as though
+/// they didn't have hexproof." The optional "you control" qualifier between
+/// "spells and abilities" and "as though" must be consumed; the bypass is a
+/// targeting permission on the affected permanents, so it emits the same single
+/// `IgnoreHexproof` as the unqualified Nowhere to Run form, scoped to opponents'
+/// creatures.
+#[test]
+fn static_ignore_hexproof_with_you_control_qualifier() {
+    let defs = parse_static_line_multi(
+        "Creatures your opponents control with hexproof can be the targets of spells and abilities you control as though they didn't have hexproof.",
+    );
+    assert_eq!(defs.len(), 1, "expected only IgnoreHexproof, got {defs:?}");
+    assert_eq!(defs[0].mode, StaticMode::IgnoreHexproof);
+    assert!(
+        matches!(
+            defs[0].affected,
+            Some(TargetFilter::Typed(ref tf)) if tf.controller == Some(ControllerRef::Opponent)
+        ),
+        "must scope the bypass to opponents' creatures, got {:?}",
+        defs[0].affected
+    );
+}
+
 /// CR 702.16k + CR 702.16i: Player-SUBJECT protection "You have protection from
 /// each of your opponents." (Absolute Virtue) must emit a SINGLE
 /// `PlayerProtection(FromPlayer(Opponent))` def affecting the controller — NOT a

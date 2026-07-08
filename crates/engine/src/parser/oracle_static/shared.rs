@@ -31,8 +31,15 @@ pub(crate) fn parse_ignore_hexproof_static(
     let bypass: OracleResult<'_, ()> = (|| {
         let (i, _) = tag::<_, _, OracleError<'_>>(" can be the target").parse(after_subject)?;
         let (i, _) = opt(tag::<_, _, OracleError<'_>>("s")).parse(i)?;
-        let (i, _) =
-            tag::<_, _, OracleError<'_>>(" of spells and abilities as though ").parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>(" of spells and abilities").parse(i)?;
+        // CR 702.11b: an optional "you control" qualifier scopes WHICH spells and
+        // abilities bypass hexproof (Glaring Spotlight, Detection Tower, Kaya,
+        // Bane of the Dead). The bypass is a targeting permission on the affected
+        // permanents regardless of whose spell/ability targets them, so the
+        // qualifier doesn't change the emitted `IgnoreHexproof` — it just has to
+        // be consumed. Nowhere to Run omits it (bare "of spells and abilities").
+        let (i, _) = opt(tag::<_, _, OracleError<'_>>(" you control")).parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>(" as though ").parse(i)?;
         // CR 702.11b: plural ("they") or singular ("it") subject pronoun.
         let (i, _) = alt((
             tag::<_, _, OracleError<'_>>("they didn't"),
