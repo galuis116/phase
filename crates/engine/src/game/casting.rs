@@ -14696,7 +14696,17 @@ pub fn handle_activate_ability(
         // both fall through to the unchanged paths. SelfRef removal is excluded by
         // the walkers. `{X}`-mana removals were already caught by the X detour
         // above, so any mana leg seen here is non-X (mutually exclusive residuals).
-        if find_non_self_battlefield_removal_cost(cost).is_some() {
+        //
+        // CR 118.7 + CR 606.4: A loyalty ability taxed by a cost-raise static
+        // (Eidolon of Obstruction) reaches here as `Composite { Loyalty, Mana }`
+        // via `handle_activate_loyalty`'s delegation. It must ALSO hoist the mana
+        // leg to `enter_payment_step` and defer the loyalty counter cost as the
+        // `ManaLeg` residual — otherwise the composite falls through to
+        // `pay_ability_cost`, which pays the loyalty counters and then fails on the
+        // unaffordable mana, leaving the planeswalker with a free loyalty change.
+        if find_non_self_battlefield_removal_cost(cost).is_some()
+            || crate::types::ability::is_loyalty_ability_cost(cost)
+        {
             if let Some((mana_cost, remaining)) = casting_costs::extract_mana_leg(cost) {
                 let mut pending_leg = PendingCast::new(source_id, CardId(0), resolved, mana_cost);
                 pending_leg.activation_cost = remaining;
@@ -15618,6 +15628,29 @@ fn added_generic_mana_cost(amount: u32) -> AbilityCost {
             generic: amount,
         },
     }
+}
+
+/// CR 118.7 + CR 601.2f + CR 606.1: True when an active cost-modifier static
+/// (Eidolon of Obstruction) adds a mana component to an otherwise mana-free
+/// loyalty ability. Such an ability can no longer use the loyalty fast path
+/// (`handle_activate_loyalty`, which pays only loyalty counters and never mana);
+/// the caller routes it through the general activated-ability flow instead,
+/// which prompts for the added mana, pays the loyalty counters, records the
+/// CR 606.3 activation, and enforces the once-per-turn gate. A bare `Loyalty`
+/// cost that stays bare after applying every modifier is untaxed and keeps the
+/// fast path (zero behavior change for the common case).
+pub(crate) fn loyalty_ability_gains_mana_tax(
+    state: &GameState,
+    ability_def: &AbilityDefinition,
+    player: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    if !matches!(ability_def.cost, Some(AbilityCost::Loyalty { .. })) {
+        return false;
+    }
+    let mut probe = ability_def.clone();
+    apply_cost_reduction(state, &mut probe, player, source_id);
+    !matches!(probe.cost, Some(AbilityCost::Loyalty { .. }))
 }
 
 /// CR 601.2f: Apply self-referential cost reduction to an ability definition's cost.

@@ -33345,6 +33345,110 @@ mod loyalty_gate {
         );
     }
 
+    /// CR 118.7 + CR 606.1 + CR 606.4: Production regression for the real
+    /// `GameAction::ActivateAbility` path (`handle_activate_loyalty`, engine.rs).
+    /// Without Eidolon, a fixed loyalty ability uses the mana-free fast path and
+    /// never enters a mana-payment step. With Eidolon taxing it {1}, the fast
+    /// path defers to the general activated-ability flow, which gates the
+    /// activation behind paying the added mana — so an opponent who lacks the {1}
+    /// cannot activate it for free. Reverting the `handle_activate_loyalty`
+    /// delegation makes the taxed case resolve without a mana step and this fails.
+    #[test]
+    fn eidolon_forces_mana_payment_for_real_loyalty_activation() {
+        use crate::types::ability::{StaticDefinition, TargetFilter, TypeFilter, TypedFilter};
+        use crate::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
+
+        fn build(with_eidolon: bool) -> (GameState, ObjectId) {
+            let mut state = setup_game_at_main_phase();
+            let pw = add_planeswalker(
+                &mut state,
+                PlayerId(0),
+                "Loyal Walker",
+                4,
+                vec![make_loyalty_ability(1)],
+            );
+            if with_eidolon {
+                let cid = CardId(state.next_object_id);
+                let eidolon = create_object(
+                    &mut state,
+                    cid,
+                    PlayerId(1),
+                    "Eidolon of Obstruction".to_string(),
+                    Zone::Battlefield,
+                );
+                let obj = state.objects.get_mut(&eidolon).unwrap();
+                obj.card_types.core_types.push(CoreType::Enchantment);
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.static_definitions =
+                    vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                        mode: CostModifyMode::Raise,
+                        keyword: "loyalty".to_string(),
+                        amount: 1,
+                        minimum_mana: None,
+                        dynamic_count: None,
+                        exemption: ActivationExemption::None,
+                        activator: None,
+                    })
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Planeswalker)
+                            .controller(ControllerRef::Opponent),
+                    ))]
+                    .into();
+            }
+            (state, pw)
+        }
+
+        // Control: untaxed loyalty activation never requires mana.
+        let (mut s0, pw0) = build(false);
+        let mut ev0 = Vec::new();
+        let r0 = crate::game::planeswalker::handle_activate_loyalty(
+            &mut s0,
+            PlayerId(0),
+            pw0,
+            0,
+            &mut ev0,
+        )
+        .expect("untaxed loyalty activation must proceed");
+        assert!(
+            !matches!(r0, WaitingFor::ManaPayment { .. }),
+            "an untaxed loyalty ability must not require mana, got {r0:?}"
+        );
+
+        // Under Eidolon, the real activation path routes through the general
+        // activated-ability flow and gates on the added {1}: the mana leg is paid
+        // FIRST (CR 601.2g) with the loyalty counter cost deferred as the residual.
+        // A manaless player therefore either stops at a mana-payment step or is
+        // refused — but NEVER gains a free loyalty change (the pre-fix bug: the
+        // composite paid the loyalty counters, then failed on the unaffordable
+        // mana). The unchanged loyalty is the load-bearing assertion.
+        let (mut s1, pw1) = build(true);
+        let loyalty_before = s1.objects.get(&pw1).unwrap().loyalty;
+        let mut ev1 = Vec::new();
+        let r1 = crate::game::planeswalker::handle_activate_loyalty(
+            &mut s1,
+            PlayerId(0),
+            pw1,
+            0,
+            &mut ev1,
+        );
+        match &r1 {
+            Ok(wf) => assert!(
+                matches!(wf, WaitingFor::ManaPayment { .. }),
+                "a taxed loyalty activation must stop at the mana-payment step, got {wf:?}"
+            ),
+            Err(EngineError::ActionNotAllowed(m)) => assert!(
+                m.to_lowercase().contains("mana"),
+                "a taxed loyalty refusal must be about the unpayable mana, got {m}"
+            ),
+            other => panic!("unexpected activation result {other:?}"),
+        }
+        assert_eq!(
+            s1.objects.get(&pw1).unwrap().loyalty,
+            loyalty_before,
+            "the loyalty counter must not change until the taxed {{1}} is paid"
+        );
+    }
+
     /// CR 606.3: The per-permanent gate resets at the start of the controller's
     /// turn (verified via `loyalty_activation_resets_at_turn_start` in
     /// `planeswalker.rs`). Reproducing the reset effect here ensures the
