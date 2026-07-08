@@ -1300,7 +1300,11 @@ fn reconcile_host_bound_phase_outs_in_ability(def: &mut AbilityDefinition) {
 /// the resolution-scoped `ChosenPlayer { index }`). This pass flips `persist` to
 /// `true` on those choices ONLY when the card also carries a durable
 /// `SourceChosenPlayer` reference — mirroring the "persist when referred back to"
-/// intent documented on `Effect::Choose`.
+/// intent documented on `Effect::Choose`. The reference can live in a static
+/// (`Creatures attacking the last chosen player ...`), an activated ability, or a
+/// triggered ability — a phase trigger scoped to "the chosen player's" step
+/// (`oracle_trigger.rs`) or an effect keyed to the chosen player — so all three
+/// surfaces are scanned as readers.
 fn reconcile_persisted_player_choice_for_source_chosen_ref(result: &mut ParsedAbilities) {
     let references_source_chosen_player = result
         .statics
@@ -1309,7 +1313,11 @@ fn reconcile_persisted_player_choice_for_source_chosen_ref(result: &mut ParsedAb
         || result
             .abilities
             .iter()
-            .any(ability_references_source_chosen_player);
+            .any(ability_references_source_chosen_player)
+        || result
+            .triggers
+            .iter()
+            .any(trigger_references_source_chosen_player);
     if !references_source_chosen_player {
         return;
     }
@@ -1331,6 +1339,20 @@ fn static_references_source_chosen_player(def: &StaticDefinition) -> bool {
         .is_some_and(filter_references_source_chosen_player)
 }
 
+/// Whether a triggered ability reads the source's persisted chosen player —
+/// either via its own `valid_target` (a phase trigger scoped to "the chosen
+/// player's" step) or anywhere in its executed effect chain.
+fn trigger_references_source_chosen_player(trigger: &TriggerDefinition) -> bool {
+    trigger
+        .valid_target
+        .as_ref()
+        .is_some_and(filter_references_source_chosen_player)
+        || trigger
+            .execute
+            .as_deref()
+            .is_some_and(ability_references_source_chosen_player)
+}
+
 /// Whether an ability's effect targets the source's persisted chosen player, so
 /// a "choose a player" earlier in the same card must persist it. Recurses the
 /// sub-ability chain.
@@ -1342,11 +1364,14 @@ fn ability_references_source_chosen_player(def: &AbilityDefinition) -> bool {
             .is_some_and(ability_references_source_chosen_player)
 }
 
+/// Whether any target filter carried by `effect` reads the source's persisted
+/// chosen player. Uses the generic `Effect::target_filter` accessor so every
+/// player-targeting effect variant is covered (damage, life loss/gain, draw,
+/// discard, mill, ...), not a single hand-enumerated case.
 fn effect_targets_source_chosen_player(effect: &Effect) -> bool {
-    match effect {
-        Effect::DealDamage { target, .. } => filter_references_source_chosen_player(target),
-        _ => false,
-    }
+    effect
+        .target_filter()
+        .is_some_and(filter_references_source_chosen_player)
 }
 
 /// Tree-walks a `TargetFilter` for a durable `SourceChosenPlayer` reference —
