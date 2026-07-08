@@ -519,15 +519,20 @@ fn static_ignore_hexproof_without_ward_emits_single_static() {
     );
     assert_eq!(defs.len(), 1, "expected only IgnoreHexproof, got {defs:?}");
     assert_eq!(defs[0].mode, StaticMode::IgnoreHexproof);
+    // CR 609.4: no "you control" qualifier → unrestricted bypass (any player).
+    assert_eq!(
+        defs[0].bypass_beneficiary, None,
+        "the unqualified Nowhere to Run form must leave the bypass unrestricted"
+    );
 }
 
-/// CR 702.11b: Glaring Spotlight — "Creatures your opponents control with
-/// hexproof can be the targets of spells and abilities YOU CONTROL as though
-/// they didn't have hexproof." The optional "you control" qualifier between
-/// "spells and abilities" and "as though" must be consumed; the bypass is a
-/// targeting permission on the affected permanents, so it emits the same single
-/// `IgnoreHexproof` as the unqualified Nowhere to Run form, scoped to opponents'
-/// creatures.
+/// CR 702.11e / CR 609.4: Glaring Spotlight — "Creatures your opponents control
+/// with hexproof can be the targets of spells and abilities YOU CONTROL as
+/// though they didn't have hexproof." The "you control" qualifier between
+/// "spells and abilities" and "as though" is semantically load-bearing: it
+/// restricts the bypass beneficiary to the static controller
+/// (`bypass_beneficiary = Some(You)`), unlike the unqualified Nowhere to Run
+/// form (any player). Still one `IgnoreHexproof` scoped to opponents' creatures.
 #[test]
 fn static_ignore_hexproof_with_you_control_qualifier() {
     let defs = parse_static_line_multi(
@@ -535,6 +540,12 @@ fn static_ignore_hexproof_with_you_control_qualifier() {
     );
     assert_eq!(defs.len(), 1, "expected only IgnoreHexproof, got {defs:?}");
     assert_eq!(defs[0].mode, StaticMode::IgnoreHexproof);
+    assert_eq!(
+        defs[0].bypass_beneficiary,
+        Some(ControllerRef::You),
+        "the 'you control' qualifier must restrict the bypass to the controller, got {:?}",
+        defs[0].bypass_beneficiary
+    );
     assert!(
         matches!(
             defs[0].affected,
