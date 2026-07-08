@@ -33449,6 +33449,118 @@ mod loyalty_gate {
         );
     }
 
+    /// CR 601.2c + CR 118.7: A TARGETED loyalty ability taxed by Eidolon must
+    /// still choose targets before paying costs. The taxed composite is deferred
+    /// (not hoisted) for targeted abilities, so activation falls through to the
+    /// general target-first path: it stops at target selection with the loyalty
+    /// counter (and the added {1}) still unpaid. The unchanged loyalty while
+    /// waiting for targets is the load-bearing assertion — the pre-fix delegation
+    /// hoisted the mana leg and paid before target selection.
+    #[test]
+    fn eidolon_taxed_targeted_loyalty_selects_targets_before_paying() {
+        use crate::types::ability::{
+            ActivationRestriction, Effect, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        };
+        use crate::types::mana::ManaType;
+        use crate::types::statics::{ActivationExemption, CostModifyMode, StaticMode};
+
+        let mut state = setup_game_at_main_phase();
+
+        // A targeted [-1] loyalty ability: deal 1 damage to target creature.
+        let mut targeted = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                damage_source: None,
+                excess: None,
+            },
+        )
+        .cost(AbilityCost::Loyalty { amount: -1 });
+        targeted
+            .activation_restrictions
+            .push(ActivationRestriction::AsSorcery);
+        targeted
+            .activation_restrictions
+            .push(ActivationRestriction::OnlyOnceEachTurn);
+        let pw = add_planeswalker(
+            &mut state,
+            PlayerId(0),
+            "Targeting Walker",
+            4,
+            vec![targeted],
+        );
+
+        // Two opposing creatures so target selection is interactive (not auto).
+        for (cid, name) in [(9001u64, "Creature A"), (9002u64, "Creature B")] {
+            let c = create_object(
+                &mut state,
+                CardId(cid),
+                PlayerId(1),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&c)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        // Eidolon (P1) taxes P0's planeswalker loyalty abilities {1}.
+        let cid = CardId(state.next_object_id);
+        let eidolon = create_object(
+            &mut state,
+            cid,
+            PlayerId(1),
+            "Eidolon of Obstruction".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&eidolon).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.static_definitions = vec![StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: CostModifyMode::Raise,
+                keyword: "loyalty".to_string(),
+                amount: 1,
+                minimum_mana: None,
+                dynamic_count: None,
+                exemption: ActivationExemption::None,
+                activator: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::Opponent),
+            ))]
+            .into();
+        }
+
+        // Give P0 the {1} so activation reaches target selection rather than being
+        // refused for unpayable mana.
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+        let loyalty_before = state.objects.get(&pw).unwrap().loyalty;
+        let waiting = crate::game::planeswalker::handle_activate_loyalty(
+            &mut state,
+            PlayerId(0),
+            pw,
+            0,
+            &mut Vec::new(),
+        )
+        .expect("taxed targeted loyalty activation must proceed to target selection");
+        assert!(
+            matches!(waiting, WaitingFor::TargetSelection { .. }),
+            "a taxed targeted loyalty ability must ask for targets first, got {waiting:?}"
+        );
+        assert_eq!(
+            state.objects.get(&pw).unwrap().loyalty,
+            loyalty_before,
+            "loyalty must be unchanged while waiting for target selection"
+        );
+    }
+
     /// CR 606.3: The per-permanent gate resets at the start of the controller's
     /// turn (verified via `loyalty_activation_resets_at_turn_start` in
     /// `planeswalker.rs`). Reproducing the reset effect here ensures the

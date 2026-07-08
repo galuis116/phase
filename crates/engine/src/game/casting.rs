@@ -14698,15 +14698,18 @@ pub fn handle_activate_ability(
         // above, so any mana leg seen here is non-X (mutually exclusive residuals).
         //
         // CR 118.7 + CR 606.4: A loyalty ability taxed by a cost-raise static
-        // (Eidolon of Obstruction) reaches here as `Composite { Loyalty, Mana }`
-        // via `handle_activate_loyalty`'s delegation. It must ALSO hoist the mana
-        // leg to `enter_payment_step` and defer the loyalty counter cost as the
-        // `ManaLeg` residual — otherwise the composite falls through to
-        // `pay_ability_cost`, which pays the loyalty counters and then fails on the
-        // unaffordable mana, leaving the planeswalker with a free loyalty change.
-        if find_non_self_battlefield_removal_cost(cost).is_some()
-            || crate::types::ability::is_loyalty_ability_cost(cost)
-        {
+        // (Eidolon of Obstruction) reaches here as `Composite { Mana, Loyalty }`
+        // via `handle_activate_loyalty`'s delegation. A NON-TARGETED taxed loyalty
+        // ability hoists the mana leg to `enter_payment_step` and defers the
+        // loyalty counter cost as the `ManaLeg` residual, so mana is paid before
+        // the loyalty counters (no free loyalty on an unaffordable/cancelled mana
+        // payment). A TARGETED taxed loyalty ability is deliberately NOT hoisted
+        // here — it must fall through to the general target-first path below
+        // (CR 601.2c: targets are chosen before costs are paid), where the
+        // mana-first `Composite` ordering keeps the post-target payment atomic.
+        let loyalty_no_targets = crate::types::ability::is_loyalty_ability_cost(cost)
+            && build_target_slots(state, &resolved)?.is_empty();
+        if find_non_self_battlefield_removal_cost(cost).is_some() || loyalty_no_targets {
             if let Some((mana_cost, remaining)) = casting_costs::extract_mana_leg(cost) {
                 let mut pending_leg = PendingCast::new(source_id, CardId(0), resolved, mana_cost);
                 pending_leg.activation_cost = remaining;
@@ -15600,9 +15603,11 @@ fn increase_generic_in_cost(cost: &mut AbilityCost, amount: u32) {
             }) {
                 increase_generic_in_cost(sub, amount);
             } else {
-                // CR 118.7: no concrete mana component to grow — add one so the
-                // increase still applies (e.g. a Composite of only `{T}`/sacrifice).
-                costs.push(added_generic_mana_cost(amount));
+                // CR 118.7 + CR 601.2h: no concrete mana component to grow — add
+                // one so the increase still applies (e.g. a Composite of only
+                // `{T}`/sacrifice). Inserted at the FRONT so it is paid before the
+                // non-mana components (see the `_` arm rationale).
+                costs.insert(0, added_generic_mana_cost(amount));
             }
         }
         // CR 118.7 + CR 606.1: A non-mana cost (a loyalty ability's `Loyalty` cost,
@@ -15610,10 +15615,16 @@ fn increase_generic_in_cost(cost: &mut AbilityCost, amount: u32) {
         // a raise must ADD a generic-mana component. Wrap the existing cost in a
         // `Composite` with the added `{amount}` — this is what makes Eidolon of
         // Obstruction actually tax an opponent's loyalty ability by {1}.
+        //
+        // CR 601.2h: the added mana leg is placed FIRST so any payment path that
+        // pays a `Composite` in order settles the mana before the non-mana cost.
+        // This keeps payment atomic: an unaffordable mana leg fails/pauses before
+        // the loyalty counters (or other non-mana cost) are ever committed, so a
+        // cancelled payment never leaves a free loyalty change behind.
         _ => {
             let existing = std::mem::replace(cost, AbilityCost::Composite { costs: Vec::new() });
             *cost = AbilityCost::Composite {
-                costs: vec![existing, added_generic_mana_cost(amount)],
+                costs: vec![added_generic_mana_cost(amount), existing],
             };
         }
     }
