@@ -7926,9 +7926,11 @@ mod tests {
             "create a 1/1 red Alien creature token with haste and \"This token attacks each combat if able.\"",
             "the token + quoted ability must be its own chunk: {chunks:?}"
         );
+        // allow-noncombinator: structural test assertion over the pre-tokenized chunk vector, not parser dispatch
+        let counter_clause_split_off = chunks.len() >= 2
+            && chunks[1].starts_with("Put a +1/+1 counter on it for each invasion counter"); // allow-noncombinator: same, on the `.starts_with` line
         assert!(
-            chunks.len() >= 2
-                && chunks[1].starts_with("Put a +1/+1 counter on it for each invasion counter"),
+            counter_clause_split_off,
             "the imperative counter sentence must split into its own chunk: {chunks:?}"
         );
     }
