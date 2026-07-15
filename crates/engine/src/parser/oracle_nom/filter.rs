@@ -348,8 +348,16 @@ fn parse_pt_infix_tail(input: &str) -> OracleResult<'_, (Comparator, QuantityExp
     let rest = rest.trim_start();
     let (rest, includes_equal) = map(opt(tag("or equal to")), |e| e.is_some()).parse(rest)?;
     let rest = rest.trim_start();
-    let (rest, qty) = parse_quantity_ref(rest)?;
-    let value = QuantityExpr::Ref { qty };
+    // The threshold may be a dynamic quantity ("less than the number of …") OR a
+    // literal number / X ("power less than 3", Wasp, Shrinking Savior). The
+    // postfix form ("3 or less") already accepts literals via
+    // `parse_quantity_expr_number`; the infix form must too, so try the dynamic
+    // ref first (unchanged behavior) and fall back to the literal/X parser.
+    let (rest, value) = alt((
+        map(parse_quantity_ref, |qty| QuantityExpr::Ref { qty }),
+        parse_quantity_expr_number,
+    ))
+    .parse(rest)?;
     // Strict `<`/`>` lower to LE/GE by shifting the threshold by ∓1 (CR 107.1:
     // integers only, so "less than N" ≡ "≤ N-1").
     let (comparator, value) = match (base_cmp, includes_equal) {
@@ -718,6 +726,47 @@ mod tests {
                 scope: PtValueScope::Current,
                 comparator: Comparator::LE,
                 value: QuantityExpr::Fixed { value: 2 },
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_pt_comparison_infix_less_than_literal() {
+        // CR 208.1 + CR 107.1: "power less than 3" (infix form with a LITERAL
+        // threshold) must parse, not just the postfix "3 or less" form. Wasp,
+        // Shrinking Savior: "for each creature with power less than 0". Strict
+        // "less than N" lowers to LE (N-1).
+        let (rest, p) = parse_pt_comparison("power less than 3").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Fixed { value: 3 }),
+                    offset: -1,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_pt_comparison_infix_greater_than_literal() {
+        // "toughness greater than 4" → GE (4+1) with a literal threshold.
+        let (rest, p) = parse_pt_comparison("toughness greater than 4").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Toughness,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Fixed { value: 4 }),
+                    offset: 1,
+                },
             }
         );
     }
