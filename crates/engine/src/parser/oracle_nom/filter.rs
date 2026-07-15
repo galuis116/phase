@@ -348,6 +348,8 @@ fn parse_pt_infix_tail(input: &str) -> OracleResult<'_, (Comparator, QuantityExp
     let rest = rest.trim_start();
     let (rest, includes_equal) = map(opt(tag("or equal to")), |e| e.is_some()).parse(rest)?;
     let rest = rest.trim_start();
+    // CR 208.1: Power and toughness are creature characteristics, so this
+    // grammar preserves their comparison threshold as a typed quantity.
     // The threshold may be a dynamic quantity ("less than the number of …") OR a
     // literal number / X ("power less than 3", Wasp, Shrinking Savior). The
     // postfix form ("3 or less") already accepts literals via
