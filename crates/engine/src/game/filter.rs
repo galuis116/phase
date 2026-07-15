@@ -7206,6 +7206,70 @@ mod tests {
         );
     }
 
+    /// CR 208.1 + CR 107.1 — production-path RESOLUTION regression for the infix
+    /// literal-threshold parser fix (Wasp, Shrinking Savior). Parsing the full card
+    /// yields a draw whose count is `ObjectCount` over "creature with power less than
+    /// 0"; this test drives that exact parsed filter through the runtime matcher
+    /// against three battlefield creatures at power −1, 0, and +1 and proves that
+    /// ONLY the negative-power creature satisfies it — i.e. it alone contributes to
+    /// the resolved draw count. If the infix-literal alternative is removed the draw
+    /// count collapses to `Fixed(1)` (no `ObjectCount` filter to extract) and the
+    /// `expect` below fails, so this regression is tied to the parser change.
+    #[test]
+    fn wasp_draw_filter_counts_only_negative_power_creatures() {
+        use crate::types::ability::{AbilityDefinition, Effect, QuantityExpr, QuantityRef};
+        fn find_draw_filter(def: &AbilityDefinition) -> Option<TargetFilter> {
+            if let Effect::Draw {
+                count:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                ..
+            } = &*def.effect
+            {
+                return Some(filter.clone());
+            }
+            def.sub_ability.as_deref().and_then(find_draw_filter)
+        }
+
+        let parsed = crate::parser::parse_oracle_text(
+            "Whenever Wasp attacks, up to one other target creature gets -3/-0 until your next turn. Then draw a card for each creature with power less than 0 on the battlefield.",
+            "Wasp, Shrinking Savior",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let filter = parsed
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .find_map(find_draw_filter)
+            .expect("Wasp's draw count must be a dynamic ObjectCount over a power<0 filter");
+
+        let mut state = setup();
+        let neg = add_creature(&mut state, PlayerId(0), "Negative");
+        let zero = add_creature(&mut state, PlayerId(0), "Zero");
+        let pos = add_creature(&mut state, PlayerId(0), "Positive");
+        state.objects.get_mut(&neg).unwrap().power = Some(-1);
+        state.objects.get_mut(&zero).unwrap().power = Some(0);
+        state.objects.get_mut(&pos).unwrap().power = Some(1);
+
+        // CR 208.1: "power less than 0" is strict, so power −1 matches while 0 and
+        // +1 do not — exactly one creature contributes to the resolved draw count.
+        assert!(
+            matches_target_filter(&state, neg, &filter, neg),
+            "power −1 must satisfy `power < 0`"
+        );
+        assert!(
+            !matches_target_filter(&state, zero, &filter, zero),
+            "power 0 must NOT satisfy `power < 0`"
+        );
+        assert!(
+            !matches_target_filter(&state, pos, &filter, pos),
+            "power +1 must NOT satisfy `power < 0`"
+        );
+    }
+
     // CR 702.171b: `IsSaddled` matches only objects with the saddled designation.
     #[test]
     fn is_saddled_property_matches_only_saddled() {

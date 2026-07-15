@@ -771,6 +771,104 @@ mod tests {
         );
     }
 
+    /// CR 208.1 + CR 107.1: inclusive-literal boundary — "power less than or equal
+    /// to 0" keeps the LITERAL threshold with NO offset (the "or equal to" clause
+    /// makes it a non-strict `LE 0`), proving the `0` boundary and the optional
+    /// equal clause on the newly-admitted literal axis.
+    #[test]
+    fn test_parse_pt_comparison_infix_less_than_or_equal_literal() {
+        let (rest, p) = parse_pt_comparison("power less than or equal to 0").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 0 },
+            }
+        );
+    }
+
+    /// CR 107.3a: the newly-admitted `X` threshold on the infix form — "power less
+    /// than X" lowers to `LE` of `Offset(Variable("X"), -1)`, proving the literal/X
+    /// parser (not only `parse_quantity_ref`) feeds the infix tail.
+    #[test]
+    fn test_parse_pt_comparison_infix_less_than_x() {
+        let (rest, p) = parse_pt_comparison("power less than x").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    }),
+                    offset: -1,
+                },
+            }
+        );
+    }
+
+    /// CR 208.1 + CR 107.1 — production-path regression (Wasp, Shrinking Savior).
+    /// Parsing the FULL card through `parse_oracle_text` must retain the
+    /// `power < 0` filter on the draw count: "draw a card for each creature with
+    /// power less than 0" lowers to a Draw whose count is an `ObjectCount` over
+    /// creatures carrying a `PtComparison(Power, …)`, not a flat draw of one.
+    /// Reverting the infix-literal parser fix collapses the count to `Fixed(1)`,
+    /// which makes this assertion fail — proving the whole card-conversion path,
+    /// not just the isolated grammar branch, depends on the change.
+    #[test]
+    fn wasp_shrinking_savior_draw_count_retains_power_filter() {
+        use crate::types::ability::{
+            AbilityDefinition, Effect, FilterProp, PtStat, QuantityRef, TargetFilter,
+        };
+        fn find_draw_count(def: &AbilityDefinition) -> Option<QuantityExpr> {
+            if let Effect::Draw { count, .. } = &*def.effect {
+                return Some(count.clone());
+            }
+            def.sub_ability.as_deref().and_then(find_draw_count)
+        }
+        let parsed = crate::parser::parse_oracle_text(
+            "Whenever Wasp attacks, up to one other target creature gets -3/-0 until your next turn. Then draw a card for each creature with power less than 0 on the battlefield.",
+            "Wasp, Shrinking Savior",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let count = parsed
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .find_map(find_draw_count)
+            .expect("Wasp's attack trigger must contain a Draw effect");
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = &count
+        else {
+            panic!("draw count must be a dynamic ObjectCount, got {count:?}");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("ObjectCount filter must be a Typed creature filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    ..
+                }
+            )),
+            "the draw-count filter must retain the power comparison, got {:?}",
+            tf.properties
+        );
+    }
+
     #[test]
     fn test_parse_with_counter() {
         let (rest, p) = parse_with_property("with a +1/+1 counter on it").unwrap();
