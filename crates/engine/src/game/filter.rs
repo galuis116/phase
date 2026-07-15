@@ -7208,28 +7208,31 @@ mod tests {
 
     /// CR 208.1 + CR 107.1 — production-path RESOLUTION regression for the infix
     /// literal-threshold parser fix (Wasp, Shrinking Savior). Parsing the full card
-    /// yields a draw whose count is `ObjectCount` over "creature with power less than
-    /// 0"; this test drives that exact parsed filter through the runtime matcher
-    /// against three battlefield creatures at power −1, 0, and +1 and proves that
-    /// ONLY the negative-power creature satisfies it — i.e. it alone contributes to
-    /// the resolved draw count. If the infix-literal alternative is removed the draw
-    /// count collapses to `Fixed(1)` (no `ObjectCount` filter to extract) and the
-    /// `expect` below fails, so this regression is tied to the parser change.
+    /// yields a draw whose count is an `ObjectCount` over "creature with power less
+    /// than 0"; this test drives that exact parsed count through the SHARED quantity
+    /// resolver (`resolve_quantity`, the same authority the Draw effect uses in the
+    /// production resolution pipeline) against three battlefield creatures at power
+    /// −1, 0, and +1, and asserts the concrete count is 1 — only the negative-power
+    /// creature contributes. The per-creature `matches_target_filter` checks pin the
+    /// discriminating boundary. If the infix-literal alternative is removed the draw
+    /// count collapses to `Fixed(1)` (no `ObjectCount` to extract) and the `expect`
+    /// below fails, so this regression is tied to the parser change.
     #[test]
     fn wasp_draw_filter_counts_only_negative_power_creatures() {
+        use crate::game::quantity::resolve_quantity;
         use crate::types::ability::{AbilityDefinition, Effect, QuantityExpr, QuantityRef};
-        fn find_draw_filter(def: &AbilityDefinition) -> Option<TargetFilter> {
-            if let Effect::Draw {
-                count:
+        fn find_draw_count(def: &AbilityDefinition) -> Option<QuantityExpr> {
+            if let Effect::Draw { count, .. } = &*def.effect {
+                if matches!(
+                    count,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::ObjectCount { filter },
-                    },
-                ..
-            } = &*def.effect
-            {
-                return Some(filter.clone());
+                        qty: QuantityRef::ObjectCount { .. }
+                    }
+                ) {
+                    return Some(count.clone());
+                }
             }
-            def.sub_ability.as_deref().and_then(find_draw_filter)
+            def.sub_ability.as_deref().and_then(find_draw_count)
         }
 
         let parsed = crate::parser::parse_oracle_text(
@@ -7239,12 +7242,19 @@ mod tests {
             &["Creature".to_string()],
             &[],
         );
-        let filter = parsed
+        let count_expr = parsed
             .triggers
             .iter()
             .filter_map(|t| t.execute.as_deref())
-            .find_map(find_draw_filter)
+            .find_map(find_draw_count)
             .expect("Wasp's draw count must be a dynamic ObjectCount over a power<0 filter");
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = &count_expr
+        else {
+            unreachable!("find_draw_count only returns an ObjectCount ref");
+        };
+        let filter = filter.clone();
 
         let mut state = setup();
         let neg = add_creature(&mut state, PlayerId(0), "Negative");
@@ -7255,7 +7265,7 @@ mod tests {
         state.objects.get_mut(&pos).unwrap().power = Some(1);
 
         // CR 208.1: "power less than 0" is strict, so power −1 matches while 0 and
-        // +1 do not — exactly one creature contributes to the resolved draw count.
+        // +1 do not — the discriminating boundary.
         assert!(
             matches_target_filter(&state, neg, &filter, neg),
             "power −1 must satisfy `power < 0`"
@@ -7267,6 +7277,18 @@ mod tests {
         assert!(
             !matches_target_filter(&state, pos, &filter, pos),
             "power +1 must NOT satisfy `power < 0`"
+        );
+
+        // CR 122.1: Resolve the FULL parsed draw count through the shared quantity
+        // authority — the same resolver the Draw effect consults in production — and
+        // assert the concrete card-draw count is exactly 1. This proves the
+        // `ObjectCount` resolution (not merely the leaf matcher) yields one card,
+        // closing the resolution-pipeline gap. `source`/`controller` are the Wasp
+        // controller's seat; the power<0 filter references no source object.
+        let resolved = resolve_quantity(&state, &count_expr, PlayerId(0), neg);
+        assert_eq!(
+            resolved, 1,
+            "the production quantity resolver must count exactly the one power<0 creature"
         );
     }
 
