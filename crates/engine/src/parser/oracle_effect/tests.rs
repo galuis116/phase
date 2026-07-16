@@ -46698,3 +46698,73 @@ fn they_after_mass_effect_binds_that_population_not_trigger_source() {
         );
     }
 }
+
+/// CR 608.2c + CR 611.2c (issue #5985) — sibling coverage across the mass-population
+/// family. A later "They <grant>" clause must bind to whatever population the
+/// EARLIER mass clause acted on, for every `*All` / scope-`All` producer — not just
+/// the `PutCounterAll` shape Ardbert happens to use. Each case asserts the grant's
+/// `affected` against the population read back out of the parsed producer itself
+/// (via the shared `mass_population_filter` authority), so the test pins the
+/// BINDING rather than duplicating a literal filter.
+#[test]
+fn they_binds_producer_population_across_mass_effect_family() {
+    use super::mass_population_filter;
+    use crate::types::ability::Effect;
+
+    for (label, text) in [
+        // PutCounterAll — Ardbert's own shape (the originally covered case).
+        (
+            "PutCounterAll",
+            "Whenever you cast a white spell, put a +1/+1 counter on each legendary creature you control. They gain vigilance until end of turn.",
+        ),
+        // GainControlAll — previously omitted; fell back to TriggeringSource.
+        (
+            "GainControlAll",
+            "Whenever you cast a white spell, gain control of all creatures target opponent controls. They gain haste until end of turn.",
+        ),
+        // DoublePTAll — previously omitted.
+        (
+            "DoublePTAll",
+            "Whenever you cast a white spell, double the power and toughness of each creature you control. They gain trample until end of turn.",
+        ),
+        // Mass SetTapState (scope: All) — previously omitted.
+        (
+            "SetTapState{All}",
+            "Whenever you cast a white spell, tap all creatures your opponents control. They gain defender until end of turn.",
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, "Mass Population Probe", &[], &["Creature".to_string()], &[]);
+        let def = parsed
+            .triggers
+            .first()
+            .and_then(|t| t.execute.as_deref())
+            .unwrap_or_else(|| panic!("{label}: the cast trigger must lower"));
+
+        let population = mass_population_filter(&def.effect)
+            .unwrap_or_else(|| panic!("{label}: head clause must be a mass population producer: {:?}", def.effect))
+            .clone();
+
+        let grant = def
+            .sub_ability
+            .as_deref()
+            .and_then(|sub| match &*sub.effect {
+                Effect::GenericEffect {
+                    static_abilities, ..
+                } => static_abilities.first().cloned(),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label}: the \"They <grant>\" continuation must survive"));
+
+        assert_eq!(
+            grant.affected,
+            Some(population),
+            "{label}: \"They\" must bind to the producer's population, not the triggering spell: {grant:?}"
+        );
+        assert_ne!(
+            grant.affected,
+            Some(TargetFilter::TriggeringSource),
+            "{label}: \"They\" must never fall back to the trigger's source when a mass \
+             population precedes it"
+        );
+    }
+}
