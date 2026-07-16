@@ -1447,12 +1447,20 @@ fn starts_imperative_action_continuation(remainder_lower: &str) -> bool {
     !starts_anaphoric_subject(remainder_lower) && starts_clause_text_lower(remainder_lower)
 }
 
-/// True iff `remainder_lower` begins with a pronoun/determiner subject word — the
-/// anaphoric continuations ("It becomes …", "The token is goaded", "That creature
-/// gains …") that must stay attached to a granted quote rather than split as a
-/// sibling imperative. Each starter carries a trailing space so only a complete
-/// word matches (e.g. "it " does not fire on "item"), mirroring the whitespace
-/// convention of `starts_clause_text_lower`'s verb tags.
+/// True iff `remainder_lower` begins with a demonstrative/pronoun word that, after
+/// a token/permanent's granted-ability quote, refers back to the CREATED object —
+/// an anaphor ("It becomes …", "Its power …", "That creature gains …", "Those
+/// tokens …", "They gain haste") that must stay attached to the quote rather than
+/// split as a sibling imperative. Each starter carries a trailing space so only a
+/// complete word matches (e.g. "it " does not fire on "item").
+///
+/// Restricted to genuine last-created anaphors. Independent subject-led clauses
+/// that `starts_clause_text_lower` recognizes as fresh instructions — "You gain
+/// …", "Each opponent …", "All creatures …" — are NOT token anaphors and must be
+/// allowed to split, so they are deliberately absent here (issue #5844 review).
+/// "The …" is likewise absent: it is not a `starts_clause_text_lower` starter, so
+/// "The token is goaded" already fails the authority check and stays attached
+/// without an explicit guard.
 fn starts_anaphoric_subject(remainder_lower: &str) -> bool {
     alt((
         tag::<_, _, OracleError<'_>>("it "),
@@ -1461,10 +1469,6 @@ fn starts_anaphoric_subject(remainder_lower: &str) -> bool {
         tag("this "),
         tag("those "),
         tag("they "),
-        tag("you "),
-        tag("all "),
-        tag("each "),
-        tag("the "),
     ))
     .parse(remainder_lower)
     .is_ok()
@@ -7950,11 +7954,48 @@ mod tests {
         );
     }
 
+    /// CR 608.2c (#5844 review): an INDEPENDENT subject-led continuation after a
+    /// granted-ability quote — "You gain …", "Each opponent …", "All creatures …" —
+    /// is a fresh sibling instruction, NOT an anaphor to the created token, so it
+    /// must split off. `starts_clause_text_lower` already recognizes `you `,
+    /// `each `/`each opponent `, and `all ` as clause starters; the anaphor guard
+    /// must not reject them before that authority is consulted, or they stay glued
+    /// to the token clause and are swallowed — the very bug class this PR fixes.
+    #[test]
+    fn quoted_grant_splits_before_independent_subject_continuation() {
+        for (text, expected_head) in [
+            (
+                "create a 1/1 white Soldier creature token with \"This creature can't block.\" You gain 3 life.",
+                "You gain 3 life",
+            ),
+            (
+                "create a 1/1 white Soldier creature token with \"This creature can't block.\" Each opponent loses 2 life.",
+                "Each opponent loses 2 life",
+            ),
+            (
+                "create a 1/1 white Soldier creature token with \"This creature can't block.\" All creatures you control get +1/+1 until end of turn.",
+                "All creatures you control get +1/+1 until end of turn",
+            ),
+        ] {
+            let chunks = clause_texts(text);
+            assert_eq!(
+                chunks[0],
+                "create a 1/1 white Soldier creature token with \"This creature can't block.\"",
+                "the token + quoted ability must stay its own chunk: {chunks:?}"
+            );
+            assert_eq!(
+                chunks.get(1).map(String::as_str),
+                Some(expected_head),
+                "an independent subject-led continuation must split into its own chunk: {chunks:?}"
+            );
+        }
+    }
+
     #[test]
     fn quoted_grant_keeps_anaphoric_subject_continuation() {
         // The exclusion side of #5844: an anaphoric-SUBJECT continuation after a
-        // token quote ("It gains …", "That creature gets …") begins with a
-        // pronoun/determiner, not an imperative verb, and must stay attached — the
+        // token quote ("It gains …", "That creature gets …") refers back to the
+        // CREATED object, not a fresh instruction, so it must stay attached — the
         // token-creation path resolves the anaphor inline.
         let chunks = clause_texts(
             "create a 1/1 white Soldier creature token with \"This creature can't block.\" It gains haste until end of turn.",
