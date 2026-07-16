@@ -22442,6 +22442,25 @@ fn clause_ir_hand_reveal_target(clause: &ClauseIr) -> Option<TargetFilter> {
     }
 }
 
+/// CR 608.2c: If this clause is a mass ("each …") effect, return the object
+/// POPULATION filter it acted on. Feeds `ParseContext::chain_prior_mass_population`
+/// so a later same-chain anaphor ("They gain vigilance until end of turn") binds
+/// to that population.
+///
+/// These are exactly the variants whose `target` is a population FILTER rather
+/// than a chosen target, which is why they are absent from
+/// `has_typed_target_widened`'s single-target whitelist: `ParentTarget` cannot
+/// bind here (nothing was chosen), so the anaphor inherits the filter instead.
+fn clause_ir_mass_population(clause: &ClauseIr) -> Option<TargetFilter> {
+    match &clause.parsed.effect {
+        Effect::PutCounterAll { target, .. }
+        | Effect::PumpAll { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::BounceAll { target, .. } => Some(target.clone()),
+        _ => None,
+    }
+}
+
 /// CR 400.1/400.2 + CR 601.2a: Map a possessive-hand player reference (as
 /// produced by `parse_hand_possessive_target`) to the `ControllerRef` axis
 /// used to scope a card filter to that same player's hand. Exhaustive over
@@ -27306,6 +27325,16 @@ pub(crate) fn parse_effect_chain_ir(
                 .iter()
                 .rev()
                 .find_map(clause_ir_hand_reveal_target),
+            // CR 608.2c: the most-recent earlier same-chain mass ("each …")
+            // population, so a later "They <grant>" anaphor binds to it rather
+            // than reaching past it to the trigger's own subject (Ardbert,
+            // Warrior of Darkness). Mass effects choose nothing, so
+            // `parent_target_available` / `ParentTarget` cannot carry this.
+            chain_prior_mass_population: builder
+                .clauses()
+                .iter()
+                .rev()
+                .find_map(clause_ir_mass_population),
             // CR 608.2c: bind a bare "it" in this chunk's counter/anaphor to the
             // token created by an earlier clause when that token is the chain's
             // most-recent object referent (Esper Terra's "put up to three lore
