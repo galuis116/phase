@@ -1444,15 +1444,30 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
 /// `quote_closes_sentence_before_sequence`); only a bare imperative verb marks a
 /// genuine sibling effect here.
 fn starts_imperative_action_continuation(remainder_lower: &str) -> bool {
-    let first_word = remainder_lower.split_whitespace().next().unwrap_or("");
-    // Anaphoric-subject / determiner starters — keep attached (existing behavior).
-    if matches!(
-        first_word,
-        "it" | "its" | "that" | "this" | "those" | "they" | "you" | "all" | "each" | "the"
-    ) {
-        return false;
-    }
-    starts_clause_text_lower(remainder_lower)
+    !starts_anaphoric_subject(remainder_lower) && starts_clause_text_lower(remainder_lower)
+}
+
+/// True iff `remainder_lower` begins with a pronoun/determiner subject word — the
+/// anaphoric continuations ("It becomes …", "The token is goaded", "That creature
+/// gains …") that must stay attached to a granted quote rather than split as a
+/// sibling imperative. Each starter carries a trailing space so only a complete
+/// word matches (e.g. "it " does not fire on "item"), mirroring the whitespace
+/// convention of `starts_clause_text_lower`'s verb tags.
+fn starts_anaphoric_subject(remainder_lower: &str) -> bool {
+    alt((
+        tag::<_, _, OracleError<'_>>("it "),
+        tag("its "),
+        tag("that "),
+        tag("this "),
+        tag("those "),
+        tag("they "),
+        tag("you "),
+        tag("all "),
+        tag("each "),
+        tag("the "),
+    ))
+    .parse(remainder_lower)
+    .is_ok()
 }
 
 fn parse_search_exile_name_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
