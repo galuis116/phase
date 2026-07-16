@@ -46699,7 +46699,7 @@ fn they_after_mass_effect_binds_that_population_not_trigger_source() {
     }
 }
 
-/// CR 608.2c + CR 611.2c (issue #5985) — sibling coverage across the mass-population
+/// CR 608.2c (issue #5985) — sibling coverage across the mass-population
 /// family. A later "They <grant>" clause must bind to whatever population the
 /// EARLIER mass clause acted on, for every `*All` / scope-`All` producer — not just
 /// the `PutCounterAll` shape Ardbert happens to use. Each case asserts the grant's

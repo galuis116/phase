@@ -22442,7 +22442,7 @@ fn clause_ir_hand_reveal_target(clause: &ClauseIr) -> Option<TargetFilter> {
     }
 }
 
-/// CR 611.2c: The match arms naming every effect that establishes a NON-targeting
+/// The match arms naming every effect that establishes a NON-targeting
 /// object POPULATION — the `*All` / scope-`All` family whose `target` (or
 /// `filter`) is a population filter rather than a chosen target. This is why they
 /// are absent from `has_typed_target_widened`'s single-target whitelist:
@@ -22473,7 +22473,7 @@ macro_rules! mass_population_filter_arms {
     };
 }
 
-/// CR 611.2c: The NON-targeting mass population filter of an "each <type>"
+/// The NON-targeting mass population filter of an "each <type>"
 /// (`*All` / scope-`All`) effect — the single authority for "which effects
 /// establish an object population". Read-only dual of
 /// [`mass_population_filter_mut`]; both are generated from one variant list
@@ -22482,7 +22482,7 @@ pub(crate) fn mass_population_filter(effect: &Effect) -> Option<&TargetFilter> {
     mass_population_filter_arms!(effect)
 }
 
-/// CR 611.2c: Mutable form of [`mass_population_filter`], for walkers that rewrite
+/// Mutable form of [`mass_population_filter`], for walkers that rewrite
 /// a mass population in place (e.g. `oracle_trigger`'s attached-host "each other"
 /// retarget). Shares the same authoritative variant list.
 pub(crate) fn mass_population_filter_mut(effect: &mut Effect) -> Option<&mut TargetFilter> {
