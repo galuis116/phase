@@ -2,7 +2,7 @@
 //! share a creature type with a creature you control or a creature card in
 //! your graveyard.
 
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::card_type::CoreType;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -164,7 +164,6 @@ fn volo_does_not_copy_when_sharing_type_with_graveyard_card() {
 /// count an opponent's same-type creature.
 #[test]
 fn volo_copies_when_only_an_opponent_controls_the_shared_type() {
-    use engine::game::scenario::P1;
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
