@@ -115,11 +115,11 @@ fn riptide_selects_one_opponent_target_and_declines_the_other() {
     outcome.assert_zone(&[p2_perm], Zone::Battlefield);
 }
 
-/// CR 109.5 (issue #6565): "for each opponent, put up to one target nonland
-/// permanent THAT PLAYER controls ..." scopes each per-opponent target to the
-/// iterated opponent's permanents — never the caster's own. Offering the caster's
-/// own permanent as the sole target intent must leave it untouched (it is not a
-/// legal target for the opponent's slot), and the ability still resolves.
+/// Issue #6565: "for each opponent, put up to one target nonland permanent THAT
+/// PLAYER controls ..." scopes each per-opponent target to the iterated
+/// opponent's permanents — never the caster's own. Offering the caster's own
+/// permanent as the sole target intent must leave it untouched (it is not a legal
+/// target for the opponent's slot), and the ability still resolves.
 #[test]
 fn riptide_per_opponent_slot_excludes_the_casters_own_permanents() {
     let mut scenario = GameScenario::new();
@@ -153,18 +153,20 @@ fn riptide_per_opponent_slot_excludes_the_casters_own_permanents() {
     outcome.assert_zone(&[opp_perm], Zone::Battlefield);
 }
 
-/// CR 109.5 (issue #6565): the positive half — the opponent's own permanent IS a
-/// legal target for that opponent's per-opponent slot and is moved to its owner's
-/// library, while the caster's own permanent is untouched.
+/// Issue #6565: each opponent's own permanent is legal only for that opponent's
+/// per-opponent slot. Selecting both opponents independently moves both targets
+/// to their owners' libraries while the caster's own permanent remains untouched.
 #[test]
-fn riptide_per_opponent_slot_targets_that_opponents_permanent() {
-    let mut scenario = GameScenario::new();
+fn riptide_per_opponent_slots_target_each_opponents_permanent() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(P0, riptide_mana());
-    scenario.add_card_to_library_top(P1, "Opp Library Card");
+    scenario.add_card_to_library_top(P1, "P1 Library Card");
+    scenario.add_card_to_library_top(P2, "P2 Library Card");
 
     let my_perm = scenario.add_creature(P0, "My Own Bear", 2, 2).id();
-    let opp_perm = scenario.add_creature(P1, "Opp Bear", 2, 2).id();
+    let p1_perm = scenario.add_creature(P1, "Opp1 Bear", 2, 2).id();
+    let p2_perm = scenario.add_creature(P2, "Opp2 Bear", 2, 2).id();
     let riptide = scenario
         .add_creature_to_hand_from_oracle(P0, "Riptide Gearhulk", 4, 4, RIPTIDE_ORACLE)
         .id();
@@ -173,13 +175,11 @@ fn riptide_per_opponent_slot_targets_that_opponents_permanent() {
 
     let outcome = runner
         .cast(riptide)
-        .target_players(&[P1])
-        .target_objects(&[opp_perm])
+        .target_players(&[P1, P2])
+        .target_objects(&[p1_perm, p2_perm])
         .resolve();
 
-    // The opponent's permanent went to its owner's library; the caster's own
-    // permanent was never a candidate and stays put.
-    outcome.assert_zone(&[opp_perm], Zone::Library);
+    outcome.assert_zone(&[p1_perm, p2_perm], Zone::Library);
     outcome.assert_zone(&[my_perm], Zone::Battlefield);
     outcome.assert_zone(&[riptide], Zone::Battlefield);
 }
