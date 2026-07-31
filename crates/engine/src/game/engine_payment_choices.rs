@@ -1180,6 +1180,29 @@ pub(super) fn handle_unless_payment(
                         return Ok(action_result(events, state.waiting_for.clone()));
                     }
                 }
+                // CR 702.21a + CR 122.1 + CR 118.12: "Ward—Get N <kind> counters"
+                // (The Serpent Society). The payer pays by receiving N player
+                // counters. Re-target the effect to the payer (a declared Player
+                // target) and resolve it through the player-counter handler, the
+                // same punisher shape as the DealDamage/Draw arms above.
+                Effect::GivePlayerCounter { .. } => {
+                    let mut counter_ability = pending_effect.as_ref().clone();
+                    counter_ability.effect = *effect.clone();
+                    counter_ability.targets = vec![TargetRef::Player(player)];
+                    counter_ability.unless_pay = None;
+                    counter_ability.sub_ability = None;
+                    if let Err(e) =
+                        effects::player_counter::resolve(state, &counter_ability, events)
+                    {
+                        return Err(EngineError::InvalidAction(format!("{e:?}")));
+                    }
+                    if matches!(
+                        state.waiting_for,
+                        WaitingFor::ReplacementChoice { .. }
+                    ) {
+                        return Ok(action_result(events, state.waiting_for.clone()));
+                    }
+                }
                 _ => payment_failed = true,
             },
             AbilityCost::Unimplemented { .. } => {

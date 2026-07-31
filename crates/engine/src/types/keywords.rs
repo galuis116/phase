@@ -537,6 +537,16 @@ pub enum WardCost {
         count: u32,
         filter: crate::types::ability::TargetFilter,
     },
+    /// CR 702.21a + CR 122.1: Ward cost paid by the targeting player *receiving*
+    /// N player counters (e.g. The Serpent Society's "Ward—Get five poison
+    /// counters"). Parameterized over `PlayerCounterKind` so it covers the whole
+    /// class (poison/rad/experience/ticket), not one card. The payer can always
+    /// choose to pay — getting counters is always possible — so this is a genuine
+    /// pay/decline choice, not an affordability gate.
+    GetPlayerCounters {
+        kind: crate::types::player::PlayerCounterKind,
+        count: u32,
+    },
     /// CR 702.21a: Ward cost paid via waterbend — tap artifacts/creatures to help pay.
     /// Distinct from Mana because waterbend has unique payment semantics (CR 701.67).
     Waterbend(ManaCost),

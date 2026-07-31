@@ -677,7 +677,11 @@ fn try_parse_multi_type_enchant(line: &str) -> Option<Keyword> {
 /// Handles "pay N life", "discard a card", "sacrifice a permanent/creature/etc."
 /// Also handles compound costs like "{2}, Pay 2 life" → Compound([Mana, PayLife]).
 fn parse_ward_cost(cost_text: &str) -> Option<Keyword> {
-    let lower = cost_text.trim().trim_end_matches('.').to_lowercase();
+    // CR 702.21a: drop the parenthetical reminder some ward costs carry (e.g.
+    // The Serpent Society's "(A player with ten or more poison counters loses
+    // the game.)") so the counter-noun suffix match below sees a clean cost.
+    let no_reminder = strip_reminder_text(cost_text);
+    let lower = no_reminder.trim().trim_end_matches('.').to_lowercase();
 
     // CR 702.21a: Detect compound costs — comma-separated sub-costs.
     // Only split on ", " that is NOT inside mana braces {}.
@@ -742,6 +746,25 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
             ));
         let (filter, _) = parse_type_phrase(after_count);
         return Some(WardCost::Sacrifice { count, filter });
+    }
+
+    // CR 702.21a + CR 122.1: "get N <kind> counters" — the targeting player
+    // receives N player counters (poison/rad/experience/ticket) as the ward
+    // cost (The Serpent Society: "Ward—Get five poison counters"). Built for the
+    // whole class via `parse_player_counter_kind`, not a poison-only special
+    // case, and composed from the same `parse_number` + counter-kind combinators
+    // the imperative "get N poison counters" effect uses.
+    if let Ok((after_get, _)) = tag::<_, _, OracleError<'_>>("get ").parse(lower) {
+        if let Ok((after_count, count)) = nom_primitives::parse_number.parse(after_get) {
+            if let Ok((after_kind, kind)) =
+                nom_primitives::parse_player_counter_kind.parse(after_count.trim_start())
+            {
+                let tail = after_kind.trim_start();
+                if tail == "counter" || tail == "counters" {
+                    return Some(WardCost::GetPlayerCounters { kind, count });
+                }
+            }
+        }
     }
 
     // CR 702.21a + CR 701.67: "waterbend {N}" — ward cost paid via waterbend mechanic.
@@ -3323,6 +3346,30 @@ mod tests {
         assert_eq!(
             parse_granted_keyword_fragment("ward—pay life equal to ~'s power"),
             Some(Keyword::Ward(WardCost::PayLifeEqualToPower))
+        );
+    }
+
+    #[test]
+    fn parse_granted_keyword_fragment_ward_get_poison_counters() {
+        use crate::types::player::PlayerCounterKind;
+        // CR 702.21a + CR 122.1 (issue #6640): The Serpent Society's ward cost —
+        // word-number count, reminder text stripped, whole-class counter kind.
+        assert_eq!(
+            parse_granted_keyword_fragment(
+                "ward—get five poison counters. (a player with ten or more poison counters loses the game.)"
+            ),
+            Some(Keyword::Ward(WardCost::GetPlayerCounters {
+                kind: PlayerCounterKind::Poison,
+                count: 5,
+            }))
+        );
+        // Built for the class, not one card: a digit count and a different kind.
+        assert_eq!(
+            parse_granted_keyword_fragment("ward—get 2 rad counters"),
+            Some(Keyword::Ward(WardCost::GetPlayerCounters {
+                kind: PlayerCounterKind::Rad,
+                count: 2,
+            }))
         );
     }
 

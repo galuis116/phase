@@ -44,9 +44,20 @@ use crate::features::DeckFeatures;
 #[cfg(test)]
 use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::GameState;
-use engine::types::player::PlayerId;
+use engine::types::player::{PlayerCounterKind, PlayerId};
 
 pub struct AntiSelfHarmPolicy;
+
+/// CR 702.21a + CR 104.3d: Self-harm severity of a "Ward—Get N <kind> counters"
+/// cost. Poison and rad counters are harmful (poison at ten loses the game), so
+/// severity scales with the count; experience and ticket counters are
+/// beneficial, so paying them is not self-harm.
+fn ward_counter_severity(kind: PlayerCounterKind, count: u32) -> f64 {
+    match kind {
+        PlayerCounterKind::Poison | PlayerCounterKind::Rad => (count as f64 / 2.0).min(3.0),
+        PlayerCounterKind::Experience | PlayerCounterKind::Ticket => 0.0,
+    }
+}
 
 // `turn_only` can scale early-game verdicts by 1.3; cap the raw verdict so
 // registry-scaled anti-self-harm penalties stay within the critical band.
@@ -790,6 +801,13 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                         WardCost::DiscardCard => 1.5,
                         WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                         WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
+                        // CR 702.21a + CR 104.3d: receiving poison/rad counters is
+                        // real self-harm scaled by count (ten poison loses the
+                        // game); experience/ticket counters are beneficial, so no
+                        // penalty for getting them.
+                        WardCost::GetPlayerCounters { kind, count } => {
+                            ward_counter_severity(*kind, *count)
+                        }
                         // CR 702.21a: Compound costs sum severity of components.
                         WardCost::Compound(costs) => costs
                             .iter()
@@ -803,6 +821,9 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                                 WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                                 WardCost::Waterbend(cost) => {
                                     (cost.mana_value() as f64 / 2.0).min(2.0)
+                                }
+                                WardCost::GetPlayerCounters { kind, count } => {
+                                    ward_counter_severity(*kind, *count)
                                 }
                                 WardCost::Compound(_) => 2.0,
                             })

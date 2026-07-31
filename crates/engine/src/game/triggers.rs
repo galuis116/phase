@@ -213,6 +213,22 @@ fn ward_cost_to_ability_cost(ward_cost: &WardCost) -> AbilityCost {
         WardCost::Sacrifice { count, filter } => {
             AbilityCost::Sacrifice(SacrificeCost::count(filter.clone(), *count))
         }
+        // CR 702.21a + CR 122.1 + CR 118.12: "get N <kind> counters" — the
+        // targeting player pays by receiving N player counters. Modeled as an
+        // effect-as-cost that gives the payer the counters (the `EffectCost`
+        // unless-payment arm re-targets it to the payer), mirroring the
+        // "unless you take N damage" / "unless its controller draws" punisher
+        // shape. `TargetFilter::Player` (a declared, non-context-ref target) so
+        // the resolver reads the payer from the ability's chosen targets.
+        WardCost::GetPlayerCounters { kind, count } => AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::GivePlayerCounter {
+                counter_kind: *kind,
+                count: QuantityExpr::Fixed {
+                    value: *count as i32,
+                },
+                target: TargetFilter::Player,
+            }),
+        },
         // CR 702.21a + CR 701.67: Waterbend ward cost maps to mana payment.
         // Full tap-to-help semantics deferred to waterbend cost integration.
         WardCost::Waterbend(mana_cost) => AbilityCost::Mana {
