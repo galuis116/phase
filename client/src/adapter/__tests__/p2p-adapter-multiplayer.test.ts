@@ -100,7 +100,11 @@ const mocks = vi.hoisted(() => {
       actions: [],
       autoPassRecommended: false,
     })),
-    getAiAction: vi.fn(async (_difficulty: string, _playerId: number) => null),
+    getAiActionProposal: vi.fn(async (_difficulty: string, _playerId: number) => null),
+    submitAiActionProposal: vi.fn(async () => ({
+      status: "applied",
+      result: { events: [], log_entries: [] },
+    })),
     projectSeatView: vi.fn(async (stateJson: string) => {
       const state = JSON.parse(stateJson) as {
         seats: Array<{ type: string }>;
@@ -162,9 +166,11 @@ const mockProjectSeatView = mocks.projectSeatView;
 interface AsyncMockWithResolvedValueOnce {
   mockClear: () => void;
   mockResolvedValueOnce: (value: unknown) => AsyncMockWithResolvedValueOnce;
+  mockResolvedValue: (value: unknown) => AsyncMockWithResolvedValueOnce;
 }
 const mockGetState = mocks.getState as unknown as AsyncMockWithResolvedValueOnce;
-const mockGetAiAction = mocks.getAiAction as unknown as AsyncMockWithResolvedValueOnce;
+const mockGetAiActionProposal = mocks.getAiActionProposal as unknown as AsyncMockWithResolvedValueOnce;
+const mockSubmitAiActionProposal = mocks.submitAiActionProposal as unknown as AsyncMockWithResolvedValueOnce;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -235,7 +241,8 @@ vi.mock("../wasm-adapter", () => ({
       getLegalActionsForViewer: mocks.getLegalActionsForViewer,
       getFilteredState: mocks.getFilteredState,
       getViewerSnapshot: mocks.getViewerSnapshot,
-      getAiAction: mocks.getAiAction,
+      getAiActionProposal: mocks.getAiActionProposal,
+      submitAiActionProposal: mocks.submitAiActionProposal,
       applySeatMutation: mocks.applySeatMutation,
       projectSeatView: mocks.projectSeatView,
       setMultiplayerMode: mocks.setMultiplayerMode,
@@ -260,7 +267,8 @@ beforeEach(() => {
   mockSetMultiplayerMode.mockClear();
   mockProjectSeatView.mockClear();
   mockGetState.mockClear();
-  mockGetAiAction.mockClear();
+  mockGetAiActionProposal.mockClear();
+  mockSubmitAiActionProposal.mockClear();
 });
 
 afterEach(() => {
@@ -752,18 +760,54 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       .mockResolvedValueOnce({
         waiting_for: { type: "Priority", data: { player: 0 } },
       });
-    mockGetAiAction.mockResolvedValueOnce({
-      type: "MulliganDecision",
-      data: { choice: { type: "Keep" } },
+    mockGetAiActionProposal.mockResolvedValueOnce({
+      token: "proposal-mulligan",
+      semanticOwner: 1,
+      actor: 1,
+      action: { type: "MulliganDecision", data: { choice: { type: "Keep" } } },
     });
 
     await adapter.initializeGame();
 
-    expect(mockGetAiAction).toHaveBeenCalledWith("Medium", 1);
-    expect(mockSubmitAction).toHaveBeenCalledWith(
-      { type: "MulliganDecision", data: { choice: { type: "Keep" } } },
-      1,
-    );
+    expect(mockGetAiActionProposal).toHaveBeenCalledWith("Medium", 1);
+    expect(mocks.submitAiActionProposal).toHaveBeenCalledWith(expect.objectContaining({
+      token: "proposal-mulligan",
+    }));
+  });
+
+  it("bounds repeated stale AI proposals", async () => {
+    const { adapter } = makeHost(2);
+    await adapter.initialize();
+    await adapter.applySeatMutation({
+      type: "SetKind",
+      data: {
+        seatIndex: 1,
+        kind: {
+          type: "Ai",
+          data: { difficulty: "Medium", deck: { type: "Random" } },
+        },
+      },
+    });
+
+    mockGetState.mockResolvedValue({
+      waiting_for: { type: "Priority", data: { player: 1 } },
+      priority_player: 1,
+    });
+    mockGetAiActionProposal.mockResolvedValue({
+      token: "proposal-stale",
+      semanticOwner: 1,
+      actor: 1,
+      action: { type: "PassPriority" },
+    });
+    mockSubmitAiActionProposal.mockResolvedValue({
+      status: "stale",
+      reason: "decision_changed_or_action_outside_issued_bounds",
+    });
+
+    await expect(adapter.initializeGame()).rejects.toMatchObject({
+      code: "P2P_ERROR",
+    });
+    expect(mocks.submitAiActionProposal).toHaveBeenCalledTimes(4);
   });
 
   it("keeps the host AI loop silent when the host controls an AI seat's turn", async () => {
@@ -787,7 +831,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
 
     await adapter.initializeGame();
 
-    expect(mockGetAiAction).not.toHaveBeenCalled();
+    expect(mockGetAiActionProposal).not.toHaveBeenCalled();
     expect(mockSubmitAction).not.toHaveBeenCalled();
   });
 
@@ -818,12 +862,19 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         waiting_for: { type: "Priority", data: { player: 0 } },
         priority_player: 0,
       });
-    mockGetAiAction.mockResolvedValueOnce({ type: "PassPriority" });
+    mockGetAiActionProposal.mockResolvedValueOnce({
+      token: "proposal-priority",
+      semanticOwner: 0,
+      actor: 1,
+      action: { type: "PassPriority" },
+    });
 
     await adapter.initializeGame();
 
-    expect(mockGetAiAction).toHaveBeenCalledWith("Medium", 1);
-    expect(mockSubmitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 1);
+    expect(mockGetAiActionProposal).toHaveBeenCalledWith("Medium", 1);
+    expect(mocks.submitAiActionProposal).toHaveBeenCalledWith(expect.objectContaining({
+      token: "proposal-priority",
+    }));
   });
 
   it("issues unique tokens per guest and includes them in per-seat game_setup", async () => {
@@ -1208,6 +1259,32 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     await expect(adapter.submitAction({ type: "PassPriority" }, 0)).rejects.toThrow(
       /paused-disconnect/,
     );
+  });
+
+  it("blocks AI proposal submission while paused-disconnect", async () => {
+    const { adapter, emitConnection } = makeHost(3, 5_000);
+    await adapter.initialize();
+    const g1 = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: [], sideboard: [] } },
+    });
+    await adapter.initializeGame();
+
+    g1.simulateClose();
+
+    await expect(adapter.submitAiActionProposal({
+      token: "proposal-paused",
+      semanticOwner: 0,
+      actor: 0,
+      action: { type: "PassPriority" },
+    })).rejects.toMatchObject({
+      code: "P2P_PAUSED",
+    });
+    expect(mocks.submitAiActionProposal).not.toHaveBeenCalled();
   });
 
   // Regression guard: the wire must carry legalActionsByObject, spellCosts,

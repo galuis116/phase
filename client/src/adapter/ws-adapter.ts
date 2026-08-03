@@ -792,10 +792,6 @@ export class WebSocketAdapter implements EngineAdapter {
     return this.snapshot.state;
   }
 
-  getAiAction(_difficulty: string, _playerId: number): GameAction | null {
-    return null;
-  }
-
   async getLegalActions(): Promise<LegalActionsResult> {
     return this.snapshot?.legalResult ?? EMPTY_LEGAL_ACTIONS;
   }

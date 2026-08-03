@@ -69,7 +69,8 @@ use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::doc::{
     stamp_printed_ability_slot, stamp_printed_trigger_slot, OracleDocBuilder, OracleDocIr,
     OracleItemId, OracleItemIr, OracleNodeIr, OracleSourceSpan, OracleUnitSource,
-    PrintedAbilityIndex, PrintedTriggerIndex, SpellPayloadIr, UnsupportedAbilityIr,
+    PrintedAbilityIndex, PrintedTriggerIndex, RelationSynthesisIr, SpellPayloadIr,
+    UnsupportedAbilityIr,
 };
 use super::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr, ResidualConditionPolicy,
@@ -1273,9 +1274,42 @@ fn item_static(item: &OracleItemIr) -> Option<&StaticDefinition> {
 /// list, pairing producer/consumer items by `OracleItemId`. Runs at parse time;
 /// both the main and Class document-construction paths converge here.
 fn finalize_document_relations(mut doc: OracleDocIr, types: &[String]) -> OracleDocIr {
-    doc.relations
-        .extend(detect_document_relations(&doc.items, types));
+    let relations = detect_document_relations(&doc.items, types);
+    finalize_relation_syntheses(&mut doc, &relations);
+    doc.relations.extend(relations);
     doc
+}
+
+/// Install relation-derived nodes onto their already-emitted source item. This
+/// preserves identity, source provenance, source order, and the builder's
+/// historical printed-slot accounting; the builder deliberately cannot emit a
+/// relation synthesis as a fresh item.
+fn finalize_relation_syntheses(doc: &mut OracleDocIr, relations: &[DocumentRelationIr]) {
+    for relation in relations {
+        let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::CopyChosenHost {
+            chooser,
+            copy_static,
+            filter,
+            description,
+        }) = relation
+        else {
+            continue;
+        };
+        let Some(item) = doc.items.iter_mut().find(|item| item.id == *chooser) else {
+            continue;
+        };
+        // Fail closed if a relation producer no longer names the unsupported
+        // chooser form it proved during discovery. Never overwrite another IR
+        // kind just because its id happens to match.
+        if !matches!(&item.node, OracleNodeIr::Unsupported { .. }) {
+            continue;
+        }
+        item.node = OracleNodeIr::RelationSynthesis(RelationSynthesisIr {
+            filter: filter.clone(),
+            description: description.clone(),
+            copy_static: *copy_static,
+        });
+    }
 }
 
 fn detect_document_relations(items: &[OracleItemIr], types: &[String]) -> Vec<DocumentRelationIr> {
@@ -1838,80 +1872,39 @@ fn detect_linked_choice_copy_chosen_host(
     items: &[OracleItemIr],
     relations: &mut Vec<DocumentRelationIr>,
 ) {
-    let chooser = items.iter().find(|item| {
-        item_ability(item).is_some_and(|def| ability_is_as_enters_choose_permanent_gap(&def))
-    });
+    let chooser = items.iter().find_map(as_enters_choose_permanent_gap_item);
     let copy_static = items.iter().find(|item| {
         item_static(item).is_some_and(|s| {
             s.modifications
                 .contains(&ContinuousModification::CopyChosen)
         })
     });
-    if let (Some(chooser), Some(copy_static)) = (chooser, copy_static) {
-        if chooser.id != copy_static.id {
+    if let (Some((chooser, filter, description)), Some(copy_static)) = (chooser, copy_static) {
+        if chooser != copy_static.id {
             relations.push(DocumentRelationIr::LinkedChoice(
                 LinkedChoiceKind::CopyChosenHost {
-                    chooser: chooser.id,
+                    chooser,
                     copy_static: copy_static.id,
+                    filter,
+                    description,
                 },
             ));
         }
     }
 }
 
-/// CR 607.2d + CR 707.2c + CR 614.12a: Replace the proven chooser gap ability
-/// with a Moved `ChoosePermanent` replacement. Filter is re-derived from the
-/// Unimplemented description so line-local parse never assigns copy-host
-/// semantics without this relation.
-fn apply_linked_choice_copy_chosen_host(
-    result: &mut ParsedAbilities,
-    relations: &[DocumentRelationIr],
-    ability_ids: &mut Vec<OracleItemId>,
-    replacement_ids: &mut Vec<OracleItemId>,
-) {
-    for relation in relations {
-        let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::CopyChosenHost { chooser, .. }) =
-            relation
-        else {
-            continue;
-        };
-        let Some(ability_pos) = position_of(ability_ids, *chooser) else {
-            continue;
-        };
-        let Some(description) = result.abilities[ability_pos]
-            .effect
-            .unimplemented_description()
-            .map(str::to_owned)
-        else {
-            continue;
-        };
-        let Some(filter) = filter_from_as_enters_choose_permanent_text(&description) else {
-            continue;
-        };
-        result.abilities.remove(ability_pos);
-        ability_ids.remove(ability_pos);
-        let execute =
-            AbilityDefinition::new(AbilityKind::Spell, Effect::ChoosePermanent { filter });
-        result.replacements.push(
-            ReplacementDefinition::new(ReplacementEvent::Moved)
-                .execute(execute)
-                .valid_card(TargetFilter::SelfRef)
-                // CR 614.1c: battlefield-entry-scoped.
-                .destination_zone(Zone::Battlefield)
-                .description(description),
-        );
-        replacement_ids.push(*chooser);
-    }
-}
-
-/// An Unimplemented ability whose fragment is an as-enters permanent-object
-/// choice ("As … enters, choose a creature/permanent…"). Framing + Typed filter
-/// must both match — same grammar as `as_enters_choose_permanent_filter`.
-fn ability_is_as_enters_choose_permanent_gap(def: &AbilityDefinition) -> bool {
-    let Some(description) = def.effect.unimplemented_description() else {
-        return false;
+/// Typed facts from a proven unsupported chooser source. The legacy post-fold
+/// path read `Effect::Unimplemented`'s description, which
+/// `lower_unsupported_node` derives from this residual's fragment (not its
+/// display description), so relation synthesis preserves that exact contract.
+fn as_enters_choose_permanent_gap_item(
+    item: &OracleItemIr,
+) -> Option<(OracleItemId, TargetFilter, String)> {
+    let OracleNodeIr::Unsupported { unsupported, .. } = &item.node else {
+        return None;
     };
-    filter_from_as_enters_choose_permanent_text(description).is_some()
+    let filter = filter_from_as_enters_choose_permanent_text(&unsupported.fragment)?;
+    Some((item.id, filter, unsupported.fragment.clone()))
 }
 
 fn filter_from_as_enters_choose_permanent_text(description: &str) -> Option<TargetFilter> {
@@ -3043,6 +3036,11 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     let mut trigger_ids: Vec<OracleItemId> = Vec::new();
     let mut static_ids: Vec<OracleItemId> = Vec::new();
     let mut replacement_ids: Vec<OracleItemId> = Vec::new();
+    // An already-emitted unsupported chooser can become a relation-synthesized
+    // replacement without entering `result.abilities`.
+    // Its historical printed slot still exists, so this source-order counter is
+    // deliberately independent of the published ability vector length.
+    let mut printed_ability_slot = 0usize;
     // CR 707.9a printed slots are resolved in this loop, not in
     // `OracleDocBuilder::finish` where they used to be. The stamp rewrites the
     // `placeholder()` (= 0) the dispatch loop baked into each
@@ -3054,9 +3052,9 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     // source-ordered `BTreeMap` and count each category separately, so the k-th
     // spell item is at ability slot k either way.
     //
-    // The slot IS `result.<category>.len()` at the moment of the push, which is
-    // what makes this the correct seam rather than merely a possible one. Stamped
-    // BEFORE the relation passes below, matching the pre-relation state the
+    // The slot counter advances for every source spell item, including a
+    // `RelationSynthesis` that publishes only a replacement. Stamped BEFORE the
+    // relation passes below, matching the pre-relation state the
     // `finish()` walk saw — several of those passes insert into, remove from, and
     // move ids between the category tracks.
     //
@@ -3067,9 +3065,10 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         match &item.node {
             OracleNodeIr::Spell(ability_ir) => {
                 let mut def = lower_ability_ir(ability_ir);
-                stamp_printed_ability_slot(&mut def, result.abilities.len());
+                stamp_printed_ability_slot(&mut def, printed_ability_slot);
                 result.abilities.push(def);
                 ability_ids.push(item.id);
+                printed_ability_slot += 1;
             }
             // Same three steps as the two arms around it: lower, stamp the
             // CR 707.9a printed ability slot, push. The residual is stamped like
@@ -3080,9 +3079,28 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
                 min_x_value,
             } => {
                 let mut def = lower_unsupported_node(unsupported, *min_x_value);
-                stamp_printed_ability_slot(&mut def, result.abilities.len());
+                stamp_printed_ability_slot(&mut def, printed_ability_slot);
                 result.abilities.push(def);
                 ability_ids.push(item.id);
+                printed_ability_slot += 1;
+            }
+            OracleNodeIr::RelationSynthesis(synthesis) => {
+                let execute = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChoosePermanent {
+                        filter: synthesis.filter.clone(),
+                    },
+                );
+                result.replacements.push(
+                    ReplacementDefinition::new(ReplacementEvent::Moved)
+                        .execute(execute)
+                        .valid_card(TargetFilter::SelfRef)
+                        // CR 614.1c: battlefield-entry-scoped.
+                        .destination_zone(Zone::Battlefield)
+                        .description(synthesis.description.clone()),
+                );
+                replacement_ids.push(item.id);
+                printed_ability_slot += 1;
             }
             OracleNodeIr::Trigger(trigger_node) => {
                 let mut def = lower_trigger_node_ir(trigger_node);
@@ -3129,9 +3147,10 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
             }
             OracleNodeIr::PreLoweredSpell(def) => {
                 let mut def = def.clone();
-                stamp_printed_ability_slot(&mut def, result.abilities.len());
+                stamp_printed_ability_slot(&mut def, printed_ability_slot);
                 result.abilities.push(def);
                 ability_ids.push(item.id);
+                printed_ability_slot += 1;
             }
         }
     }
@@ -3166,12 +3185,6 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     );
     reconcile_host_bound_phase_outs(&mut result);
     apply_linked_choice_persisted_player(&mut result, &ir.relations, &ability_ids, &trigger_ids);
-    apply_linked_choice_copy_chosen_host(
-        &mut result,
-        &ir.relations,
-        &mut ability_ids,
-        &mut replacement_ids,
-    );
 
     // Architectural rule: the parser must never silently discard Oracle text. Run
     // the swallow audit against the parsed result so any unrepresented clause
@@ -3189,11 +3202,9 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     //
     // The tracks are sound to zip here: of the relation passes above,
     // `apply_linked_choice_etb_counter` removes from `result.replacements` and
-    // `replacement_ids` at the same index, and `apply_linked_choice_copy_chosen_host`
-    // moves an ability id onto the replacement track. This is also exactly why
-    // the audit stays HERE, post-relation: a pre-lowering audit is blind to
-    // relation-synthesized semantics (that pass *synthesizes a replacement*), so
-    // the false-positive wave U1 bounded to 31 faces would be caused, not avoided.
+    // `replacement_ids` at the same index. Relation synthesis already populated
+    // the replacement track during the source-order fold, which is why the audit
+    // stays HERE: a pre-lowering audit is blind to that semantic output.
     //
     // Emitted into a local vec and appended, rather than passing `&mut
     // ir.diagnostics` directly: the audit reads `ir.items` and writes the
@@ -3897,6 +3908,11 @@ impl<'a> DocEmitter<'a> {
             match node {
                 OracleNodeIr::Static(ir) => self.static_ir_at(item_line, ir),
                 OracleNodeIr::Trigger(ir) => self.trigger_ir_at(item_line, ir),
+                OracleNodeIr::RelationSynthesis(_) => {
+                    panic!(
+                        "relation synthesis is finalization-only and cannot be forwarded by DocEmitter"
+                    );
+                }
                 other => {
                     self.emit_at(item_line, other);
                 }
@@ -7628,9 +7644,16 @@ fn find_top_level_colon(line: &str) -> Option<usize> {
 /// decline rather than mis-classify.
 /// The single-gate `during`-role / speed sub-combinator, factored out so it can
 /// be the first half of a compound "X and only Y" / "X, Y" activation-timing
-/// gate. Each arm emits an EXISTING enforced `ActivationRestriction` value —
-/// the opponent-turn arm reuses `opponents_turn_activation_restriction()`
-/// (= `RequiresCondition{Not(IsYourTurn)}`), NOT a new variant.
+/// gate. Every arm emits an EXISTING `ActivationRestriction` variant — the
+/// opponent-scoped arms express their scope as a `ParsedCondition` under the
+/// existing `RequiresCondition`, so no `DuringOpponents*` restriction sibling
+/// is introduced.
+///
+/// The `during ...` half is nested prefix dispatch rather than a flat list of
+/// whole-clause tags: the shared `"during "` prefix is matched once, then the
+/// turn-role and turn-window axes are consumed by their own sub-combinators, so
+/// the four role×window gates come from four small tags instead of eight
+/// enumerated phrases (and a new spelling on either axis is a one-tag change).
 fn parse_activation_during_role_gate(i: &str) -> OracleResult<'_, ActivationRestriction> {
     alt((
         value(
@@ -7638,21 +7661,7 @@ fn parse_activation_during_role_gate(i: &str) -> OracleResult<'_, ActivationRest
             tag::<_, _, OracleError<'_>>("as a sorcery"),
         ),
         value(ActivationRestriction::AsInstant, tag("as an instant")),
-        value(
-            opponents_turn_activation_restriction(),
-            alt((
-                tag("during an opponent's turn"),
-                tag("during an opponents turn"),
-            )),
-        ),
-        value(
-            ActivationRestriction::DuringYourTurn,
-            alt((tag("during your turn"), tag("during their turn"))),
-        ),
-        value(
-            ActivationRestriction::DuringYourUpkeep,
-            alt((tag("during your upkeep"), tag("during their upkeep"))),
-        ),
+        parse_activation_during_gate,
     ))
     .parse(i)
 }
@@ -7701,8 +7710,9 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
         // CR 602.5b + CR 102.1 + CR 509.1: compound
         // "during <turn-role> [and only | , ] before combat/attackers"
         // activation-timing gate — turn-role half reuses
-        // RequiresCondition{Not(IsYourTurn)} / DuringYourTurn, combat-window half
-        // reuses BeforeAttackersDeclared. Composed with a trailing
+        // RequiresCondition{IsOpponentsTurn} / DuringYourTurn (CR 102.3 +
+        // CR 805.4a), combat-window half reuses BeforeAttackersDeclared.
+        // Composed with a trailing
         // `opt(pair(separator, before-window))`, no permutation enumeration and no
         // `contains`/`split_once` dispatch. Preserves the single-gate behavior
         // above (a bare "during an opponent's turn" still returns one restriction).
@@ -7853,17 +7863,123 @@ fn preserve_activation_timing_parenthetical(raw_line: &str) -> Option<String> {
     Some(format!("{prefix} {timing_text}."))
 }
 
+/// CR 102.1 + CR 102.3: whose turn an activation-timing gate scopes to. The two
+/// roles are NOT complements — under shared team turns (CR 805.4) "your turn"
+/// is a seat question and "an opponent's turn" is a team question — so each
+/// lowers to its own predicate rather than one negated flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivationTurnRole {
+    /// "your " / "their " — the activating player's own turn.
+    Yours,
+    /// "an opponent's " / "an opponents " — a turn of a player on another team.
+    Opponents,
+}
+
+/// CR 500.1 + CR 503.1: which window of the scoped turn the gate admits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivationTurnWindow {
+    /// "turn" — the whole turn, any step or phase.
+    WholeTurn,
+    /// "upkeep" — the upkeep step only.
+    Upkeep,
+}
+
+/// The turn-role axis of a `during ...` activation gate. Both possessive
+/// spellings of the opponent role are accepted (Oracle text and the misparse
+/// corpus both occur with and without the apostrophe).
+fn parse_activation_turn_role(i: &str) -> OracleResult<'_, ActivationTurnRole> {
+    alt((
+        value(
+            ActivationTurnRole::Opponents,
+            alt((
+                tag::<_, _, OracleError<'_>>("an opponent's "),
+                tag("an opponents "),
+            )),
+        ),
+        value(
+            ActivationTurnRole::Yours,
+            // "their" is the activating player's possessive — equivalent to
+            // "your" once an activator is fixed.
+            alt((tag("your "), tag("their "))),
+        ),
+    ))
+    .parse(i)
+}
+
+/// The turn-window axis of a `during ...` activation gate.
+fn parse_activation_turn_window(i: &str) -> OracleResult<'_, ActivationTurnWindow> {
+    alt((
+        value(
+            ActivationTurnWindow::Upkeep,
+            tag::<_, _, OracleError<'_>>("upkeep"),
+        ),
+        value(ActivationTurnWindow::WholeTurn, tag("turn")),
+    ))
+    .parse(i)
+}
+
+/// CR 602.5b: the composed `during <role> <window>` activation gate — the
+/// shared prefix is consumed once, then each axis by its own sub-combinator.
+fn parse_activation_during_gate(i: &str) -> OracleResult<'_, ActivationRestriction> {
+    let (rest, (role, window)) = preceded(
+        tag::<_, _, OracleError<'_>>("during "),
+        (parse_activation_turn_role, parse_activation_turn_window),
+    )
+    .parse(i)?;
+    Ok((rest, activation_turn_gate(role, window)))
+}
+
+/// CR 602.5b: map a (role, window) pair onto an EXISTING enforced
+/// `ActivationRestriction`. No arm introduces a new variant — the opponent
+/// arms compose `ParsedCondition` leaves under `RequiresCondition`.
+fn activation_turn_gate(
+    role: ActivationTurnRole,
+    window: ActivationTurnWindow,
+) -> ActivationRestriction {
+    match (role, window) {
+        (ActivationTurnRole::Yours, ActivationTurnWindow::WholeTurn) => {
+            ActivationRestriction::DuringYourTurn
+        }
+        (ActivationTurnRole::Yours, ActivationTurnWindow::Upkeep) => {
+            ActivationRestriction::DuringYourUpkeep
+        }
+        (ActivationTurnRole::Opponents, ActivationTurnWindow::WholeTurn) => {
+            opponents_turn_activation_restriction()
+        }
+        (ActivationTurnRole::Opponents, ActivationTurnWindow::Upkeep) => {
+            opponents_upkeep_activation_restriction()
+        }
+    }
+}
+
 fn opponents_turn_activation_restriction() -> ActivationRestriction {
     ActivationRestriction::RequiresCondition {
         condition: Some(opponents_turn_activation_condition()),
     }
 }
 
-/// CR 602.5b + CR 102.1 + CR 109.5: "Activate only during an opponent's turn"
-/// gates activation to turns where the activator is not the active player.
+/// CR 602.5b + CR 102.3 + CR 805.4a: "Activate only during an opponent's turn"
+/// gates activation to turns belonging to an opposing TEAM. Not
+/// `Not(IsYourTurn)`: under shared team turns that also admits a turn where a
+/// teammate holds `active_player`, which is the activator's own team's turn.
 fn opponents_turn_activation_condition() -> ParsedCondition {
-    ParsedCondition::Not {
-        condition: Box::new(ParsedCondition::IsYourTurn),
+    ParsedCondition::IsOpponentsTurn
+}
+
+/// CR 602.5b + CR 102.3 + CR 503.1: "Activate only during an opponent's upkeep"
+/// gates activation to the upkeep step of an opponent's turn (Trade Caravan).
+/// Composed from the same team-aware opponent-turn leaf as
+/// `opponents_turn_activation_condition` plus the `IsDuringUpkeep` step
+/// predicate, so the opponent scope reuses the existing composition idiom
+/// instead of a dedicated `DuringOpponents*` restriction sibling per step.
+fn opponents_upkeep_activation_restriction() -> ActivationRestriction {
+    ActivationRestriction::RequiresCondition {
+        condition: Some(ParsedCondition::And {
+            conditions: vec![
+                opponents_turn_activation_condition(),
+                ParsedCondition::IsDuringUpkeep,
+            ],
+        }),
     }
 }
 

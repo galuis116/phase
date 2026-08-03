@@ -2445,10 +2445,45 @@ fn loop_shortcut_projection(
     }
     let count = match schema.iteration_count {
         crate::analysis::decision_template::IterationCount::Fixed(suggested) => {
+            // CR 732.2a (MagicCompRules.txt:6372): the picker's ceiling is the offer's own
+            // CR 704 bound, never the raw global safety limit — a count above it would
+            // specify a sequence containing an elimination, which is a conditional action.
+            // The engine owns this number; the frontend renders it.
+            //
+            // CR 704.5a (MagicCompRules.txt:5492): `elimination_bounds` returns `0` to
+            // mean "no legal repetition exists and the caller must not offer". A
+            // published offer carrying
+            // `0` is an authority violation, not a number to repair — clamping it to `1`
+            // renders a one-iteration offer whose single iteration eliminates a player
+            // mid-proposal. Reject it in EVERY build: a `debug_assert!` disappears from
+            // release, which is precisely where the clamp is what the player sees.
+            //
+            // THIS GUARD IS ALSO LOAD-BEARING AGAINST A PANIC, not merely against a bad
+            // offer. With the lower clamp replaced by `.min(MAX_SHORTCUT_CYCLES)` below,
+            // a `0` authority yields `max == 0`, and `suggested.clamp(1, max)` is then
+            // `Ord::clamp(1, 0)`, whose `assert!(min <= max)` is a PLAIN assert that
+            // survives release (measured: an `-O` build of `5u32.clamp(1, 0)` panics with
+            // `min > max. min = 1, max = 0`). Removing this guard turns a malformed
+            // restored dump into an engine panic.
+            //
+            // LATENT, NOT LIVE (measured at this head): no in-tree producer can reach this
+            // arm with `0`. `build_shortcut_schema` (`game/engine.rs`) has exactly two call
+            // sites and both pass `MAX_SHORTCUT_CYCLES`; the per-viewer projection in
+            // `game/visibility.rs` only re-projects an existing schema's value; and
+            // `ShortcutDecisionSchema::default().max_iterations == default_max_iterations()
+            // == MAX_SHORTCUT_CYCLES` (`analysis/decision_template.rs`), which is also the
+            // `#[serde(default)]` for a pre-bound save. The only way `0`
+            // arrives is a LOADED/PERSISTED authority that explicitly serializes it. This
+            // guard is therefore the fail-closed twin of item E: a latent hole shut before
+            // it opens.
+            if schema.max_iterations == 0 {
+                return Err(InteractionReasonCode::InvalidAuthorityState);
+            }
+            let max = schema.max_iterations.min(MAX_SHORTCUT_CYCLES);
             InteractionShortcutCountSpec::Fixed {
                 min: 1,
-                max: MAX_SHORTCUT_CYCLES,
-                suggested: suggested.clamp(1, MAX_SHORTCUT_CYCLES),
+                max,
+                suggested: suggested.clamp(1, max),
             }
         }
         crate::analysis::decision_template::IterationCount::UntilLethal => {

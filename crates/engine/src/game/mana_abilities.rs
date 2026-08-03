@@ -35,14 +35,20 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 /// Check if a typed ability definition represents a mana ability (CR 605).
 /// CR 605.3: Mana abilities produce mana and resolve immediately without using the stack.
-/// CR 605.1a: A mana ability cannot have targets. If the effect produces mana but the
-/// ability has targeting (e.g., via `multi_target`), it must use the stack instead.
-/// Currently `Effect::Mana` has no embedded target field and no `AbilityCost` variant
-/// implies targeting, so this check is defensive — if future variants introduce
-/// targeting on mana-producing abilities, this guard ensures correctness.
+/// CR 605.1a: A mana ability cannot have targets. `Effect::Mana` carries a
+/// `ManaTargetRole` naming its recipient and/or count-source player targets;
+/// any declared role means the ability targets and must use the stack. The
+/// `multi_target` mechanism is checked alongside it.
 pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
+    // CR 605.1a: A mana ability "doesn't require a target." Read the ROLE's
+    // declared filters: ANY declared role — recipient or count source — means
+    // the ability names a target and therefore uses the stack (Jeska's Will
+    // mode 1: "Add {R} for each card in target opponent's hand").
+    // `declared_filters`, not `surfaced_filters`: a context-ref recipient still
+    // makes this not-a-mana-ability under today's behavior, and this change
+    // must not widen mana-ability status for any shipping card.
     let target_attached = match &*ability_def.effect {
-        Effect::Mana { target, .. } => target.as_ref(),
+        Effect::Mana { target, .. } => target.as_ref().and_then(|r| r.declared_filters().next()),
         _ => return false,
     };
     // CR 605.1a: A targeted mana-producing ability is not a mana ability.
@@ -1323,6 +1329,73 @@ impl ManaActivationGates {
     }
 }
 
+/// CR 305.6: builds the minimal synthetic `AbilityDefinition` (Tap cost,
+/// `Effect::Mana`) standing in for a land's INTRINSIC "{T}: Add [mana
+/// symbol]" ability — the ability every land with a basic land type has
+/// whether or not any `AbilityDefinition` object represents it. Used so a
+/// legality check's `kind`/`exemption`/cost axes (e.g. Damping Matrix's
+/// "unless they're mana abilities" carve-out) evaluate identically to how
+/// they would against a real, printed mana ability.
+fn intrinsic_land_mana_ability_definition(color: ManaColor) -> AbilityDefinition {
+    AbilityDefinition::new(
+        crate::types::ability::AbilityKind::Activated,
+        Effect::Mana {
+            produced: ManaProduction::Fixed {
+                colors: vec![color],
+                contribution: crate::types::ability::ManaContribution::Base,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        },
+    )
+    .cost(AbilityCost::Tap)
+}
+
+/// CR 305.6 + CR 602.5: Is a land's basic-land-type INTRINSIC mana ability
+/// currently blocked — by ANY of the gates a printed mana ability would be
+/// checked against? `mana_sources::land_mana_options`'s bare-subtype
+/// fallback synthesizes a `ManaSourceOption` for a land with no
+/// `AbilityDefinition` object at all (Urborg/Blood-Moon-class grants), but
+/// CR 305.6's intrinsic ability is still an activated mana ability, so every
+/// gate `mana_ability_ready_without_simulation_gated` applies to a real one —
+/// phased-out (CR 702.26b), detained (CR 701.35a), zone (CR 113.6), tapped/
+/// can't-tap (CR 101.2 + CR 107.5 + CR 601.2h + CR 602.2b), summoning sickness
+/// (CR 302.6), CantBeActivated/CantActivateDuring (CR 602.5), static
+/// activation restrictions (CR 604/605.3b) — must apply to it too. Routes the
+/// synthetic definition through that SAME single-authority readiness check
+/// rather than re-implementing any subset of it: the function takes an
+/// `AbilityDefinition` by reference and never indexes `obj.abilities`, so a
+/// synthesized definition with no real storage slot is exactly as valid an
+/// input as a printed one. `ability_index: 0` is inert here — the intrinsic
+/// ability carries empty `activation_restrictions` (so `ability_index` is
+/// never read by that check) and a bare `Tap` cost (whose payability check
+/// doesn't consult it either).
+pub(crate) fn intrinsic_land_mana_ability_blocked(
+    state: &GameState,
+    controller: PlayerId,
+    object_id: ObjectId,
+    color: ManaColor,
+    gates: Option<&ManaActivationGates>,
+) -> bool {
+    let ability_def = intrinsic_land_mana_ability_definition(color);
+    let ready = match gates {
+        Some(gates) => mana_ability_ready_without_simulation_gated(
+            state,
+            controller,
+            object_id,
+            0,
+            &ability_def,
+            gates,
+        ),
+        None => {
+            mana_ability_ready_without_simulation(state, controller, object_id, 0, &ability_def)
+        }
+    };
+    !ready
+}
+
 fn mana_ability_ready_without_simulation(
     state: &GameState,
     player: PlayerId,
@@ -1380,8 +1453,8 @@ fn mana_ability_ready_without_simulation_gated(
     if mana_sources::has_tap_component(&ability_def.cost) && obj.tapped {
         return false;
     }
-    // CR 701.26a + CR 508.1f: a "can't become tapped" source (e.g. a goaded mana
-    // dork) can't activate a tap-cost mana ability. A {Q} untap-cost ability is
+    // CR 101.2 + CR 107.5 + CR 601.2h + CR 602.2b: a "can't become tapped"
+    // source can't pay a tap-cost mana ability. A {Q} untap-cost ability is
     // unaffected — untapping is governed by `StaticMode::CantUntap`.
     if mana_sources::has_tap_component(&ability_def.cost)
         && crate::game::restrictions::object_cant_tap(state, source_id)
@@ -4205,6 +4278,61 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    use crate::game::test_fixtures::mana_fixture_roles;
+
+    /// Matrix rows 15c + 20 — CR 605.1a classification is unchanged. This reader
+    /// also bypasses `Effect::target_filter()`.
+    ///
+    /// CR 605.1a: a mana ability "doesn't require a target." Any declared role —
+    /// recipient OR count source, context-ref or not — means the ability names a
+    /// target and must use the stack. Writing this with `surfaced_filters()`
+    /// would wrongly PROMOTE the ten context-ref cards to mana abilities, letting
+    /// them resolve without the stack. The `target: None` positive is the reach
+    /// guard: a blanket `return false` would satisfy every negative below.
+    #[test]
+    fn is_mana_ability_classification_unchanged_for_every_fixture_role() {
+        use crate::types::ability::{ManaProduction, QuantityExpr};
+
+        let mk = |target| {
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Colorless {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target,
+                },
+            )
+        };
+
+        for (name, role) in mana_fixture_roles() {
+            assert!(
+                !is_mana_ability(&mk(Some(role))),
+                "{name}: a declared mana role means the ability targets (CR 605.1a)                  and must use the stack"
+            );
+        }
+
+        // Jeska's Will shape: a COUNT-SOURCE-only role is still a target.
+        assert!(
+            !is_mana_ability(&mk(Some(
+                crate::types::ability::ManaTargetRole::CountSource {
+                    count_source: crate::types::ability::TargetFilter::Player,
+                }
+            ))),
+            "a count-source-only mana ability targets and is not a mana ability"
+        );
+
+        // Reach guard / positive: an unqualified mana ability IS one.
+        assert!(
+            is_mana_ability(&mk(None)),
+            "an unqualified mana ability (Cabal Coffers class) is still a mana ability"
+        );
+    }
+
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityKind, AbilityTag, ActivationRestriction, Comparator,
@@ -6252,11 +6380,17 @@ mod tests {
         .expect("Treasure should activate into a color prompt");
 
         // O(N!) pre-fix blows far past this; O(N) post-fix stays well under it.
+        // The bound carries slack for parallel-schedule noise: MANA_READINESS_CALLS
+        // is a bare process-global, so any CONCURRENTLY-running test that exercises
+        // mana readiness increments it between this test's store(0) and load. The
+        // detector's discrimination survives the slack — the O(N!) regression this
+        // guards against produces >= 6! = 720 calls at N = 6, 15x over this bound,
+        // while observed schedule pollution is single-digit.
         assert!(
-            MANA_READINESS_CALLS.load(Ordering::Relaxed) <= 4 * N,
+            MANA_READINESS_CALLS.load(Ordering::Relaxed) <= 8 * N,
             "readiness calls must be linear in N (got {}, bound {})",
             MANA_READINESS_CALLS.load(Ordering::Relaxed),
-            4 * N
+            8 * N
         );
 
         let WaitingFor::ChooseManaColor {

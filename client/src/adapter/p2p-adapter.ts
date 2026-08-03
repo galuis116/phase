@@ -2,6 +2,8 @@ import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
 import type {
+  AiActionProposal,
+  AiProposalSubmission,
   EngineAdapter,
   EngineSnapshot,
   FormatConfig,
@@ -466,6 +468,9 @@ const DEFAULT_GRACE_PERIOD_MS = 30_000;
  */
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000];
 const RECONNECT_STEADY_STATE_MS = 60_000;
+// A stale proposal leaves the prompt unchanged, so cap retries to prevent a
+// persistent authority race from becoming a tight host-loop spin.
+const MAX_AI_PROPOSAL_STALE_RETRIES = 3;
 
 function defaultSeatState(playerCount: number, formatConfig?: FormatConfig): SeatState {
   return {
@@ -1133,8 +1138,10 @@ export class P2PHostAdapter implements EngineAdapter {
     if (this.nativeBridge) return;
     if (!this.gameStarted) return;
 
+    let staleRetries = 0;
     for (;;) {
       if (!this.ownsAuthority()) return;
+      if (this.gameRunState !== "running") return;
       const state = await this.wasm.getState();
       if (!state || typeof state !== "object" || !("waiting_for" in state)) {
         return;
@@ -1158,11 +1165,27 @@ export class P2PHostAdapter implements EngineAdapter {
       if (!aiSeat || aiSeat.type !== "Ai") {
         return;
       }
-      const action = await this.wasm.getAiAction(aiSeat.data.difficulty, actor);
-      if (!action) {
+      const proposal = await this.wasm.getAiActionProposal(aiSeat.data.difficulty, actor);
+      if (!proposal) {
         return;
       }
-      const result = await this.wasm.submitAction(action, actor);
+      const outcome = await this.wasm.submitAiActionProposal(proposal);
+      if (outcome.status === "stale") {
+        staleRetries += 1;
+        if (staleRetries > MAX_AI_PROPOSAL_STALE_RETRIES) {
+          throw new AdapterError(
+            "P2P_ERROR",
+            `AI proposal repeatedly stale: ${outcome.reason}`,
+            true,
+          );
+        }
+        continue;
+      }
+      if (outcome.status === "rejected") {
+        throw new AdapterError("P2P_ERROR", `AI proposal rejected: ${outcome.reason}`, false);
+      }
+      staleRetries = 0;
+      const result = outcome.result;
       await this.broadcastStateUpdate(result.events, result.log_entries);
       this.persistAuthoritativeState();
       this.emit({
@@ -1876,8 +1899,38 @@ export class P2PHostAdapter implements EngineAdapter {
     return this.wasm.getSnapshot();
   }
 
-  getAiAction(_difficulty: string, _playerId: number): GameAction | null {
-    return null;
+  getAiActionProposal(
+    difficulty: string,
+    playerId: number,
+  ): Promise<AiActionProposal | null> | AiActionProposal | null {
+    return this.nativeBridge
+      ? null
+      : this.wasm.getAiActionProposal(difficulty, playerId);
+  }
+
+  async submitAiActionProposal(
+    proposal: AiActionProposal,
+  ): Promise<AiProposalSubmission> {
+    if (!this.ownsAuthority()) {
+      return { status: "stale", reason: "P2P host authority changed" };
+    }
+    if (this.gameRunState !== "running") {
+      throw new AdapterError(
+        "P2P_PAUSED",
+        `Cannot submit AI proposal while game state is ${this.gameRunState}`,
+        true,
+      );
+    }
+    if (this.nativeBridge) {
+      return { status: "stale", reason: "native P2P authority owns AI decisions" };
+    }
+    const outcome = await this.wasm.submitAiActionProposal(proposal);
+    if (outcome.status === "applied") {
+      await this.broadcastStateUpdate(outcome.result.events, outcome.result.log_entries);
+      await this.runAiLoop();
+      this.persistAuthoritativeState();
+    }
+    return outcome;
   }
 
   restoreState(_state: PersistedGameState): void {
@@ -2792,10 +2845,6 @@ export class P2PGuestAdapter implements EngineAdapter {
     this.terminated = true;
     void clearP2PSession(this.sessionKey ?? this.hostPeerId);
     this.emit({ type: "terminalResult", result });
-  }
-
-  getAiAction(_difficulty: string, _playerId: number): GameAction | null {
-    return null;
   }
 
   restoreState(_state: PersistedGameState): void {

@@ -33,7 +33,7 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use crate::types::TriggerMode;
 
-use super::engine::EngineError;
+use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::mana_abilities;
 use super::mana_payment;
 use super::restrictions;
@@ -49,6 +49,153 @@ pub use crate::types::mana::ManaSourcePenalty;
 pub(crate) struct LiveManaOutputUnit {
     pub mana_type: ManaType,
     pub restrictions: Vec<ManaRestriction>,
+}
+
+/// The reducer-owned Priority entry point for a selected mana source.
+///
+/// This is intentionally a route rather than a legality result. The normal
+/// reducer remains responsible for validating the frozen selection before it
+/// activates the source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PriorityManaRoute {
+    LandTap,
+    NonlandActivation,
+}
+
+/// An engine-authored land-mana announcement for the Priority preflight.
+/// Its frozen selection can cross into the reducer facade only through the
+/// engine-only conversion capability.
+pub(in crate::game) struct PriorityLandManaAnnouncement {
+    selection: ManaSourceSelection,
+}
+
+impl PriorityLandManaAnnouncement {
+    fn new(selection: ManaSourceSelection) -> Self {
+        Self { selection }
+    }
+
+    pub(in crate::game) fn selection(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> &ManaSourceSelection {
+        &self.selection
+    }
+}
+
+/// An engine-authored nonland-mana announcement for the Priority preflight.
+/// Its frozen selection can cross into the reducer facade only through the
+/// engine-only conversion capability.
+pub(in crate::game) struct PriorityNonlandManaAnnouncement {
+    selection: ManaSourceSelection,
+}
+
+impl PriorityNonlandManaAnnouncement {
+    fn new(selection: ManaSourceSelection) -> Self {
+        Self { selection }
+    }
+
+    pub(in crate::game) fn selection(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> &ManaSourceSelection {
+        &self.selection
+    }
+}
+
+/// The provider's complete, family-partitioned mana announcements. The
+/// partition is intentionally opaque: only the Priority facade can consume it
+/// through its internal access capability.
+pub(in crate::game) struct PriorityManaAnnouncements {
+    land_taps: Vec<PriorityLandManaAnnouncement>,
+    nonland_activations: Vec<PriorityNonlandManaAnnouncement>,
+}
+
+/// An engine-authored undo announcement for a land tapped for mana in the
+/// current Priority window. The tracked object identity stays provider-owned
+/// until the Priority facade reconstructs the reducer primer.
+pub(in crate::game) struct PriorityUntapLandAnnouncement {
+    object_id: ObjectId,
+}
+
+impl PriorityUntapLandAnnouncement {
+    fn new(object_id: ObjectId) -> Self {
+        Self { object_id }
+    }
+
+    pub(in crate::game) fn object_id(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> ObjectId {
+        self.object_id
+    }
+}
+
+impl PriorityManaAnnouncements {
+    pub(in crate::game) fn into_partitioned(
+        self,
+    ) -> (
+        Vec<PriorityLandManaAnnouncement>,
+        Vec<PriorityNonlandManaAnnouncement>,
+    ) {
+        (self.land_taps, self.nonland_activations)
+    }
+}
+
+/// Classifies a source using its current characteristics, matching the
+/// reducer's Priority mana-action partition.
+pub(crate) fn priority_mana_route(
+    state: &GameState,
+    selection: &ManaSourceSelection,
+) -> Option<PriorityManaRoute> {
+    let object = state.objects.get(&selection.source.object_id)?;
+    if object.card_types.core_types.contains(&CoreType::Land) {
+        Some(PriorityManaRoute::LandTap)
+    } else {
+        Some(PriorityManaRoute::NonlandActivation)
+    }
+}
+
+/// Enumerates the mana provider's complete finite Priority announcements for
+/// the authenticated Priority holder. The normal reducer remains responsible
+/// for validating the frozen selection when the announcement is replayed.
+pub(in crate::game) fn priority_mana_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> PriorityManaAnnouncements {
+    let mut land_taps = Vec::new();
+    let mut nonland_activations = Vec::new();
+    for selection in activatable_mana_source_selections(state, principal.semantic_holder()) {
+        match priority_mana_route(state, &selection) {
+            Some(PriorityManaRoute::LandTap) => {
+                land_taps.push(PriorityLandManaAnnouncement::new(selection));
+            }
+            Some(PriorityManaRoute::NonlandActivation) => {
+                nonland_activations.push(PriorityNonlandManaAnnouncement::new(selection));
+            }
+            None => {}
+        }
+    }
+    PriorityManaAnnouncements {
+        land_taps,
+        nonland_activations,
+    }
+}
+
+/// Enumerates the current holder's existing mana-undo eligibility. The normal
+/// reducer remains authoritative for tracked membership and current object
+/// validity when the announcement is replayed on a clone.
+pub(in crate::game) fn priority_untap_land_announcements(
+    state: &GameState,
+    principal: &PriorityPrincipal,
+) -> Vec<PriorityUntapLandAnnouncement> {
+    state
+        .lands_tapped_for_mana
+        .get(&principal.semantic_holder())
+        .into_iter()
+        .flatten()
+        .copied()
+        .map(PriorityUntapLandAnnouncement::new)
+        .collect()
 }
 
 impl ManaSourcePenalty {
@@ -2348,26 +2495,62 @@ fn land_mana_options(
         gates,
     );
 
-    // Legacy fallback for basic-land subtype-only objects (no explicit mana ability).
-    if options.is_empty() {
+    // CR 305.6 + CR 602.5: Legacy fallback for basic-land subtype-only objects that
+    // carry NO EXPLICIT mana ability at all (a nonbasic granted a basic land
+    // type by Urborg/Blood Moon-class effects with no accompanying
+    // `Effect::Mana` grant). This must NOT fire merely because
+    // `scan_mana_abilities` came back empty — it can be empty because a REAL
+    // `Effect::Mana` ability exists but was just filtered out by a legality
+    // gate (CantBeActivated, CantActivateDuring, an unsatisfied activation
+    // condition). Falling back to unconditional subtype-inferred production
+    // in that case would silently defeat the gate that filtered it (issue
+    // #6469: Karn, the Great Creator's "activated abilities of artifacts your
+    // opponents control can't be activated" stopped blocking a Liquimetal-
+    // Coating-turned-artifact land's own {T}: Add mana ability, because the
+    // ability's legitimate absence from `options` was mistaken for "no
+    // ability exists").
+    let has_explicit_mana_ability = obj
+        .abilities
+        .iter()
+        .any(|ability| matches!(*ability.effect, Effect::Mana { .. }));
+    if options.is_empty() && !has_explicit_mana_ability {
         if let Some(mana_type) = obj
             .card_types
             .subtypes
             .iter()
             .find_map(|s| mana_payment::land_subtype_to_mana_type(s))
         {
-            options.push(ManaSourceOption {
-                object_id,
-                ability_index: None,
-                mana_type,
-                source_could_produce_two_or_more_colors: source_could_produce_two_or_more_colors(
-                    state, object_id, controller,
-                ),
-                penalty: ManaSourcePenalty::None,
-                atomic_combination: None,
-                restrictions: Vec::new(),
-                taps_for_mana_overrides: Vec::new(),
-            });
+            // CR 305.6 + CR 602.5: the intrinsic "{T}: Add [mana symbol]"
+            // ability this fallback synthesizes is still an activated (mana)
+            // ability — every readiness gate a printed one is checked against
+            // (phased-out, detained, tapped/can't-tap, summoning sickness,
+            // CantBeActivated/CantActivateDuring, static activation
+            // restrictions) must apply to it too, not just the two activation-
+            // prohibition statics. Mirrors the `require_current_payability`
+            // gating `is_active_tap_mana_ability` applies to a real ability: the
+            // auto-tap PLANNING pass (`require_current_payability == false`)
+            // does not consult per-source legality gates for ANY mana source,
+            // real or intrinsic, so this only fires on the interactive/
+            // legal-action path.
+            let blocked = require_current_payability
+                && mana_type_to_color(mana_type).is_some_and(|color| {
+                    mana_abilities::intrinsic_land_mana_ability_blocked(
+                        state, controller, object_id, color, gates,
+                    )
+                });
+            if !blocked {
+                options.push(ManaSourceOption {
+                    object_id,
+                    ability_index: None,
+                    mana_type,
+                    source_could_produce_two_or_more_colors:
+                        source_could_produce_two_or_more_colors(state, object_id, controller),
+                    penalty: ManaSourcePenalty::None,
+                    atomic_combination: None,
+                    restrictions: Vec::new(),
+                    taps_for_mana_overrides: Vec::new(),
+                });
+            }
         }
     }
 
@@ -5143,6 +5326,57 @@ mod tests {
             player: PlayerId(0),
         };
         forest
+    }
+
+    #[test]
+    fn priority_mana_route_uses_current_source_characteristics() {
+        let mut state = GameState::new_two_player(42);
+        let forest = subtype_forest_with_priority(&mut state);
+        let artifact = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Mana Rock".to_string(),
+            Zone::Battlefield,
+        );
+        let artifact_object = state.objects.get_mut(&artifact).unwrap();
+        artifact_object
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        Arc::make_mut(&mut artifact_object.abilities).push(verge_ability(ManaColor::Green));
+
+        let selections = activatable_mana_source_selections(&state, PlayerId(0));
+        let forest_selection = selections
+            .iter()
+            .find(|selection| selection.source.object_id == forest)
+            .expect("Forest fallback supplies a mana selection");
+        let artifact_selection = selections
+            .iter()
+            .find(|selection| selection.source.object_id == artifact)
+            .expect("mana artifact supplies a mana selection");
+
+        assert_eq!(
+            priority_mana_route(&state, forest_selection),
+            Some(PriorityManaRoute::LandTap)
+        );
+        assert_eq!(
+            priority_mana_route(&state, artifact_selection),
+            Some(PriorityManaRoute::NonlandActivation)
+        );
+
+        state
+            .objects
+            .get_mut(&forest)
+            .expect("Forest remains a live object")
+            .card_types
+            .core_types
+            .clear();
+        assert_eq!(
+            priority_mana_route(&state, forest_selection),
+            Some(PriorityManaRoute::NonlandActivation),
+            "the route follows current characteristics; the clone reducer later rejects a stale selection"
+        );
     }
 
     #[test]
